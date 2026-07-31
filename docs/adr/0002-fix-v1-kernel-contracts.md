@@ -1,0 +1,3 @@
+# Fix the v1 kernel contracts and default to Cubic
+
+GeoRBF v1 admits exactly Gaussian, classic inverse multiquadric, Cubic, and three-dimensional Wendland C2, and uses Cubic as the default because it introduces no hidden spatial scale. Each entry is an indivisible, versioned mathematical contract covering its exact normalized profile, explicit physical scale where applicable, det-normalized global anisotropy, value/first-functional jet, SPD or signed CPD polynomial obligations, unit-covariant FieldEnergy normalization, and proof-backed contract tests. Ambiguous aliases, automatic scale selection, optional polynomial trends, silent kernel fallback, and kernel implementations without the complete evidence contract are excluded from v1.

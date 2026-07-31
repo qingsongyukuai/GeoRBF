@@ -203,3 +203,23 @@ _Avoid_: 向量分量 L1、默认权重、零权重、置信度
 **已求解模型**:
 批量拟合成功后产生并永久对应其问题快照的不可变模型，可安全地重复及并发只读查询。
 _Avoid_: 在线模型、原地更新模型
+
+**Kernel 契约（Kernel Contract）**:
+对一个准入 kernel 不可拆分地规定精确公式、空间尺度、正定性或条件正定性、多项式要求、可用 jet、各向异性协变、FieldEnergy 及准入证据的数学契约；名称本身不构成 kernel。
+_Avoid_: kernel 名称或枚举、solver 私有配置、只有求值函数的自定义 kernel
+
+**Kernel 空间尺度（Kernel Spatial Scale）**:
+由调用方以输入坐标框架的长度单位显式提供、用于形成无量纲径向距离的严格正长度；它不得从数据或内部坐标归一化静默估计。
+_Avoid_: shape、epsilon、自动点间距、FieldEnergy normalization、Global Anisotropy Metric
+
+**支撑半径（Support Radius）**:
+紧支撑 kernel 在各向异性度量距离中从非零分支精确进入零分支的严格正物理长度。
+_Avoid_: 普通 length scale、近似截断阈值、稀疏求解容差
+
+**场能量（FieldEnergy）**:
+由 Kernel Contract 唯一定义的场复杂度度量；SPD kernel 使用 native-space norm，Cubic 使用完整 \(\Pi_1\) quotient 上的 seminorm。
+_Avoid_: ridge、jitter、solver 正则化、soft penalty
+
+**场能量归一化（FieldEnergy Normalization）**:
+把 kernel 的原生场能量转换为无量纲目标项的显式有限正系数；它决定场能量与 soft losses 的相对强度，并随物理单位协变。
+_Avoid_: 隐藏正则化强度、kernel 长度尺度、自动 normalization、solver scaling
