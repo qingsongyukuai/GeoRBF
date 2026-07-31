@@ -1,0 +1,3 @@
+# Use a canonical functional problem IR with derived solver forms
+
+GeoRBF treats the Problem Snapshot as raw input and audit history, and a solver-independent, physical-unit Canonical Problem IR as the sole computational semantics; this avoids duplicating domain meaning across matrix and backend paths while preserving semantic latent variables, residual structure, and provenance. Kernel assembly, elimination, whitening, CPD reduction, scaling, KKT/QP/conic forms, and storage or operator realizations are reconstructible derived artifacts with recovery maps, and a backend candidate becomes a solved model only after recovery and verification against the Canonical Problem IR.
