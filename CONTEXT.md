@@ -148,6 +148,22 @@ _Avoid_: 核长度尺度、局部 metric field、从法向自动估计、自动�
 每次求解尝试产生的结构化结果，用于判别输入无效、欠约束、不可行或数值失败，并量化成功解的残差与约束违反。
 _Avoid_: 日志、错误字符串、求解器原始输出
 
+**求解尝试终止状态（Solve Attempt Termination）**:
+一次具体后端调用停止的方式，包括成功候选、降低精度候选、不可行候选、达到限制或数值错误；它本身不证明问题性质。
+_Avoid_: 问题诊断、已求解模型、后端状态到领域结论的一对一映射
+
+**问题诊断（Problem Diagnosis）**:
+GeoRBF 根据 validation、preflight、certificate 与 canonical 复验证据对问题作出的语义结论，与任何单次求解尝试终止状态分别记录。
+_Avoid_: solver enum、日志字符串、未经复验的后端结论
+
+**后端契约违反（Backend Contract Violation）**:
+后端声称给出可接受候选，但恢复后的后端标准形式不满足该适配器所声明数值契约的失败。
+_Avoid_: 恢复验收失败、近似成功、用户输入无效
+
+**恢复验收失败（Recovery Verification Failure）**:
+候选满足后端标准形式契约，但经 recovery map 返回 Canonical Problem IR 后未通过物理语义、round-trip 或 provenance 验收的失败。
+_Avoid_: 后端契约违反、放宽容差后的成功、不可行问题
+
 **直接输入冲突（Direct Input Conflict）**:
 在 lowering 前即可由局部代数、几何或关系图证明的 hard 领域关系矛盾。
 _Avoid_: 欠约束、未经证明的求解失败、soft 残差
@@ -155,6 +171,14 @@ _Avoid_: 欠约束、未经证明的求解失败、soft 残差
 **不可行问题（Infeasible Problem）**:
 全部单条输入均合法、但完整 hard affine/conic 可行集经可靠判定为空的问题。
 _Avoid_: Rank Deficient、数值失败、迭代未收敛、soft 冲突
+
+**可解释秩亏（Interpretable Rank Deficiency）**:
+在版本化的标准化与 rank 政策下，由结构证据或确认性谱分析识别、并能恢复到 canonical functional、polynomial 或 field mode 的秩缺失。
+_Avoid_: 近零 pivot、Cholesky 失败、数值判定灰区、不可行问题
+
+**数值判定灰区（Numerical Decision Gray Zone）**:
+scaled rank、convexity 或 inertia 证据落在版本化接受与拒绝阈值之间，因而无法在 `f64` 中可靠归类的问题状态；它产生数值失败而不是确定的秩亏诊断。
+_Avoid_: 可解释秩亏、不可行问题、后端声称成功
 
 **拟合问题规模**:
 领域观测完成 lowering、但尚未经过求解器 presolve 时形成的标量约束维数；中心系数、辅助变量、锥块和实际 KKT 维数是同时记录的独立规模指标。
