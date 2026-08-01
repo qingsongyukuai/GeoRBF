@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("backend.faer={FAER_VERSION}");
     println!("backend.clarabel={CLARABEL_VERSION}");
+    println!("numerical.policy={}", evidence.numerical_policy_version);
     println!("cpd.functionals={}", evidence.cpd.functional_count);
     println!(
         "cpd.polynomial.dimension={}",
@@ -106,6 +107,10 @@ fn print_convex(label: &str, evidence: &georbf_cubic_cpd_recovery_spike::ConvexR
     println!(
         "{label}.physical.slack_equation_violation={:.17e}",
         evidence.physical_slack_equation_violation
+    );
+    println!(
+        "{label}.scaling.cumulative_bounds={:.17e}/{:.17e}",
+        evidence.cumulative_scaling_bounds.minimum, evidence.cumulative_scaling_bounds.maximum
     );
     println!(
         "{label}.canonical.hard_violation={:.17e}",

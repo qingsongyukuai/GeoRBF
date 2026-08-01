@@ -12,7 +12,7 @@ fn manufactured_functionals_keep_the_complete_affine_polynomial() {
 fn cubic_pairing_is_strictly_positive_on_the_polynomial_null_space() {
     let evidence = run_manufactured_experiment().expect("the manufactured experiment should run");
 
-    assert!(evidence.cpd.null_space_defect <= 1.0e-12);
+    assert!(evidence.cpd.null_space_defect <= evidence.acceptance.null_space_defect);
     assert!(evidence.cpd.reduced_symmetry_defect <= evidence.cpd.symmetry_defect_limit);
     assert!(evidence.cpd.reduced_smallest_eigenvalue > 0.0);
 }
@@ -21,5 +21,5 @@ fn cubic_pairing_is_strictly_positive_on_the_polynomial_null_space() {
 fn complete_affine_fields_are_reproduced_without_kernel_energy() {
     let evidence = run_manufactured_experiment().expect("the manufactured experiment should run");
 
-    assert!(evidence.cpd.affine_reproduction_error <= 1.0e-11);
+    assert!(evidence.cpd.affine_reproduction_error <= evidence.acceptance.affine_reproduction);
 }

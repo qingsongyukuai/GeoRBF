@@ -26,7 +26,7 @@ comprising five value functionals, three coordinate derivatives, one value/deriv
 
 The physical canonical problem owns these functionals, eleven equality relations, one affine upper bound, one SOC, and one semantic latent. The equalities fix every functional value and the latent, so the upper bound and SOC are independently verified as redundant. Equality may elide both without changing the feasible set; QP retains the bound; SOCP retains the cone. The forms therefore derive from one canonical semantics rather than inventing truth-relative constraints below the lowering seam.
 
-The polynomial pairing is constructed in the specified normalized coordinates and has shape `10 x 4`. Its physical/normalized coefficient map is explicit and reversible. A fixed nonzero physical coefficient vector satisfying `P^T c=0` manufactures functional values, the semantic latent, hard residual truth, FieldEnergy, and objective. Rank and reduced-positivity evidence use the specified separated acceptance/rejection thresholds and return a numerical decision gray zone between them.
+The polynomial pairing is constructed in the specified normalized coordinates and has shape `10 x 4`. Its physical/normalized coefficient map is explicit and reversible. A fixed nonzero physical coefficient vector satisfying `P^T c=0` manufactures functional values, the semantic latent, hard residual truth, FieldEnergy, and objective. The owned `risk-spike-14-v1` numerical policy supplies rank, convexity, inertia, recovery, scaling, and acceptance thresholds. Spectral decisions use separated acceptance/rejection thresholds and return a Numerical Decision Gray Zone between them; a contradictory Cholesky failure is numerical evidence, not a non-positivity diagnosis.
 
 ## Mathematical evidence
 
@@ -50,7 +50,7 @@ The QP and SOCP use a `10 -> 6` null-space map stored as `faer` Householder QR f
 
 ## Numerical-form and recovery evidence
 
-All forms receive exactly eight rounds of GeoRBF-owned max-norm Ruiz scaling. Each factor is quantized to the nearest power of two, clipped per round and cumulatively, the KKT uses diagonal congruence, and the SOCP block is scaled as a unit.
+All forms receive exactly eight rounds of GeoRBF-owned max-norm Ruiz scaling. Each factor is quantized to the nearest power of two, clipped per round and cumulatively, the KKT uses diagonal congruence, and the SOCP block is scaled as a unit. The implementation validates identical cumulative factors across every SOC block and checks the final factor bounds; the observed QP and SOCP cumulative ranges are both `[0.25, 2.0]`, within `[2^-32, 2^32]`.
 
 | Evidence | Reduced QP | Reduced SOCP | Limit |
 | --- | ---: | ---: | ---: |
@@ -91,4 +91,4 @@ cargo test --locked --all-targets
 cargo run --locked
 ```
 
-The local replay passed all ten T06/T07 integration tests and emitted the evidence above. `.github/workflows/risk-spike-14.yml` repeats the locked replay on Ubuntu; a configured workflow is not itself remote-run proof.
+The local replay passed all ten T06/T07 integration tests plus the focused SOC cumulative-bound regression test and emitted the evidence above. `.github/workflows/risk-spike-14.yml` repeats the locked replay on Ubuntu; a configured workflow is not itself remote-run proof.

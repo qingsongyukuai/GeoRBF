@@ -19,9 +19,72 @@ const POLYNOMIAL_DIMENSION: usize = 4;
 
 pub const FAER_VERSION: &str = "0.24.4";
 pub const CLARABEL_VERSION: &str = "0.11.1";
+pub const NUMERICAL_POLICY_VERSION: &str = "risk-spike-14-v1";
+
+#[derive(Debug, Clone, Copy)]
+pub struct AcceptanceThresholds {
+    pub null_space_defect: f64,
+    pub affine_reproduction: f64,
+    pub backward_error: f64,
+    pub round_trip: f64,
+    pub side_condition: f64,
+    pub canonical: f64,
+    pub backend_residual: f64,
+    pub cross_route: f64,
+    pub cumulative_scaling_minimum: f64,
+    pub cumulative_scaling_maximum: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NumericalPolicy {
+    version: &'static str,
+    spectral_reject_multiplier: f64,
+    spectral_accept_multiplier: f64,
+    symmetry_multiplier: f64,
+    clarabel_tolerance: f64,
+    ruiz_rounds: usize,
+    ruiz_round_exponent: i32,
+    ruiz_cumulative_exponent: i32,
+    acceptance: AcceptanceThresholds,
+}
+
+impl NumericalPolicy {
+    fn spectral_thresholds(self, dimension: usize, scale: f64) -> (f64, f64) {
+        let unit_scale = f64::EPSILON * dimension as f64 * scale;
+        (
+            self.spectral_reject_multiplier * unit_scale,
+            self.spectral_accept_multiplier * unit_scale,
+        )
+    }
+}
+
+const NUMERICAL_POLICY: NumericalPolicy = NumericalPolicy {
+    version: NUMERICAL_POLICY_VERSION,
+    spectral_reject_multiplier: 64.0,
+    spectral_accept_multiplier: 4096.0,
+    symmetry_multiplier: 256.0,
+    clarabel_tolerance: 1.0e-10,
+    ruiz_rounds: 8,
+    ruiz_round_exponent: 8,
+    ruiz_cumulative_exponent: 32,
+    acceptance: AcceptanceThresholds {
+        null_space_defect: 1.0e-12,
+        affine_reproduction: 1.0e-11,
+        backward_error: 1.0e-11,
+        round_trip: 1.0e-11,
+        side_condition: 1.0e-10,
+        canonical: 1.0e-8,
+        backend_residual: 1.0e-8,
+        cross_route: 1.0e-8,
+        cumulative_scaling_minimum: 2.3283064365386963e-10,
+        cumulative_scaling_maximum: 4_294_967_296.0,
+    },
+};
 
 #[derive(Debug, Clone)]
 pub struct ExperimentEvidence {
+    pub numerical_policy_version: &'static str,
+    pub acceptance: AcceptanceThresholds,
     pub cpd: CpdEvidence,
     pub equality: EqualityEvidence,
     pub qp: ConvexRouteEvidence,
@@ -57,6 +120,7 @@ pub struct CanonicalObservables {
     pub functional_values: Vec<f64>,
     pub residuals: Vec<f64>,
     pub slacks: Vec<f64>,
+    slack_sources: Vec<CanonicalSlackId>,
     pub side_condition_violation: f64,
     pub hard_violation: f64,
     pub field_energy: f64,
@@ -88,8 +152,15 @@ pub struct ConvexRouteEvidence {
     pub scaled: ScaledConvexResiduals,
     pub recovery_round_trip_error: f64,
     pub physical_slack_equation_violation: f64,
+    pub cumulative_scaling_bounds: ScalingFactorBounds,
     pub manufactured_truth_error: f64,
     pub recovered: CanonicalObservables,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScalingFactorBounds {
+    pub minimum: f64,
+    pub maximum: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +219,17 @@ impl Display for ExperimentError {
 }
 
 impl Error for ExperimentError {}
+
+fn require_within_policy(label: &str, observed: f64, limit: f64) -> Result<(), ExperimentError> {
+    if observed <= limit {
+        Ok(())
+    } else {
+        Err(ExperimentError::new(format!(
+            "{label} {observed:e} exceeds {limit:e} under {}",
+            NUMERICAL_POLICY.version
+        )))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Functional {
@@ -263,13 +345,70 @@ struct CanonicalProblem {
     semantic_latent_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunctionalId(usize);
+
+impl FunctionalId {
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LatentId(usize);
+
+impl LatentId {
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelationId(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceId(&'static str);
+
 #[derive(Debug, Clone)]
-enum CanonicalRelation {
-    SharedLevel { functional: usize, latent: usize },
-    LatentGauge { latent: usize, value: f64 },
-    FunctionalEquality { functional: usize, value: f64 },
-    FunctionalUpperBound { functional: usize, upper: f64 },
-    SecondOrderCone { components: [(usize, f64); 3] },
+struct CanonicalRelation {
+    id: RelationId,
+    source: SourceId,
+    kind: CanonicalRelationKind,
+}
+
+#[derive(Debug, Clone)]
+enum CanonicalRelationKind {
+    SharedLevel {
+        functional: FunctionalId,
+        latent: LatentId,
+    },
+    LatentGauge {
+        latent: LatentId,
+        value: f64,
+    },
+    FunctionalEquality {
+        functional: FunctionalId,
+        value: f64,
+    },
+    FunctionalUpperBound {
+        functional: FunctionalId,
+        upper: f64,
+    },
+    SecondOrderCone {
+        components: [(FunctionalId, f64); 3],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CanonicalSlackId {
+    relation: RelationId,
+    component: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BackendSlackRecovery {
+    backend_row: usize,
+    canonical_slack: CanonicalSlackId,
 }
 
 #[derive(Debug, Clone)]
@@ -414,8 +553,10 @@ pub fn run_manufactured_experiment() -> Result<ExperimentEvidence, ExperimentErr
     let (mut reduced, null_space_defect) =
         materialize_reduced_pairing(&kernel, &polynomial, &null_space);
     let reduced_symmetry_defect = normalized_symmetry_defect(&reduced);
-    let symmetry_defect_limit = 256.0 * f64::EPSILON * reduced.rows.max(reduced.columns) as f64;
-    if null_space_defect > 1.0e-10 {
+    let symmetry_defect_limit = NUMERICAL_POLICY.symmetry_multiplier
+        * f64::EPSILON
+        * reduced.rows.max(reduced.columns) as f64;
+    if null_space_defect > NUMERICAL_POLICY.acceptance.null_space_defect {
         return Err(ExperimentError::new(format!(
             "Householder null-space side-condition defect {null_space_defect:e}"
         )));
@@ -429,6 +570,11 @@ pub fn run_manufactured_experiment() -> Result<ExperimentEvidence, ExperimentErr
     let reduced_smallest_eigenvalue = verify_reduced_pairing(&reduced)
         .map_err(|failure| ExperimentError::new(format!("reduced preflight: {failure:?}")))?;
     let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial);
+    if affine_reproduction_error > NUMERICAL_POLICY.acceptance.affine_reproduction {
+        return Err(ExperimentError::new(format!(
+            "affine reproduction exceeds numerical policy: {affine_reproduction_error:e}"
+        )));
+    }
     let problem = manufacture_canonical_problem(functionals, kernel, polynomial, normalization);
     verify_redundant_canonical_relations(&problem)?;
     let equality = solve_equality(&problem)?;
@@ -438,8 +584,15 @@ pub fn run_manufactured_experiment() -> Result<ExperimentEvidence, ExperimentErr
         canonical_observable_difference(&equality.recovered, &qp.recovered).max(
             canonical_observable_difference(&equality.recovered, &socp.recovered),
         );
+    require_within_policy(
+        "cross-route canonical observable error",
+        cross_route_observable_error,
+        NUMERICAL_POLICY.acceptance.cross_route,
+    )?;
 
     Ok(ExperimentEvidence {
+        numerical_policy_version: NUMERICAL_POLICY.version,
+        acceptance: NUMERICAL_POLICY.acceptance,
         cpd: CpdEvidence {
             functional_count,
             polynomial_dimension: POLYNOMIAL_DIMENSION,
@@ -533,11 +686,12 @@ pub fn run_counterexamples() -> Result<CounterexampleEvidence, ExperimentError> 
     let problem = manufacture_canonical_problem(functionals, kernel, polynomial, normalization);
     verify_redundant_canonical_relations(&problem)?;
     let qp = solve_qp(&problem, &null_space, &reduced)?;
-    let backend_contract_passed = qp.scaled.primal <= 1.0e-8
-        && qp.scaled.dual <= 1.0e-8
-        && qp.scaled.stationarity <= 1.0e-8
-        && qp.scaled.complementarity <= 1.0e-8
-        && qp.scaled.relative_gap <= 1.0e-8;
+    let backend_limit = NUMERICAL_POLICY.acceptance.backend_residual;
+    let backend_contract_passed = qp.scaled.primal <= backend_limit
+        && qp.scaled.dual <= backend_limit
+        && qp.scaled.stationarity <= backend_limit
+        && qp.scaled.complementarity <= backend_limit
+        && qp.scaled.relative_gap <= backend_limit;
     let mut reduced_primal = null_space.project(&qp.recovered.field_coefficients);
     let standard_polynomial =
         normalization.to_standard_polynomial(qp.recovered.polynomial_coefficients);
@@ -640,8 +794,8 @@ fn verify_full_polynomial_rank(
     let largest = singular_values.first().copied().unwrap_or(0.0);
     let smallest = singular_values.last().copied().unwrap_or(0.0);
     let dimension = matrix.rows.max(matrix.columns);
-    let reject_threshold = 64.0 * f64::EPSILON * dimension as f64 * largest;
-    let accept_threshold = 4096.0 * f64::EPSILON * dimension as f64 * largest;
+    let (reject_threshold, accept_threshold) =
+        NUMERICAL_POLICY.spectral_thresholds(dimension, largest);
     let rank = singular_values
         .iter()
         .filter(|singular_value| **singular_value > reject_threshold)
@@ -667,8 +821,7 @@ fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, PreflightFailure>
             smallest_eigenvalue: smallest,
         });
     }
-    let reject = 64.0 * f64::EPSILON * matrix.rows as f64 * largest;
-    let accept = 4096.0 * f64::EPSILON * matrix.rows as f64 * largest;
+    let (reject, accept) = NUMERICAL_POLICY.spectral_thresholds(matrix.rows, largest);
     if smallest <= reject {
         return Err(PreflightFailure::ReducedPairingNotPositive {
             smallest_eigenvalue: smallest,
@@ -680,9 +833,7 @@ fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, PreflightFailure>
     matrix
         .to_faer()
         .llt(Side::Lower)
-        .map_err(|_| PreflightFailure::ReducedPairingNotPositive {
-            smallest_eigenvalue: smallest,
-        })?;
+        .map_err(|_| PreflightFailure::NumericalDecisionGrayZone)?;
     Ok(smallest)
 }
 
@@ -822,36 +973,59 @@ fn manufacture_canonical_problem(
         .collect::<Vec<_>>();
     let truth_latent = 0.5 * (truth_values[0] + truth_values[1]);
 
+    let source = SourceId("issue-14-manufactured-case");
     let mut relations = vec![
-        CanonicalRelation::SharedLevel {
-            functional: 0,
-            latent: 0,
+        CanonicalRelation {
+            id: RelationId(0),
+            source,
+            kind: CanonicalRelationKind::SharedLevel {
+                functional: FunctionalId(0),
+                latent: LatentId(0),
+            },
         },
-        CanonicalRelation::SharedLevel {
-            functional: 1,
-            latent: 0,
+        CanonicalRelation {
+            id: RelationId(1),
+            source,
+            kind: CanonicalRelationKind::SharedLevel {
+                functional: FunctionalId(1),
+                latent: LatentId(0),
+            },
         },
-        CanonicalRelation::LatentGauge {
-            latent: 0,
-            value: truth_latent,
+        CanonicalRelation {
+            id: RelationId(2),
+            source,
+            kind: CanonicalRelationKind::LatentGauge {
+                latent: LatentId(0),
+                value: truth_latent,
+            },
         },
     ];
-    relations.extend((2..truth_values.len()).map(|functional| {
-        CanonicalRelation::FunctionalEquality {
-            functional,
+    relations.extend((2..truth_values.len()).map(|functional| CanonicalRelation {
+        id: RelationId(functional + 1),
+        source,
+        kind: CanonicalRelationKind::FunctionalEquality {
+            functional: FunctionalId(functional),
             value: truth_values[functional],
-        }
+        },
     }));
-    relations.push(CanonicalRelation::FunctionalUpperBound {
-        functional: 4,
-        upper: truth_values[4] + 0.75,
+    relations.push(CanonicalRelation {
+        id: RelationId(11),
+        source,
+        kind: CanonicalRelationKind::FunctionalUpperBound {
+            functional: FunctionalId(4),
+            upper: truth_values[4] + 0.75,
+        },
     });
-    relations.push(CanonicalRelation::SecondOrderCone {
-        components: [
-            (4, truth_values[4] + 1.0),
-            (5, truth_values[5] + 0.2),
-            (6, truth_values[6] - 0.1),
-        ],
+    relations.push(CanonicalRelation {
+        id: RelationId(12),
+        source,
+        kind: CanonicalRelationKind::SecondOrderCone {
+            components: [
+                (FunctionalId(4), truth_values[4] + 1.0),
+                (FunctionalId(5), truth_values[5] + 0.2),
+                (FunctionalId(6), truth_values[6] - 0.1),
+            ],
+        },
     });
 
     ManufacturedCase {
@@ -871,17 +1045,34 @@ fn manufacture_canonical_problem(
 }
 
 fn verify_redundant_canonical_relations(problem: &ManufacturedCase) -> Result<(), ExperimentError> {
+    for (index, relation) in problem.canonical.relations.iter().enumerate() {
+        if relation.source != SourceId("issue-14-manufactured-case") {
+            return Err(ExperimentError::new(
+                "canonical relation lost its manufactured source identity",
+            ));
+        }
+        if problem.canonical.relations[..index]
+            .iter()
+            .any(|earlier| earlier.id == relation.id)
+        {
+            return Err(ExperimentError::new(
+                "canonical relation identities must be unique",
+            ));
+        }
+    }
     let mut fixed_functionals = vec![false; problem.canonical.functionals.len()];
     let mut gauged_latents = vec![false; problem.canonical.semantic_latent_count];
     for relation in &problem.canonical.relations {
-        match relation {
-            CanonicalRelation::SharedLevel { functional, .. }
-            | CanonicalRelation::FunctionalEquality { functional, .. } => {
-                fixed_functionals[*functional] = true;
+        match &relation.kind {
+            CanonicalRelationKind::SharedLevel { functional, .. }
+            | CanonicalRelationKind::FunctionalEquality { functional, .. } => {
+                fixed_functionals[functional.index()] = true;
             }
-            CanonicalRelation::LatentGauge { latent, .. } => gauged_latents[*latent] = true,
-            CanonicalRelation::FunctionalUpperBound { .. }
-            | CanonicalRelation::SecondOrderCone { .. } => {}
+            CanonicalRelationKind::LatentGauge { latent, .. } => {
+                gauged_latents[latent.index()] = true;
+            }
+            CanonicalRelationKind::FunctionalUpperBound { .. }
+            | CanonicalRelationKind::SecondOrderCone { .. } => {}
         }
     }
     if fixed_functionals.iter().any(|fixed| !fixed) || gauged_latents.iter().any(|fixed| !fixed) {
@@ -890,17 +1081,17 @@ fn verify_redundant_canonical_relations(problem: &ManufacturedCase) -> Result<()
         ));
     }
     for relation in &problem.canonical.relations {
-        match relation {
-            CanonicalRelation::FunctionalUpperBound { functional, upper } => {
-                if problem.truth_values[*functional] > *upper {
+        match &relation.kind {
+            CanonicalRelationKind::FunctionalUpperBound { functional, upper } => {
+                if problem.truth_values[functional.index()] > *upper {
                     return Err(ExperimentError::new(
                         "canonical upper bound is not redundant with the equality semantics",
                     ));
                 }
             }
-            CanonicalRelation::SecondOrderCone { components } => {
-                let slack =
-                    components.map(|(functional, rhs)| rhs - problem.truth_values[functional]);
+            CanonicalRelationKind::SecondOrderCone { components } => {
+                let slack = components
+                    .map(|(functional, rhs)| rhs - problem.truth_values[functional.index()]);
                 if slack[0] < slack[1].hypot(slack[2]) {
                     return Err(ExperimentError::new(
                         "canonical SOC is not redundant with the equality semantics",
@@ -967,6 +1158,26 @@ fn solve_equality(problem: &ManufacturedCase) -> Result<EqualityEvidence, Experi
         recovered.polynomial_coefficients,
     );
     let manufactured_truth_error = manufactured_truth_error(problem, &recovered);
+    require_within_policy(
+        "Equality backward error",
+        normalized_backward_error,
+        NUMERICAL_POLICY.acceptance.backward_error,
+    )?;
+    require_within_policy(
+        "Equality recovery round trip",
+        scaling_round_trip_error,
+        NUMERICAL_POLICY.acceptance.round_trip,
+    )?;
+    require_within_policy(
+        "Equality side condition",
+        recovered.side_condition_violation,
+        NUMERICAL_POLICY.acceptance.side_condition,
+    )?;
+    require_within_policy(
+        "Equality canonical recovery",
+        recovered.hard_violation.max(manufactured_truth_error),
+        NUMERICAL_POLICY.acceptance.canonical,
+    )?;
 
     Ok(EqualityEvidence {
         inertia,
@@ -988,10 +1199,10 @@ fn equality_primal_form(problem: &ManufacturedCase) -> (DenseMatrix, DenseMatrix
         .iter()
         .filter(|relation| {
             matches!(
-                relation,
-                CanonicalRelation::SharedLevel { .. }
-                    | CanonicalRelation::LatentGauge { .. }
-                    | CanonicalRelation::FunctionalEquality { .. }
+                &relation.kind,
+                CanonicalRelationKind::SharedLevel { .. }
+                    | CanonicalRelationKind::LatentGauge { .. }
+                    | CanonicalRelationKind::FunctionalEquality { .. }
             )
         })
         .collect::<Vec<_>>();
@@ -1013,34 +1224,34 @@ fn equality_primal_form(problem: &ManufacturedCase) -> (DenseMatrix, DenseMatrix
                     0.0
                 }
             } else {
-                match equality_relations[row - POLYNOMIAL_DIMENSION] {
-                    CanonicalRelation::SharedLevel { functional, latent } => {
+                match &equality_relations[row - POLYNOMIAL_DIMENSION].kind {
+                    CanonicalRelationKind::SharedLevel { functional, latent } => {
                         if column < coefficient_count {
-                            problem.kernel.get(*functional, column)
+                            problem.kernel.get(functional.index(), column)
                         } else if column < latent_column {
                             problem
                                 .polynomial
-                                .get(*functional, column - coefficient_count)
-                        } else if column == latent_column + latent {
+                                .get(functional.index(), column - coefficient_count)
+                        } else if column == latent_column + latent.index() {
                             -1.0
                         } else {
                             0.0
                         }
                     }
-                    CanonicalRelation::LatentGauge { latent, .. } => {
-                        if column == latent_column + latent {
+                    CanonicalRelationKind::LatentGauge { latent, .. } => {
+                        if column == latent_column + latent.index() {
                             1.0
                         } else {
                             0.0
                         }
                     }
-                    CanonicalRelation::FunctionalEquality { functional, .. } => {
+                    CanonicalRelationKind::FunctionalEquality { functional, .. } => {
                         if column < coefficient_count {
-                            problem.kernel.get(*functional, column)
+                            problem.kernel.get(functional.index(), column)
                         } else if column < latent_column {
                             problem
                                 .polynomial
-                                .get(*functional, column - coefficient_count)
+                                .get(functional.index(), column - coefficient_count)
                         } else {
                             0.0
                         }
@@ -1054,10 +1265,10 @@ fn equality_primal_form(problem: &ManufacturedCase) -> (DenseMatrix, DenseMatrix
             if row < POLYNOMIAL_DIMENSION {
                 return 0.0;
             }
-            match equality_relations[row - POLYNOMIAL_DIMENSION] {
-                CanonicalRelation::SharedLevel { .. } => 0.0,
-                CanonicalRelation::LatentGauge { value, .. }
-                | CanonicalRelation::FunctionalEquality { value, .. } => *value,
+            match &equality_relations[row - POLYNOMIAL_DIMENSION].kind {
+                CanonicalRelationKind::SharedLevel { .. } => 0.0,
+                CanonicalRelationKind::LatentGauge { value, .. }
+                | CanonicalRelationKind::FunctionalEquality { value, .. } => *value,
                 _ => unreachable!("only equality relations are selected"),
             }
         })
@@ -1071,13 +1282,13 @@ fn solve_qp(
     reduced_hessian: &DenseMatrix,
 ) -> Result<ConvexRouteEvidence, ExperimentError> {
     let (equality_rows, equality_rhs) = reduced_equalities(problem, null_space);
-    let (functional, upper) = problem
+    let (relation_id, functional, upper) = problem
         .canonical
         .relations
         .iter()
-        .find_map(|relation| match relation {
-            CanonicalRelation::FunctionalUpperBound { functional, upper } => {
-                Some((*functional, *upper))
+        .find_map(|relation| match &relation.kind {
+            CanonicalRelationKind::FunctionalUpperBound { functional, upper } => {
+                Some((relation.id, *functional, *upper))
             }
             _ => None,
         })
@@ -1109,7 +1320,13 @@ fn solve_qp(
                 ConeBlock::Zero(equality_rows.rows),
                 ConeBlock::Nonnegative(1),
             ],
-            canonical_slack_indices: vec![0],
+            slack_recovery: vec![BackendSlackRecovery {
+                backend_row: equality_rows.rows,
+                canonical_slack: CanonicalSlackId {
+                    relation: relation_id,
+                    component: 0,
+                },
+            }],
         },
     )
 }
@@ -1120,12 +1337,14 @@ fn solve_socp(
     reduced_hessian: &DenseMatrix,
 ) -> Result<ConvexRouteEvidence, ExperimentError> {
     let (equality_rows, equality_rhs) = reduced_equalities(problem, null_space);
-    let components = problem
+    let (relation_id, components) = problem
         .canonical
         .relations
         .iter()
-        .find_map(|relation| match relation {
-            CanonicalRelation::SecondOrderCone { components } => Some(*components),
+        .find_map(|relation| match &relation.kind {
+            CanonicalRelationKind::SecondOrderCone { components } => {
+                Some((relation.id, *components))
+            }
             _ => None,
         })
         .ok_or_else(|| ExperimentError::new("canonical SOC is missing"))?;
@@ -1157,7 +1376,15 @@ fn solve_socp(
                 ConeBlock::Zero(equality_rows.rows),
                 ConeBlock::SecondOrder(3),
             ],
-            canonical_slack_indices: vec![1, 2, 3],
+            slack_recovery: (0..3)
+                .map(|component| BackendSlackRecovery {
+                    backend_row: equality_rows.rows + component,
+                    canonical_slack: CanonicalSlackId {
+                        relation: relation_id,
+                        component,
+                    },
+                })
+                .collect(),
         },
     )
 }
@@ -1217,7 +1444,7 @@ fn verify_recovery_candidate(
     let violation = map_violation
         .max(recovered.side_condition_violation)
         .max(recovered.hard_violation);
-    if violation <= 1.0e-8 {
+    if violation <= NUMERICAL_POLICY.acceptance.canonical {
         Ok(())
     } else {
         Err(violation)
@@ -1251,15 +1478,17 @@ fn reduced_equalities(
 fn reduced_functional_row(
     problem: &ManufacturedCase,
     null_space: &HouseholderNullSpace,
-    functional: usize,
+    functional: FunctionalId,
 ) -> Vec<f64> {
     let reduced_dimension = null_space.reduced_dimension();
     let mut row = null_space.project(
         &(0..problem.kernel.columns)
-            .map(|column| problem.kernel.get(functional, column))
+            .map(|column| problem.kernel.get(functional.index(), column))
             .collect::<Vec<_>>(),
     );
-    row.extend((0..POLYNOMIAL_DIMENSION).map(|column| problem.polynomial.get(functional, column)));
+    row.extend(
+        (0..POLYNOMIAL_DIMENSION).map(|column| problem.polynomial.get(functional.index(), column)),
+    );
     row.extend(std::iter::repeat_n(
         0.0,
         problem.canonical.semantic_latent_count,
@@ -1308,7 +1537,7 @@ struct UnscaledConicForm {
     constraints: DenseMatrix,
     constraint_rhs: Vec<f64>,
     cone_blocks: Vec<ConeBlock>,
-    canonical_slack_indices: Vec<usize>,
+    slack_recovery: Vec<BackendSlackRecovery>,
 }
 
 #[derive(Debug, Clone)]
@@ -1320,6 +1549,7 @@ struct ScaledConicForm {
     cone_blocks: Vec<ConeBlock>,
     variable_factors: Vec<f64>,
     constraint_factors: Vec<f64>,
+    factor_bounds: ScalingFactorBounds,
 }
 
 fn solve_convex_form(
@@ -1380,12 +1610,8 @@ fn solve_convex_form(
             "canonical recovery verification failed: {violation:e}"
         ))
     })?;
-    let physical_slack_equation_violation = physical_slack_equation_violation(
-        &form,
-        &physical_reduced,
-        &physical_slacks,
-        &recovered.slacks,
-    );
+    let physical_slack_equation_violation =
+        physical_slack_equation_violation(&form, &physical_reduced, &physical_slacks, &recovered);
     recovered.hard_violation = recovered
         .hard_violation
         .max(physical_slack_equation_violation);
@@ -1401,11 +1627,41 @@ fn solve_convex_form(
         recovered.polynomial_coefficients,
     );
     let manufactured_truth_error = manufactured_truth_error(problem, &recovered);
+    let backend_violation = residuals
+        .primal
+        .max(residuals.dual)
+        .max(residuals.stationarity)
+        .max(residuals.complementarity)
+        .max(residuals.relative_gap);
+    require_within_policy(
+        "convex backend contract",
+        backend_violation,
+        NUMERICAL_POLICY.acceptance.backend_residual,
+    )?;
+    require_within_policy(
+        "convex recovery round trip",
+        recovery_round_trip_error,
+        NUMERICAL_POLICY.acceptance.round_trip,
+    )?;
+    require_within_policy(
+        "convex side condition",
+        recovered.side_condition_violation,
+        NUMERICAL_POLICY.acceptance.side_condition,
+    )?;
+    require_within_policy(
+        "convex canonical recovery",
+        recovered
+            .hard_violation
+            .max(physical_slack_equation_violation)
+            .max(manufactured_truth_error),
+        NUMERICAL_POLICY.acceptance.canonical,
+    )?;
     Ok(ConvexRouteEvidence {
         problem_class: form.problem_class,
         scaled: residuals,
         recovery_round_trip_error,
         physical_slack_equation_violation,
+        cumulative_scaling_bounds: scaled.factor_bounds,
         manufactured_truth_error,
         recovered,
     })
@@ -1415,7 +1671,7 @@ fn physical_slack_equation_violation(
     form: &UnscaledConicForm,
     primal: &[f64],
     backend_slacks: &[f64],
-    canonical_slacks: &[f64],
+    recovered: &CanonicalObservables,
 ) -> f64 {
     let affine = form.constraints.multiply_vector(primal);
     let equation_violation = affine
@@ -1424,11 +1680,18 @@ fn physical_slack_equation_violation(
         .zip(&form.constraint_rhs)
         .map(|((affine, slack), rhs)| (affine + slack - rhs).abs())
         .fold(0.0_f64, f64::max);
-    let retained_start = form.constraints.rows - form.canonical_slack_indices.len();
-    let recovered_slack_violation = backend_slacks[retained_start..]
+    let recovered_slack_violation = form
+        .slack_recovery
         .iter()
-        .zip(&form.canonical_slack_indices)
-        .map(|(backend, canonical_index)| (backend - canonical_slacks[*canonical_index]).abs())
+        .map(|mapping| {
+            let canonical = recovered
+                .slack_sources
+                .iter()
+                .position(|source| *source == mapping.canonical_slack)
+                .map(|index| recovered.slacks[index])
+                .expect("lowering must preserve canonical slack provenance");
+            (backend_slacks[mapping.backend_row] - canonical).abs()
+        })
         .fold(0.0_f64, f64::max);
     equation_violation.max(recovered_slack_violation)
 }
@@ -1440,7 +1703,7 @@ fn scale_conic_form(form: &UnscaledConicForm) -> Result<ScaledConicForm, Experim
     let mut scaled_rhs = form.constraint_rhs.clone();
     let mut variable_factors = vec![1.0; form.hessian.columns];
     let mut constraint_factors = vec![1.0; form.constraints.rows];
-    for _ in 0..8 {
+    for _ in 0..NUMERICAL_POLICY.ruiz_rounds {
         let variable_round = (0..form.hessian.columns)
             .map(|column| {
                 let hessian_norm = (0..form.hessian.rows)
@@ -1485,10 +1748,7 @@ fn scale_conic_form(form: &UnscaledConicForm) -> Result<ScaledConicForm, Experim
                         norm = norm.max(scaled_constraints.get(row, column).abs());
                     }
                 }
-                let cumulative = constraint_factors[start..end]
-                    .iter()
-                    .copied()
-                    .fold(1.0_f64, f64::max);
+                let cumulative = common_block_cumulative_factor(&constraint_factors[start..end])?;
                 let factor = bounded_power_of_two_factor(norm, cumulative)?;
                 row_round[start..end].fill(factor);
             } else {
@@ -1513,6 +1773,7 @@ fn scale_conic_form(form: &UnscaledConicForm) -> Result<ScaledConicForm, Experim
             }
         }
     }
+    let factor_bounds = cumulative_scaling_bounds(&[&variable_factors, &constraint_factors])?;
     Ok(ScaledConicForm {
         hessian: scaled_hessian,
         linear_objective: scaled_objective,
@@ -1521,7 +1782,42 @@ fn scale_conic_form(form: &UnscaledConicForm) -> Result<ScaledConicForm, Experim
         cone_blocks: form.cone_blocks.clone(),
         variable_factors,
         constraint_factors,
+        factor_bounds,
     })
+}
+
+fn common_block_cumulative_factor(factors: &[f64]) -> Result<f64, ExperimentError> {
+    let first = factors
+        .first()
+        .copied()
+        .ok_or_else(|| ExperimentError::new("cone block cannot be empty"))?;
+    if factors.iter().any(|factor| *factor != first) {
+        return Err(ExperimentError::new(
+            "SOC cumulative scaling factors must remain identical",
+        ));
+    }
+    Ok(first)
+}
+
+fn cumulative_scaling_bounds(
+    factor_groups: &[&[f64]],
+) -> Result<ScalingFactorBounds, ExperimentError> {
+    let minimum = factor_groups
+        .iter()
+        .flat_map(|factors| factors.iter().copied())
+        .fold(f64::INFINITY, f64::min);
+    let maximum = factor_groups
+        .iter()
+        .flat_map(|factors| factors.iter().copied())
+        .fold(0.0_f64, f64::max);
+    let lower = NUMERICAL_POLICY.acceptance.cumulative_scaling_minimum;
+    let upper = NUMERICAL_POLICY.acceptance.cumulative_scaling_maximum;
+    if !minimum.is_finite() || !maximum.is_finite() || minimum < lower || maximum > upper {
+        return Err(ExperimentError::new(format!(
+            "cumulative Ruiz factors [{minimum:e}, {maximum:e}] exceed [{lower:e}, {upper:e}]"
+        )));
+    }
+    Ok(ScalingFactorBounds { minimum, maximum })
 }
 
 fn clarabel_settings() -> DefaultSettings<f64> {
@@ -1529,9 +1825,9 @@ fn clarabel_settings() -> DefaultSettings<f64> {
         verbose: false,
         max_threads: 1,
         direct_solve_method: "qdldl".into(),
-        tol_gap_abs: 1.0e-10,
-        tol_gap_rel: 1.0e-10,
-        tol_feas: 1.0e-10,
+        tol_gap_abs: NUMERICAL_POLICY.clarabel_tolerance,
+        tol_gap_rel: NUMERICAL_POLICY.clarabel_tolerance,
+        tol_feas: NUMERICAL_POLICY.clarabel_tolerance,
         ..DefaultSettings::default()
     }
 }
@@ -1555,7 +1851,8 @@ fn scaled_convex_residuals(
         .chain(&form.constraint_rhs)
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
-    let primal_cone_violation = cone_violation(slack, &form.cone_blocks);
+    let primal_cone_violation =
+        cone_violation(slack, &form.cone_blocks, ConeVectorRole::PrimalSlack);
     let primal_residual =
         (equation_residual / primal_scale).max(primal_cone_violation / primal_scale);
 
@@ -1580,7 +1877,7 @@ fn scaled_convex_residuals(
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max)
         / stationarity_scale;
-    let dual_residual = dual_cone_violation(dual, &form.cone_blocks)
+    let dual_residual = cone_violation(dual, &form.cone_blocks, ConeVectorRole::Dual)
         / dual.iter().map(|value| value.abs()).fold(1.0_f64, f64::max);
     let primal_objective =
         0.5 * dot_product(primal, &hessian_product) + dot_product(&form.linear_objective, primal);
@@ -1599,45 +1896,26 @@ fn scaled_convex_residuals(
     }
 }
 
-fn cone_violation(vector: &[f64], cone_blocks: &[ConeBlock]) -> f64 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConeVectorRole {
+    PrimalSlack,
+    Dual,
+}
+
+fn cone_violation(vector: &[f64], cone_blocks: &[ConeBlock], role: ConeVectorRole) -> f64 {
     let mut violation = 0.0_f64;
     let mut start = 0;
     for block in cone_blocks {
         let end = start + block.dimension();
         match block {
             ConeBlock::Zero(_) => {
-                violation = vector[start..end]
-                    .iter()
-                    .map(|value| value.abs())
-                    .fold(violation, f64::max);
+                if role == ConeVectorRole::PrimalSlack {
+                    violation = vector[start..end]
+                        .iter()
+                        .map(|value| value.abs())
+                        .fold(violation, f64::max);
+                }
             }
-            ConeBlock::Nonnegative(_) => {
-                violation = vector[start..end]
-                    .iter()
-                    .map(|value| (-value).max(0.0))
-                    .fold(violation, f64::max);
-            }
-            ConeBlock::SecondOrder(_) => {
-                let tail_norm = vector[(start + 1)..end]
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>()
-                    .sqrt();
-                violation = violation.max((tail_norm - vector[start]).max(0.0));
-            }
-        }
-        start = end;
-    }
-    violation
-}
-
-fn dual_cone_violation(vector: &[f64], cone_blocks: &[ConeBlock]) -> f64 {
-    let mut violation = 0.0_f64;
-    let mut start = 0;
-    for block in cone_blocks {
-        let end = start + block.dimension();
-        match block {
-            ConeBlock::Zero(_) => {}
             ConeBlock::Nonnegative(_) => {
                 violation = vector[start..end]
                     .iter()
@@ -1720,7 +1998,7 @@ fn scale_symmetric_kkt(
     let mut scaled_matrix = matrix.clone();
     let mut scaled_rhs = rhs.to_vec();
     let mut factors = vec![1.0; matrix.rows];
-    for _ in 0..8 {
+    for _ in 0..NUMERICAL_POLICY.ruiz_rounds {
         let round_factors = (0..matrix.rows)
             .map(|row| {
                 let norm = (0..matrix.columns)
@@ -1743,6 +2021,7 @@ fn scale_symmetric_kkt(
             }
         }
     }
+    cumulative_scaling_bounds(&[&factors])?;
     Ok(SymmetricScaling {
         matrix: scaled_matrix,
         rhs: scaled_rhs,
@@ -1757,10 +2036,14 @@ fn bounded_power_of_two_factor(norm: f64, cumulative: f64) -> Result<f64, Experi
         )));
     }
     let proposed_exponent = (-0.5 * norm.log2()).round() as i32;
-    let round_exponent = proposed_exponent.clamp(-8, 8);
+    let round_limit = NUMERICAL_POLICY.ruiz_round_exponent;
+    let cumulative_limit = NUMERICAL_POLICY.ruiz_cumulative_exponent;
+    let round_exponent = proposed_exponent.clamp(-round_limit, round_limit);
     let cumulative_exponent = cumulative.log2().round() as i32;
-    let bounded_exponent =
-        round_exponent.clamp(-32 - cumulative_exponent, 32 - cumulative_exponent);
+    let bounded_exponent = round_exponent.clamp(
+        -cumulative_limit - cumulative_exponent,
+        cumulative_limit - cumulative_exponent,
+    );
     Ok(2.0_f64.powi(bounded_exponent))
 }
 
@@ -1791,8 +2074,7 @@ fn inertia_from_lblt(
         .iter()
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max);
-    let reject = 64.0 * f64::EPSILON * dimension as f64 * scale;
-    let accept = 4096.0 * f64::EPSILON * dimension as f64 * scale;
+    let (reject, accept) = NUMERICAL_POLICY.spectral_thresholds(dimension, scale);
     let mut inertia = InertiaEvidence {
         positive: 0,
         negative: 0,
@@ -1860,33 +2142,43 @@ fn recover_canonical(problem: &ManufacturedCase, primal: &[f64]) -> CanonicalObs
         .collect::<Vec<_>>();
     let mut residuals = Vec::new();
     let mut slacks = Vec::new();
+    let mut slack_sources = Vec::new();
     let mut relation_violation = 0.0_f64;
     for relation in &problem.canonical.relations {
-        match relation {
-            CanonicalRelation::SharedLevel { functional, latent } => {
-                let residual = functional_values[*functional] - semantic_latents[*latent];
+        match &relation.kind {
+            CanonicalRelationKind::SharedLevel { functional, latent } => {
+                let residual =
+                    functional_values[functional.index()] - semantic_latents[latent.index()];
                 residuals.push(residual);
                 relation_violation = relation_violation.max(residual.abs());
             }
-            CanonicalRelation::LatentGauge { latent, value } => {
-                let residual = semantic_latents[*latent] - value;
+            CanonicalRelationKind::LatentGauge { latent, value } => {
+                let residual = semantic_latents[latent.index()] - value;
                 residuals.push(residual);
                 relation_violation = relation_violation.max(residual.abs());
             }
-            CanonicalRelation::FunctionalEquality { functional, value } => {
-                let residual = functional_values[*functional] - value;
+            CanonicalRelationKind::FunctionalEquality { functional, value } => {
+                let residual = functional_values[functional.index()] - value;
                 residuals.push(residual);
                 relation_violation = relation_violation.max(residual.abs());
             }
-            CanonicalRelation::FunctionalUpperBound { functional, upper } => {
-                let slack = upper - functional_values[*functional];
+            CanonicalRelationKind::FunctionalUpperBound { functional, upper } => {
+                let slack = upper - functional_values[functional.index()];
                 slacks.push(slack);
+                slack_sources.push(CanonicalSlackId {
+                    relation: relation.id,
+                    component: 0,
+                });
                 relation_violation = relation_violation.max((-slack).max(0.0));
             }
-            CanonicalRelation::SecondOrderCone { components } => {
+            CanonicalRelationKind::SecondOrderCone { components } => {
                 let cone_slacks =
-                    components.map(|(functional, rhs)| rhs - functional_values[functional]);
+                    components.map(|(functional, rhs)| rhs - functional_values[functional.index()]);
                 slacks.extend(cone_slacks);
+                slack_sources.extend((0..3).map(|component| CanonicalSlackId {
+                    relation: relation.id,
+                    component,
+                }));
                 relation_violation = relation_violation
                     .max((cone_slacks[1].hypot(cone_slacks[2]) - cone_slacks[0]).max(0.0));
             }
@@ -1912,6 +2204,7 @@ fn recover_canonical(problem: &ManufacturedCase, primal: &[f64]) -> CanonicalObs
         functional_values,
         residuals,
         slacks,
+        slack_sources,
         side_condition_violation,
         hard_violation,
         field_energy,
@@ -2027,4 +2320,21 @@ fn scale(vector: [f64; 3], factor: f64) -> [f64; 3] {
 
 fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soc_block_scaling_preserves_the_cumulative_lower_bound() {
+        let lower = NUMERICAL_POLICY.acceptance.cumulative_scaling_minimum;
+        let cumulative = common_block_cumulative_factor(&[lower, lower, lower])
+            .expect("a uniformly scaled SOC block is valid");
+        let next = bounded_power_of_two_factor(2.0_f64.powi(100), cumulative)
+            .expect("the cumulative clamp should remain representable");
+
+        assert_eq!(cumulative, lower);
+        assert_eq!(next, 1.0);
+    }
 }

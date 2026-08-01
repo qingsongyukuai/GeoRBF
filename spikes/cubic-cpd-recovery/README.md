@@ -16,7 +16,7 @@ The experiment defines one physical canonical relation set: eleven equalities, o
 - QP: retains the affine bound and elides only the proven-redundant cone, reduced through an implicit Householder QR null-space operator;
 - SOCP: retains the cone and elides only the proven-redundant affine bound, using the same reduction and recovery.
 
-All standard forms receive eight rounds of max-norm Ruiz scaling. Factors are nearest powers of two, each round is clipped to `[2^-8,2^8]`, cumulative factors to `[2^-32,2^32]`, KKT scaling is diagonal congruence, and the SOC block receives one common row factor. Clarabel's own equilibration remains enabled and is an additional recorded backend implementation detail, not physical semantics.
+The owned `risk-spike-14-v1` numerical policy drives rank, convexity, inertia, recovery, scaling, and acceptance thresholds. All standard forms receive eight rounds of max-norm Ruiz scaling. Factors are nearest powers of two, each round is clipped to `[2^-8,2^8]`, cumulative factors to `[2^-32,2^32]`, KKT scaling is diagonal congruence, and the SOC block receives one validated common row factor. Clarabel's own equilibration remains enabled and is an additional recorded backend implementation detail, not physical semantics.
 
 Replay with the exact Rust 1.85 toolchain and locked temporary backends:
 
