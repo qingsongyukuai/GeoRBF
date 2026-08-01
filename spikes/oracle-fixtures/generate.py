@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import platform
-import shutil
 import sys
 import tempfile
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
@@ -134,32 +133,49 @@ def cubic_jet(
 
 
 def evaluate_affine_field(
-    field: dict[str, Any], support: list[Decimal], coefficient: Decimal, direction: list[Decimal]
+    field: dict[str, Any],
+    support: list[Decimal],
+    value_coefficient: Decimal,
+    gradient_coefficient: list[Decimal],
 ) -> Decimal:
     constant = as_decimal(field["constant"], "manufactured_affine_field.constant")
     gradient = vector(field["gradient"], "manufactured_affine_field.gradient")
     field_value = constant + dot(gradient, support)
-    return coefficient * field_value + dot(direction, gradient)
+    return value_coefficient * field_value + dot(gradient_coefficient, gradient)
 
 
 def generalized_functional(case_input: dict[str, Any]) -> dict[str, Any]:
     metric = matrix(case_input["metric"], "input.metric")
     left = case_input["left"]
     right = case_input["right"]
-    left_x = vector(left["support"], "input.left.support")
-    right_x = vector(right["support"], "input.right.support")
-    left_a = as_decimal(left["value_coefficient"], "input.left.value_coefficient")
-    right_a = as_decimal(right["value_coefficient"], "input.right.value_coefficient")
-    left_b = vector(left["gradient_coefficient"], "input.left.gradient_coefficient")
-    right_b = vector(right["gradient_coefficient"], "input.right.gradient_coefficient")
-    jet = cubic_jet(left_x, right_x, metric)
+    left_support = vector(left["support"], "input.left.support")
+    right_support = vector(right["support"], "input.right.support")
+    left_value_coefficient = as_decimal(
+        left["value_coefficient"], "input.left.value_coefficient"
+    )
+    right_value_coefficient = as_decimal(
+        right["value_coefficient"], "input.right.value_coefficient"
+    )
+    left_gradient_coefficient = vector(
+        left["gradient_coefficient"], "input.left.gradient_coefficient"
+    )
+    right_gradient_coefficient = vector(
+        right["gradient_coefficient"], "input.right.gradient_coefficient"
+    )
+    jet = cubic_jet(left_support, right_support, metric)
 
-    value_value = left_a * right_a * jet["value"]
-    derivative_value = right_a * dot(left_b, jet["gradient_x"])
-    value_derivative = left_a * dot(right_b, jet["gradient_y"])
+    value_value = left_value_coefficient * right_value_coefficient * jet["value"]
+    derivative_value = right_value_coefficient * dot(
+        left_gradient_coefficient, jet["gradient_x"]
+    )
+    value_derivative = left_value_coefficient * dot(
+        right_gradient_coefficient, jet["gradient_y"]
+    )
     derivative_derivative = sum(
         (
-            left_b[row] * jet["mixed_xy"][row][column] * right_b[column]
+            left_gradient_coefficient[row]
+            * jet["mixed_xy"][row][column]
+            * right_gradient_coefficient[column]
             for row in range(3)
             for column in range(3)
         ),
@@ -178,10 +194,16 @@ def generalized_functional(case_input: dict[str, Any]) -> dict[str, Any]:
         },
         "manufactured_affine_observations": {
             "left": evaluate_affine_field(
-                manufactured_field, left_x, left_a, left_b
+                manufactured_field,
+                left_support,
+                left_value_coefficient,
+                left_gradient_coefficient,
             ),
             "right": evaluate_affine_field(
-                manufactured_field, right_x, right_a, right_b
+                manufactured_field,
+                right_support,
+                right_value_coefficient,
+                right_gradient_coefficient,
             ),
         },
     }

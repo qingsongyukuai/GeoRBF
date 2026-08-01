@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# These helpers are deliberately test-owned. Importing either implementation's
+# hash contract would make the fully rehashed tamper test trust the code it checks.
 def canonical_json_bytes(value: object) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
