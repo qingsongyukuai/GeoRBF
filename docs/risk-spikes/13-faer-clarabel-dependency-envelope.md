@@ -10,7 +10,7 @@ Probe: [`spikes/faer-clarabel`](../../spikes/faer-clarabel/README.md)
 
 ## Verdict
 
-**Production admission remains gated.** The Linux x86-64 probe proves that the pinned pure-Rust routes can supply the required dense KKT, rank/factorization, QP, SOCP, candidate, residual, certificate, settings, and exact-one-thread evidence. The other four required native platforms are still **ambiguous** until the committed native matrix has completed. Independently, `faer` factor-workspace capacity remains **ambiguous** until its workspace behavior is measured against the 8 GiB plan. Under #13, either ambiguity is unproven and cannot release the product implementation gate.
+**The dependency-platform spike is complete, but production admission remains gated.** [Native matrix run 30706805264](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264) proves that the pinned pure-Rust routes build and provide the required dense KKT, rank/factorization, QP, SOCP, candidate, residual, certificate, settings, and exact-one-thread evidence on all five required native targets. Independently, `faer` factor-workspace capacity remains **ambiguous** until its workspace behavior is measured against the 8 GiB plan. Under #13, that ambiguity is unproven and cannot release the product implementation gate; accepting the spike is distinct from admitting the dependencies to the product tree.
 
 No product dependency has been added. The probe is a standalone, unpublished Rust crate outside the future `georbf` product tree.
 
@@ -19,13 +19,13 @@ No product dependency has been added. The probe is a standalone, unpublished Rus
 | Field | Fixed value | State |
 | --- | --- | --- |
 | Rust edition | 2024 | proven |
-| MSRV/toolchain | Rust 1.85.0 | proven on Linux x86-64 |
-| `faer` | `=0.24.4`, defaults off, `linalg,std` | proven on Linux x86-64 |
-| `clarabel` | `=0.11.1`, defaults off, `serde` | proven on Linux x86-64 |
+| MSRV/toolchain | Rust 1.85.0 | proven on all required native targets |
+| `faer` | `=0.24.4`, defaults off, `linalg,std` | proven on all required native targets |
+| `clarabel` | `=0.11.1`, defaults off, `serde` | proven on all required native targets |
 | Clarabel linear solver | `qdldl` | proven; one actual thread |
 | Lockfile | Cargo lock format 4; SHA-256 `16250c7d3102c11f9613555623049b48dea7dcda02e533fc0389d4ed148ebe0c` | proven |
-| Native/BLAS/LAPACK/PARDISO/SDP | no selected package, link, or feature on Linux x86-64 | proven |
-| License policy | MIT/Apache-2.0-compatible permissive closure | proven on Linux x86-64 |
+| Native/BLAS/LAPACK/PARDISO/SDP | no selected package, link, or feature on the required native targets | proven |
+| License policy | MIT/Apache-2.0-compatible permissive closure | proven on all required native targets |
 
 Clarabel 0.11.1 is **unavailable** with a truly empty feature set: its published source references `serde_json` from an unguarded error variant. The envelope therefore explicitly selects only `serde`; this adds serialization crates but no native dependency.
 
@@ -49,7 +49,7 @@ Clarabel 0.11.1 is **unavailable** with a truly empty feature set: its published
 
 ## Dependency and license audit
 
-On native Linux x86-64, Cargo selected 80 packages including the probe. The active graph had no package with Cargo `links` metadata and none of the forbidden native/toolchain packages or BLAS, LAPACK, MKL, Netlib, PARDISO, OpenBLAS, or SDP features. The exact versions and checksums are in `Cargo.lock`; `cargo tree --locked --target all -e features` emits the complete feature graph.
+The completed native matrix ran the dependency audit on every required target; native Linux x86-64 selected 80 packages including the probe. The active graphs had no package with Cargo `links` metadata and none of the forbidden native/toolchain packages or BLAS, LAPACK, MKL, Netlib, PARDISO, OpenBLAS, or SDP features. The exact versions and checksums are in `Cargo.lock`; `cargo tree --locked --target all -e features` emits the complete feature graph.
 
 Twenty selected crates have build scripts: `clarabel`, `libc`, `libm`, `nano-gemm-{c32,c64,f32,f64}`, `num-traits`, `paste`, `private-gemm-x86`, `proc-macro2`, `pulp`, `quote`, `serde`, `serde_core`, `serde_json`, `syn 1`, `thiserror`, `zerocopy`, and `zmij`. Inspection found Rust cfg/version detection or Rust code generation only. Clarabel's script contains dormant BLAS/SDP configuration branches, but the feature audit proves none is selected. No `cc`, CMake, bindgen, pkg-config, vcpkg, BLAS/LAPACK provider, or native `links` package is active.
 
@@ -59,13 +59,13 @@ The active non-product license expressions are MIT, Apache-2.0, MIT/Apache alter
 
 | Required native platform | Runner/target | State | Evidence |
 | --- | --- | --- | --- |
-| Linux x86-64 | local `x86_64-unknown-linux-gnu` | proven | Rust 1.85 check, focused tests, full probe, and audit completed. |
-| Linux AArch64 | `ubuntu-24.04-arm` / `aarch64-unknown-linux-gnu` | ambiguous | Native job committed; no completed run attached yet. |
-| macOS x86-64 | `macos-15-intel` / `x86_64-apple-darwin` | ambiguous | Native job committed; no completed run attached yet. |
-| macOS Apple Silicon | `macos-15` / `aarch64-apple-darwin` | ambiguous | Native job committed; no completed run attached yet. |
-| Windows MSVC x86-64 | `windows-2025` / `x86_64-pc-windows-msvc` | ambiguous | Native job committed; no completed run attached yet. |
+| Linux x86-64 | `ubuntu-24.04` / `x86_64-unknown-linux-gnu` | proven | [Native job 91387223229](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264/job/91387223229) completed. |
+| Linux AArch64 | `ubuntu-24.04-arm` / `aarch64-unknown-linux-gnu` | proven | [Native job 91387223246](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264/job/91387223246) completed. |
+| macOS x86-64 | `macos-15-intel` / `x86_64-apple-darwin` | proven | [Native job 91387223251](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264/job/91387223251) completed. |
+| macOS Apple Silicon | `macos-15` / `aarch64-apple-darwin` | proven | [Native job 91387223255](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264/job/91387223255) completed. |
+| Windows MSVC x86-64 | `windows-2025` / `x86_64-pc-windows-msvc` | proven | [Native job 91387223244](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264/job/91387223244) completed. |
 
-The labels follow GitHub's current hosted-runner matrix. Workflow configuration is replay machinery, not substitute evidence for a completed native run.
+The labels follow GitHub's current hosted-runner matrix. Every job completed its Rust 1.85 check, T15 behavior suite, evidence emission, dependency audit, and feature-graph emission successfully.
 
 ## BackendFingerprint fields
 
@@ -92,7 +92,7 @@ python3 scripts/audit.py
 cargo tree --locked --target all -e features
 ```
 
-The workflow repeats these commands under Rust 1.85.0 on every required native runner. Completed jobs must replace each ambiguous platform row with a run URL and observed fingerprint. Production admission additionally requires measured `faer` factor-workspace capacity evidence; completing the platform matrix alone is insufficient.
+The workflow repeats these commands under Rust 1.85.0 on every required native runner. Run 30706805264 is the accepted native replay for commit `0b40094aec24fe6d3542d2304ad2b941389adcb5`. Production admission additionally requires measured `faer` factor-workspace capacity evidence; the successful platform matrix alone is insufficient.
 
 ## Primary sources
 
