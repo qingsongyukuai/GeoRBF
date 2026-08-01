@@ -1,0 +1,33 @@
+name: Risk spike 14 - Cubic CPD recovery
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/risk-spike-14.yml"
+      - "spikes/cubic-cpd-recovery/**"
+  pull_request:
+    paths:
+      - ".github/workflows/risk-spike-14.yml"
+      - "spikes/cubic-cpd-recovery/**"
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: spikes/cubic-cpd-recovery
+    steps:
+      - name: Check out the spike
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Typecheck every target
+        run: cargo check --locked --all-targets
+      - name: Run the T06 and T07 behavior seams
+        run: cargo test --locked --all-targets
+      - name: Emit mathematical and backend evidence
+        run: cargo run --locked
