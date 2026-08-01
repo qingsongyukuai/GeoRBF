@@ -1,12 +1,8 @@
-use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use clarabel::algebra::CscMatrix;
-use clarabel::solver::{
-    DefaultSettings, DefaultSolver, IPSolver, NonnegativeConeT, SecondOrderConeT, SolverStatus,
-    ZeroConeT,
-};
+use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_scratch,
@@ -88,11 +84,18 @@ pub struct ScaledConvexResiduals {
 
 #[derive(Debug, Clone)]
 pub struct ConvexRouteEvidence {
-    pub problem_class: &'static str,
+    pub problem_class: ConvexProblemClass,
     pub scaled: ScaledConvexResiduals,
     pub recovery_round_trip_error: f64,
+    pub physical_slack_equation_violation: f64,
     pub manufactured_truth_error: f64,
     pub recovered: CanonicalObservables,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvexProblemClass {
+    ReducedQp,
+    ReducedSocp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +119,13 @@ pub struct CounterexampleEvidence {
     pub rank_deficient_polynomial: FailureEvidence,
     pub nonpositive_reduced_pairing: FailureEvidence,
     pub broken_recovery: FailureEvidence,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreflightFailure {
+    PolynomialRankDeficient { rank: usize },
+    ReducedPairingNotPositive { smallest_eigenvalue: f64 },
+    NumericalDecisionGrayZone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +258,23 @@ impl CoordinateNormalization {
 
 #[derive(Debug, Clone)]
 struct CanonicalProblem {
+    functionals: Vec<Functional>,
+    relations: Vec<CanonicalRelation>,
+    semantic_latent_count: usize,
+}
+
+#[derive(Debug, Clone)]
+enum CanonicalRelation {
+    SharedLevel { functional: usize, latent: usize },
+    LatentGauge { latent: usize, value: f64 },
+    FunctionalEquality { functional: usize, value: f64 },
+    FunctionalUpperBound { functional: usize, upper: f64 },
+    SecondOrderCone { components: [(usize, f64); 3] },
+}
+
+#[derive(Debug, Clone)]
+struct ManufacturedCase {
+    canonical: CanonicalProblem,
     kernel: DenseMatrix,
     polynomial: DenseMatrix,
     normalization: CoordinateNormalization,
@@ -377,24 +404,11 @@ impl HouseholderNullSpace {
 
 pub fn run_manufactured_experiment() -> Result<ExperimentEvidence, ExperimentError> {
     let functionals = manufactured_functionals();
+    let functional_count = functionals.len();
     let normalization = CoordinateNormalization::from_functionals(&functionals);
     let polynomial = assemble_polynomial_pairing(&functionals, normalization);
-    let singular_values = polynomial
-        .to_faer()
-        .singular_values()
-        .map_err(|error| ExperimentError::new(format!("polynomial SVD failed: {error:?}")))?;
-    let largest = singular_values.first().copied().unwrap_or(0.0);
-    let threshold =
-        4096.0 * f64::EPSILON * functionals.len().max(POLYNOMIAL_DIMENSION) as f64 * largest;
-    let polynomial_rank = singular_values
-        .iter()
-        .filter(|singular_value| **singular_value >= threshold)
-        .count();
-    if polynomial_rank != POLYNOMIAL_DIMENSION {
-        return Err(ExperimentError::new(format!(
-            "expected rank(P)=4 before solving, observed {polynomial_rank}"
-        )));
-    }
+    let (singular_values, polynomial_rank) = verify_full_polynomial_rank(&polynomial)
+        .map_err(|failure| ExperimentError::new(format!("polynomial preflight: {failure:?}")))?;
     let kernel = assemble_cubic_pairing(&functionals);
     let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank);
     let (mut reduced, null_space_defect) =
@@ -412,17 +426,11 @@ pub fn run_manufactured_experiment() -> Result<ExperimentEvidence, ExperimentErr
         )));
     }
     symmetrize(&mut reduced);
-    let reduced_eigenvalues = reduced
-        .to_faer()
-        .self_adjoint_eigenvalues(Side::Lower)
-        .map_err(|error| ExperimentError::new(format!("reduced eigensolve failed: {error:?}")))?;
-    let reduced_smallest_eigenvalue = reduced_eigenvalues[0];
-    reduced
-        .to_faer()
-        .llt(Side::Lower)
-        .map_err(|_| ExperimentError::new("reduced Cubic pairing is not strictly positive"))?;
+    let reduced_smallest_eigenvalue = verify_reduced_pairing(&reduced)
+        .map_err(|failure| ExperimentError::new(format!("reduced preflight: {failure:?}")))?;
     let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial);
-    let problem = manufacture_canonical_problem(kernel, polynomial, normalization);
+    let problem = manufacture_canonical_problem(functionals, kernel, polynomial, normalization);
+    verify_redundant_canonical_relations(&problem)?;
     let equality = solve_equality(&problem)?;
     let qp = solve_qp(&problem, &null_space, &reduced)?;
     let socp = solve_socp(&problem, &null_space, &reduced)?;
@@ -433,7 +441,7 @@ pub fn run_manufactured_experiment() -> Result<ExperimentEvidence, ExperimentErr
 
     Ok(ExperimentEvidence {
         cpd: CpdEvidence {
-            functional_count: functionals.len(),
+            functional_count,
             polynomial_dimension: POLYNOMIAL_DIMENSION,
             polynomial_rank,
             singular_values,
@@ -459,7 +467,15 @@ pub fn run_counterexamples() -> Result<CounterexampleEvidence, ExperimentError> 
     let flattened_normalization = CoordinateNormalization::from_functionals(&flattened_functionals);
     let flattened_polynomial =
         assemble_polynomial_pairing(&flattened_functionals, flattened_normalization);
-    let flattened_rank = numerical_rank(&flattened_polynomial)?;
+    let flattened_rank = match verify_full_polynomial_rank(&flattened_polynomial) {
+        Err(PreflightFailure::PolynomialRankDeficient { rank }) => rank,
+        Err(other) => {
+            return Err(ExperimentError::new(format!(
+                "unexpected flattened-polynomial verdict: {other:?}"
+            )));
+        }
+        Ok(_) => return Err(ExperimentError::new("rank-deficient case passed preflight")),
+    };
     let rank_deficient_polynomial = FailureEvidence {
         kind: FailureKind::PolynomialRankDeficient,
         solver_invoked: false,
@@ -471,7 +487,8 @@ pub fn run_counterexamples() -> Result<CounterexampleEvidence, ExperimentError> 
     let functionals = manufactured_functionals();
     let normalization = CoordinateNormalization::from_functionals(&functionals);
     let polynomial = assemble_polynomial_pairing(&functionals, normalization);
-    let polynomial_rank = numerical_rank(&polynomial)?;
+    let (_, polynomial_rank) = verify_full_polynomial_rank(&polynomial)
+        .map_err(|failure| ExperimentError::new(format!("valid rank preflight: {failure:?}")))?;
     let kernel = assemble_cubic_pairing(&functionals);
     let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank);
     let mut first_reduced_unit = vec![0.0; null_space.reduced_dimension()];
@@ -488,12 +505,21 @@ pub fn run_counterexamples() -> Result<CounterexampleEvidence, ExperimentError> 
     let (mut damaged_reduced, _) =
         materialize_reduced_pairing(&damaged_kernel, &polynomial, &null_space);
     symmetrize(&mut damaged_reduced);
-    let smallest_damaged_eigenvalue = damaged_reduced
-        .to_faer()
-        .self_adjoint_eigenvalues(Side::Lower)
-        .map_err(|error| {
-            ExperimentError::new(format!("damaged reduced eigensolve failed: {error:?}"))
-        })?[0];
+    let smallest_damaged_eigenvalue = match verify_reduced_pairing(&damaged_reduced) {
+        Err(PreflightFailure::ReducedPairingNotPositive {
+            smallest_eigenvalue,
+        }) => smallest_eigenvalue,
+        Err(other) => {
+            return Err(ExperimentError::new(format!(
+                "unexpected damaged-pairing verdict: {other:?}"
+            )));
+        }
+        Ok(_) => {
+            return Err(ExperimentError::new(
+                "damaged reduced pairing passed preflight",
+            ));
+        }
+    };
     let nonpositive_reduced_pairing = FailureEvidence {
         kind: FailureKind::ReducedPairingNotPositive,
         solver_invoked: false,
@@ -504,37 +530,33 @@ pub fn run_counterexamples() -> Result<CounterexampleEvidence, ExperimentError> 
 
     let (mut reduced, _) = materialize_reduced_pairing(&kernel, &polynomial, &null_space);
     symmetrize(&mut reduced);
-    let problem = manufacture_canonical_problem(kernel, polynomial, normalization);
+    let problem = manufacture_canonical_problem(functionals, kernel, polynomial, normalization);
+    verify_redundant_canonical_relations(&problem)?;
     let qp = solve_qp(&problem, &null_space, &reduced)?;
     let backend_contract_passed = qp.scaled.primal <= 1.0e-8
         && qp.scaled.dual <= 1.0e-8
         && qp.scaled.stationarity <= 1.0e-8
         && qp.scaled.complementarity <= 1.0e-8
         && qp.scaled.relative_gap <= 1.0e-8;
-    let mut corrupted_coefficients = qp.recovered.field_coefficients.clone();
-    corrupted_coefficients[0] += 0.01;
+    let mut reduced_primal = null_space.project(&qp.recovered.field_coefficients);
     let standard_polynomial =
         normalization.to_standard_polynomial(qp.recovered.polynomial_coefficients);
-    let mut corrupted_primal = corrupted_coefficients.clone();
-    corrupted_primal.extend_from_slice(&standard_polynomial);
-    corrupted_primal.push(qp.recovered.semantic_latents[0]);
-    let corrupted = recover_canonical(&problem, &corrupted_primal, qp.recovered.slacks.clone());
-    let projected = null_space.project(&corrupted_coefficients);
-    let round_trip = null_space.expand(&projected);
-    let broken_map_round_trip = corrupted_coefficients
-        .iter()
-        .zip(round_trip)
-        .map(|(actual, recovered)| (actual - recovered).abs() / actual.abs().max(1.0))
-        .fold(0.0_f64, f64::max);
+    reduced_primal.extend_from_slice(&standard_polynomial);
+    reduced_primal.extend_from_slice(&qp.recovered.semantic_latents);
+    let corrupted = recover_reduced_primal(
+        &problem,
+        &null_space,
+        &reduced_primal,
+        RecoveryMap::CorruptFirstCoefficient,
+    );
+    let detected_violation = verify_recovery_candidate(&null_space, &reduced_primal, &corrupted)
+        .expect_err("the deliberately corrupted recovery map must fail");
     let broken_recovery = FailureEvidence {
         kind: FailureKind::RecoveryVerification,
         solver_invoked: true,
         backend_contract_passed,
         hidden_regularization_applied: false,
-        detected_violation: corrupted
-            .hard_violation
-            .max(corrupted.side_condition_violation)
-            .max(broken_map_round_trip),
+        detected_violation,
     };
 
     Ok(CounterexampleEvidence {
@@ -608,17 +630,60 @@ fn assemble_polynomial_pairing(
     })
 }
 
-fn numerical_rank(matrix: &DenseMatrix) -> Result<usize, ExperimentError> {
+fn verify_full_polynomial_rank(
+    matrix: &DenseMatrix,
+) -> Result<(Vec<f64>, usize), PreflightFailure> {
     let singular_values = matrix
         .to_faer()
         .singular_values()
-        .map_err(|error| ExperimentError::new(format!("rank SVD failed: {error:?}")))?;
+        .map_err(|_| PreflightFailure::NumericalDecisionGrayZone)?;
     let largest = singular_values.first().copied().unwrap_or(0.0);
-    let threshold = 4096.0 * f64::EPSILON * matrix.rows.max(matrix.columns) as f64 * largest;
-    Ok(singular_values
+    let smallest = singular_values.last().copied().unwrap_or(0.0);
+    let dimension = matrix.rows.max(matrix.columns);
+    let reject_threshold = 64.0 * f64::EPSILON * dimension as f64 * largest;
+    let accept_threshold = 4096.0 * f64::EPSILON * dimension as f64 * largest;
+    let rank = singular_values
         .iter()
-        .filter(|singular_value| **singular_value >= threshold)
-        .count())
+        .filter(|singular_value| **singular_value > reject_threshold)
+        .count();
+    if smallest <= reject_threshold || rank != POLYNOMIAL_DIMENSION {
+        Err(PreflightFailure::PolynomialRankDeficient { rank })
+    } else if smallest < accept_threshold {
+        Err(PreflightFailure::NumericalDecisionGrayZone)
+    } else {
+        Ok((singular_values, rank))
+    }
+}
+
+fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, PreflightFailure> {
+    let eigenvalues = matrix
+        .to_faer()
+        .self_adjoint_eigenvalues(Side::Lower)
+        .map_err(|_| PreflightFailure::NumericalDecisionGrayZone)?;
+    let smallest = eigenvalues[0];
+    let largest = *eigenvalues.last().expect("the reduced pairing is nonempty");
+    if smallest <= 0.0 {
+        return Err(PreflightFailure::ReducedPairingNotPositive {
+            smallest_eigenvalue: smallest,
+        });
+    }
+    let reject = 64.0 * f64::EPSILON * matrix.rows as f64 * largest;
+    let accept = 4096.0 * f64::EPSILON * matrix.rows as f64 * largest;
+    if smallest <= reject {
+        return Err(PreflightFailure::ReducedPairingNotPositive {
+            smallest_eigenvalue: smallest,
+        });
+    }
+    if smallest < accept {
+        return Err(PreflightFailure::NumericalDecisionGrayZone);
+    }
+    matrix
+        .to_faer()
+        .llt(Side::Lower)
+        .map_err(|_| PreflightFailure::ReducedPairingNotPositive {
+            smallest_eigenvalue: smallest,
+        })?;
+    Ok(smallest)
 }
 
 fn assemble_cubic_pairing(functionals: &[Functional]) -> DenseMatrix {
@@ -738,10 +803,11 @@ fn affine_reproduction_error(kernel: &DenseMatrix, polynomial: &DenseMatrix) -> 
 }
 
 fn manufacture_canonical_problem(
+    functionals: Vec<Functional>,
     kernel: DenseMatrix,
     polynomial: DenseMatrix,
     normalization: CoordinateNormalization,
-) -> CanonicalProblem {
+) -> ManufacturedCase {
     let truth_coefficients = vec![
         0.195, -0.105, -0.17, -0.10, 0.10, -0.07, 0.12, -0.05, 0.08, -0.04,
     ];
@@ -756,7 +822,44 @@ fn manufacture_canonical_problem(
         .collect::<Vec<_>>();
     let truth_latent = 0.5 * (truth_values[0] + truth_values[1]);
 
-    CanonicalProblem {
+    let mut relations = vec![
+        CanonicalRelation::SharedLevel {
+            functional: 0,
+            latent: 0,
+        },
+        CanonicalRelation::SharedLevel {
+            functional: 1,
+            latent: 0,
+        },
+        CanonicalRelation::LatentGauge {
+            latent: 0,
+            value: truth_latent,
+        },
+    ];
+    relations.extend((2..truth_values.len()).map(|functional| {
+        CanonicalRelation::FunctionalEquality {
+            functional,
+            value: truth_values[functional],
+        }
+    }));
+    relations.push(CanonicalRelation::FunctionalUpperBound {
+        functional: 4,
+        upper: truth_values[4] + 0.75,
+    });
+    relations.push(CanonicalRelation::SecondOrderCone {
+        components: [
+            (4, truth_values[4] + 1.0),
+            (5, truth_values[5] + 0.2),
+            (6, truth_values[6] - 0.1),
+        ],
+    });
+
+    ManufacturedCase {
+        canonical: CanonicalProblem {
+            functionals,
+            relations,
+            semantic_latent_count: 1,
+        },
         kernel,
         polynomial,
         normalization,
@@ -767,7 +870,50 @@ fn manufacture_canonical_problem(
     }
 }
 
-fn solve_equality(problem: &CanonicalProblem) -> Result<EqualityEvidence, ExperimentError> {
+fn verify_redundant_canonical_relations(problem: &ManufacturedCase) -> Result<(), ExperimentError> {
+    let mut fixed_functionals = vec![false; problem.canonical.functionals.len()];
+    let mut gauged_latents = vec![false; problem.canonical.semantic_latent_count];
+    for relation in &problem.canonical.relations {
+        match relation {
+            CanonicalRelation::SharedLevel { functional, .. }
+            | CanonicalRelation::FunctionalEquality { functional, .. } => {
+                fixed_functionals[*functional] = true;
+            }
+            CanonicalRelation::LatentGauge { latent, .. } => gauged_latents[*latent] = true,
+            CanonicalRelation::FunctionalUpperBound { .. }
+            | CanonicalRelation::SecondOrderCone { .. } => {}
+        }
+    }
+    if fixed_functionals.iter().any(|fixed| !fixed) || gauged_latents.iter().any(|fixed| !fixed) {
+        return Err(ExperimentError::new(
+            "route comparison requires equality-fixed functionals and semantic latents",
+        ));
+    }
+    for relation in &problem.canonical.relations {
+        match relation {
+            CanonicalRelation::FunctionalUpperBound { functional, upper } => {
+                if problem.truth_values[*functional] > *upper {
+                    return Err(ExperimentError::new(
+                        "canonical upper bound is not redundant with the equality semantics",
+                    ));
+                }
+            }
+            CanonicalRelation::SecondOrderCone { components } => {
+                let slack =
+                    components.map(|(functional, rhs)| rhs - problem.truth_values[functional]);
+                if slack[0] < slack[1].hypot(slack[2]) {
+                    return Err(ExperimentError::new(
+                        "canonical SOC is not redundant with the equality semantics",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn solve_equality(problem: &ManufacturedCase) -> Result<EqualityEvidence, ExperimentError> {
     let (hessian, constraints, constraint_rhs) = equality_primal_form(problem);
     let primal_dimension = hessian.rows;
     let constraint_dimension = constraints.rows;
@@ -805,7 +951,7 @@ fn solve_equality(problem: &CanonicalProblem) -> Result<EqualityEvidence, Experi
         normalized_backward_error(&scaled.matrix, &scaled_solution, &scaled.rhs);
     let physical_backward_error = normalized_backward_error(&kkt, &solution, &rhs);
     let normalized_backward_error = scaled_backward_error.max(physical_backward_error);
-    let inertia = inertia_from_lblt(&factor, kkt_dimension);
+    let inertia = inertia_from_lblt(&factor, kkt_dimension)?;
     let expected_inertia = InertiaEvidence {
         positive: primal_dimension,
         negative: constraint_dimension,
@@ -813,7 +959,7 @@ fn solve_equality(problem: &CanonicalProblem) -> Result<EqualityEvidence, Experi
     };
 
     let primal = &solution[..primal_dimension];
-    let recovered = recover_canonical(problem, primal, Vec::new());
+    let recovered = recover_canonical(problem, primal);
     let scaling_round_trip_error = scaling_round_trip_error(
         primal,
         &scaled.factors[..primal_dimension],
@@ -832,10 +978,24 @@ fn solve_equality(problem: &CanonicalProblem) -> Result<EqualityEvidence, Experi
     })
 }
 
-fn equality_primal_form(problem: &CanonicalProblem) -> (DenseMatrix, DenseMatrix, Vec<f64>) {
+fn equality_primal_form(problem: &ManufacturedCase) -> (DenseMatrix, DenseMatrix, Vec<f64>) {
     let coefficient_count = problem.kernel.rows;
-    let primal_dimension = coefficient_count + POLYNOMIAL_DIMENSION + 1;
-    let constraint_dimension = POLYNOMIAL_DIMENSION + 3 + (coefficient_count - 2);
+    let primal_dimension =
+        coefficient_count + POLYNOMIAL_DIMENSION + problem.canonical.semantic_latent_count;
+    let equality_relations = problem
+        .canonical
+        .relations
+        .iter()
+        .filter(|relation| {
+            matches!(
+                relation,
+                CanonicalRelation::SharedLevel { .. }
+                    | CanonicalRelation::LatentGauge { .. }
+                    | CanonicalRelation::FunctionalEquality { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let constraint_dimension = POLYNOMIAL_DIMENSION + equality_relations.len();
     let hessian = DenseMatrix::from_fn(primal_dimension, primal_dimension, |row, column| {
         if row < coefficient_count && column < coefficient_count {
             problem.kernel.get(row, column)
@@ -852,39 +1012,53 @@ fn equality_primal_form(problem: &CanonicalProblem) -> (DenseMatrix, DenseMatrix
                 } else {
                     0.0
                 }
-            } else if row == POLYNOMIAL_DIMENSION || row == POLYNOMIAL_DIMENSION + 1 {
-                let functional = row - POLYNOMIAL_DIMENSION;
-                if column < coefficient_count {
-                    problem.kernel.get(functional, column)
-                } else if column < latent_column {
-                    problem
-                        .polynomial
-                        .get(functional, column - coefficient_count)
-                } else {
-                    -1.0
-                }
-            } else if row == POLYNOMIAL_DIMENSION + 2 {
-                if column == latent_column { 1.0 } else { 0.0 }
             } else {
-                let functional = row - (POLYNOMIAL_DIMENSION + 1);
-                if column < coefficient_count {
-                    problem.kernel.get(functional, column)
-                } else if column < latent_column {
-                    problem
-                        .polynomial
-                        .get(functional, column - coefficient_count)
-                } else {
-                    0.0
+                match equality_relations[row - POLYNOMIAL_DIMENSION] {
+                    CanonicalRelation::SharedLevel { functional, latent } => {
+                        if column < coefficient_count {
+                            problem.kernel.get(*functional, column)
+                        } else if column < latent_column {
+                            problem
+                                .polynomial
+                                .get(*functional, column - coefficient_count)
+                        } else if column == latent_column + latent {
+                            -1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    CanonicalRelation::LatentGauge { latent, .. } => {
+                        if column == latent_column + latent {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    CanonicalRelation::FunctionalEquality { functional, .. } => {
+                        if column < coefficient_count {
+                            problem.kernel.get(*functional, column)
+                        } else if column < latent_column {
+                            problem
+                                .polynomial
+                                .get(*functional, column - coefficient_count)
+                        } else {
+                            0.0
+                        }
+                    }
+                    _ => unreachable!("only equality relations are selected"),
                 }
             }
         });
     let constraint_rhs = (0..constraint_dimension)
-        .map(|row| match row.cmp(&(POLYNOMIAL_DIMENSION + 2)) {
-            Ordering::Less => 0.0,
-            Ordering::Equal => problem.truth_latent,
-            Ordering::Greater => {
-                let functional = row - (POLYNOMIAL_DIMENSION + 1);
-                problem.truth_values[functional]
+        .map(|row| {
+            if row < POLYNOMIAL_DIMENSION {
+                return 0.0;
+            }
+            match equality_relations[row - POLYNOMIAL_DIMENSION] {
+                CanonicalRelation::SharedLevel { .. } => 0.0,
+                CanonicalRelation::LatentGauge { value, .. }
+                | CanonicalRelation::FunctionalEquality { value, .. } => *value,
+                _ => unreachable!("only equality relations are selected"),
             }
         })
         .collect();
@@ -892,251 +1066,172 @@ fn equality_primal_form(problem: &CanonicalProblem) -> (DenseMatrix, DenseMatrix
 }
 
 fn solve_qp(
-    problem: &CanonicalProblem,
+    problem: &ManufacturedCase,
     null_space: &HouseholderNullSpace,
     reduced_hessian: &DenseMatrix,
 ) -> Result<ConvexRouteEvidence, ExperimentError> {
     let (equality_rows, equality_rhs) = reduced_equalities(problem, null_space);
-    let reduced_dimension = null_space.reduced_dimension();
-    let variable_count = reduced_dimension + POLYNOMIAL_DIMENSION + 1;
-    let hessian = DenseMatrix::from_fn(variable_count, variable_count, |row, column| {
-        if row < reduced_dimension && column < reduced_dimension {
-            reduced_hessian.get(row, column)
-        } else {
-            0.0
-        }
-    });
-    let linear_objective = vec![0.0; variable_count];
-    let affine_bound_row = reduced_functional_row(problem, null_space, 4);
-    let constraint_matrix =
-        DenseMatrix::from_fn(equality_rows.rows + 1, variable_count, |row, column| {
+    let (functional, upper) = problem
+        .canonical
+        .relations
+        .iter()
+        .find_map(|relation| match relation {
+            CanonicalRelation::FunctionalUpperBound { functional, upper } => {
+                Some((*functional, *upper))
+            }
+            _ => None,
+        })
+        .ok_or_else(|| ExperimentError::new("canonical upper bound is missing"))?;
+    let affine_bound_row = reduced_functional_row(problem, null_space, functional);
+    let constraint_matrix = DenseMatrix::from_fn(
+        equality_rows.rows + 1,
+        equality_rows.columns,
+        |row, column| {
             if row < equality_rows.rows {
                 equality_rows.get(row, column)
             } else {
                 affine_bound_row[column]
             }
-        });
+        },
+    );
     let mut constraint_rhs = equality_rhs;
-    constraint_rhs.push(problem.truth_values[4] + 0.75);
-    let cone_blocks = vec![
-        ConeBlock::Zero(equality_rows.rows),
-        ConeBlock::Nonnegative(1),
-    ];
-    let scaled = scale_conic_form(
-        &hessian,
-        &linear_objective,
-        &constraint_matrix,
-        &constraint_rhs,
-        &cone_blocks,
-    )?;
-    let p = scaled.hessian.to_csc().to_triu();
-    let a = scaled.constraints.to_csc();
-    let cones = [ZeroConeT(equality_rows.rows), NonnegativeConeT(1)];
-    let settings = clarabel_settings();
-    let mut solver = DefaultSolver::new(
-        &p,
-        &scaled.linear_objective,
-        &a,
-        &scaled.constraint_rhs,
-        &cones,
-        settings,
-    )
-    .map_err(|error| ExperimentError::new(format!("Clarabel QP setup failed: {error}")))?;
-    solver.solve();
-    if !matches!(
-        solver.solution.status,
-        SolverStatus::Solved | SolverStatus::AlmostSolved
-    ) {
-        return Err(ExperimentError::new(format!(
-            "Clarabel QP returned {}",
-            solver.solution.status
-        )));
-    }
-    let scaled_primal = solver.solution.x.clone();
-    let scaled_dual = solver.solution.z.clone();
-    let scaled_slack = solver.solution.s.clone();
-    let residuals = scaled_convex_residuals(
-        &scaled.hessian,
-        &scaled.linear_objective,
-        &scaled.constraints,
-        &scaled.constraint_rhs,
-        &cone_blocks,
-        &scaled_primal,
-        &scaled_dual,
-        &scaled_slack,
-    );
-    let physical_reduced = scaled_primal
-        .iter()
-        .zip(&scaled.variable_factors)
-        .map(|(value, factor)| value * factor)
-        .collect::<Vec<_>>();
-    let physical_slacks = scaled_slack
-        .iter()
-        .zip(&scaled.constraint_factors)
-        .map(|(value, factor)| value / factor)
-        .collect::<Vec<_>>();
-    let coefficients = null_space.expand(&physical_reduced[..reduced_dimension]);
-    let mut full_primal = coefficients.clone();
-    full_primal.extend_from_slice(&physical_reduced[reduced_dimension..]);
-    let mut recovered = recover_canonical(
+    constraint_rhs.push(upper);
+    solve_convex_form(
         problem,
-        &full_primal,
-        vec![physical_slacks[equality_rows.rows]],
-    );
-    let affine_violation =
-        (recovered.functional_values[4] - (problem.truth_values[4] + 0.75)).max(0.0);
-    recovered.hard_violation = recovered.hard_violation.max(affine_violation);
-    let recovery_round_trip_error = conic_recovery_round_trip_error(
         null_space,
-        &physical_reduced,
-        &scaled_primal,
-        &physical_slacks,
-        &scaled_slack,
-        &scaled.variable_factors,
-        &scaled.constraint_factors,
-        problem.normalization,
-        recovered.polynomial_coefficients,
-    );
-    let manufactured_truth_error = manufactured_truth_error(problem, &recovered);
-
-    Ok(ConvexRouteEvidence {
-        problem_class: "reduced_qp",
-        scaled: residuals,
-        recovery_round_trip_error,
-        manufactured_truth_error,
-        recovered,
-    })
+        UnscaledConicForm {
+            problem_class: ConvexProblemClass::ReducedQp,
+            hessian: reduced_route_hessian(problem, null_space, reduced_hessian),
+            linear_objective: vec![0.0; equality_rows.columns],
+            constraints: constraint_matrix,
+            constraint_rhs,
+            cone_blocks: vec![
+                ConeBlock::Zero(equality_rows.rows),
+                ConeBlock::Nonnegative(1),
+            ],
+            canonical_slack_indices: vec![0],
+        },
+    )
 }
 
 fn solve_socp(
-    problem: &CanonicalProblem,
+    problem: &ManufacturedCase,
     null_space: &HouseholderNullSpace,
     reduced_hessian: &DenseMatrix,
 ) -> Result<ConvexRouteEvidence, ExperimentError> {
     let (equality_rows, equality_rhs) = reduced_equalities(problem, null_space);
-    let reduced_dimension = null_space.reduced_dimension();
-    let variable_count = reduced_dimension + POLYNOMIAL_DIMENSION + 1;
-    let hessian = DenseMatrix::from_fn(variable_count, variable_count, |row, column| {
-        if row < reduced_dimension && column < reduced_dimension {
-            reduced_hessian.get(row, column)
-        } else {
-            0.0
-        }
-    });
-    let linear_objective = vec![0.0; variable_count];
-    let cone_rows = [
-        reduced_functional_row(problem, null_space, 4),
-        reduced_functional_row(problem, null_space, 5),
-        reduced_functional_row(problem, null_space, 6),
-    ];
-    let constraint_matrix =
-        DenseMatrix::from_fn(equality_rows.rows + 3, variable_count, |row, column| {
+    let components = problem
+        .canonical
+        .relations
+        .iter()
+        .find_map(|relation| match relation {
+            CanonicalRelation::SecondOrderCone { components } => Some(*components),
+            _ => None,
+        })
+        .ok_or_else(|| ExperimentError::new("canonical SOC is missing"))?;
+    let cone_rows =
+        components.map(|(functional, _)| reduced_functional_row(problem, null_space, functional));
+    let constraint_matrix = DenseMatrix::from_fn(
+        equality_rows.rows + 3,
+        equality_rows.columns,
+        |row, column| {
             if row < equality_rows.rows {
                 equality_rows.get(row, column)
             } else {
                 cone_rows[row - equality_rows.rows][column]
             }
-        });
+        },
+    );
     let mut constraint_rhs = equality_rhs;
-    constraint_rhs.extend([
-        problem.truth_values[4] + 1.0,
-        problem.truth_values[5] + 0.2,
-        problem.truth_values[6] - 0.1,
-    ]);
-    let cone_blocks = vec![
-        ConeBlock::Zero(equality_rows.rows),
-        ConeBlock::SecondOrder(3),
-    ];
-    let scaled = scale_conic_form(
-        &hessian,
-        &linear_objective,
-        &constraint_matrix,
-        &constraint_rhs,
-        &cone_blocks,
-    )?;
-    let p = scaled.hessian.to_csc().to_triu();
-    let a = scaled.constraints.to_csc();
-    let cones = [ZeroConeT(equality_rows.rows), SecondOrderConeT(3)];
-    let settings = clarabel_settings();
-    let mut solver = DefaultSolver::new(
-        &p,
-        &scaled.linear_objective,
-        &a,
-        &scaled.constraint_rhs,
-        &cones,
-        settings,
-    )
-    .map_err(|error| ExperimentError::new(format!("Clarabel SOCP setup failed: {error}")))?;
-    solver.solve();
-    if !matches!(
-        solver.solution.status,
-        SolverStatus::Solved | SolverStatus::AlmostSolved
-    ) {
-        return Err(ExperimentError::new(format!(
-            "Clarabel SOCP returned {}",
-            solver.solution.status
-        )));
-    }
-    let scaled_primal = solver.solution.x.clone();
-    let scaled_dual = solver.solution.z.clone();
-    let scaled_slack = solver.solution.s.clone();
-    let residuals = scaled_convex_residuals(
-        &scaled.hessian,
-        &scaled.linear_objective,
-        &scaled.constraints,
-        &scaled.constraint_rhs,
-        &cone_blocks,
-        &scaled_primal,
-        &scaled_dual,
-        &scaled_slack,
-    );
-    let physical_reduced = scaled_primal
-        .iter()
-        .zip(&scaled.variable_factors)
-        .map(|(value, factor)| value * factor)
-        .collect::<Vec<_>>();
-    let physical_slacks = scaled_slack
-        .iter()
-        .zip(&scaled.constraint_factors)
-        .map(|(value, factor)| value / factor)
-        .collect::<Vec<_>>();
-    let coefficients = null_space.expand(&physical_reduced[..reduced_dimension]);
-    let mut full_primal = coefficients.clone();
-    full_primal.extend_from_slice(&physical_reduced[reduced_dimension..]);
-    let canonical_slacks = physical_slacks[equality_rows.rows..].to_vec();
-    let mut recovered = recover_canonical(problem, &full_primal, canonical_slacks.clone());
-    let cone_violation =
-        (canonical_slacks[1].hypot(canonical_slacks[2]) - canonical_slacks[0]).max(0.0);
-    recovered.hard_violation = recovered.hard_violation.max(cone_violation);
-    let recovery_round_trip_error = conic_recovery_round_trip_error(
+    constraint_rhs.extend(components.map(|(_, rhs)| rhs));
+    solve_convex_form(
+        problem,
         null_space,
-        &physical_reduced,
-        &scaled_primal,
-        &physical_slacks,
-        &scaled_slack,
-        &scaled.variable_factors,
-        &scaled.constraint_factors,
-        problem.normalization,
-        recovered.polynomial_coefficients,
-    );
-    let manufactured_truth_error = manufactured_truth_error(problem, &recovered);
+        UnscaledConicForm {
+            problem_class: ConvexProblemClass::ReducedSocp,
+            hessian: reduced_route_hessian(problem, null_space, reduced_hessian),
+            linear_objective: vec![0.0; equality_rows.columns],
+            constraints: constraint_matrix,
+            constraint_rhs,
+            cone_blocks: vec![
+                ConeBlock::Zero(equality_rows.rows),
+                ConeBlock::SecondOrder(3),
+            ],
+            canonical_slack_indices: vec![1, 2, 3],
+        },
+    )
+}
 
-    Ok(ConvexRouteEvidence {
-        problem_class: "reduced_socp",
-        scaled: residuals,
-        recovery_round_trip_error,
-        manufactured_truth_error,
-        recovered,
+fn reduced_route_hessian(
+    problem: &ManufacturedCase,
+    null_space: &HouseholderNullSpace,
+    reduced_hessian: &DenseMatrix,
+) -> DenseMatrix {
+    let reduced_dimension = null_space.reduced_dimension();
+    let variable_count =
+        reduced_dimension + POLYNOMIAL_DIMENSION + problem.canonical.semantic_latent_count;
+    DenseMatrix::from_fn(variable_count, variable_count, |row, column| {
+        if row < reduced_dimension && column < reduced_dimension {
+            reduced_hessian.get(row, column)
+        } else {
+            0.0
+        }
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RecoveryMap {
+    ExactHouseholder,
+    CorruptFirstCoefficient,
+}
+
+fn recover_reduced_primal(
+    problem: &ManufacturedCase,
+    null_space: &HouseholderNullSpace,
+    reduced_primal: &[f64],
+    recovery_map: RecoveryMap,
+) -> CanonicalObservables {
+    let reduced_dimension = null_space.reduced_dimension();
+    let mut coefficients = null_space.expand(&reduced_primal[..reduced_dimension]);
+    if matches!(recovery_map, RecoveryMap::CorruptFirstCoefficient) {
+        coefficients[0] += 0.01;
+    }
+    let mut full_primal = coefficients;
+    full_primal.extend_from_slice(&reduced_primal[reduced_dimension..]);
+    recover_canonical(problem, &full_primal)
+}
+
+fn verify_recovery_candidate(
+    null_space: &HouseholderNullSpace,
+    reduced_primal: &[f64],
+    recovered: &CanonicalObservables,
+) -> Result<(), f64> {
+    let reduced_dimension = null_space.reduced_dimension();
+    let expected_coefficients = null_space.expand(&reduced_primal[..reduced_dimension]);
+    let map_violation = recovered
+        .field_coefficients
+        .iter()
+        .zip(expected_coefficients)
+        .map(|(actual, expected)| (actual - expected).abs() / expected.abs().max(1.0))
+        .fold(0.0_f64, f64::max);
+    let violation = map_violation
+        .max(recovered.side_condition_violation)
+        .max(recovered.hard_violation);
+    if violation <= 1.0e-8 {
+        Ok(())
+    } else {
+        Err(violation)
+    }
+}
+
 fn reduced_equalities(
-    problem: &CanonicalProblem,
+    problem: &ManufacturedCase,
     null_space: &HouseholderNullSpace,
 ) -> (DenseMatrix, Vec<f64>) {
     let (_, full_constraints, full_rhs) = equality_primal_form(problem);
     let reduced_dimension = null_space.reduced_dimension();
-    let reduced_variable_count = reduced_dimension + POLYNOMIAL_DIMENSION + 1;
+    let reduced_variable_count =
+        reduced_dimension + POLYNOMIAL_DIMENSION + problem.canonical.semantic_latent_count;
     let rows = full_constraints.rows - POLYNOMIAL_DIMENSION;
     let reduced = DenseMatrix::from_fn(rows, reduced_variable_count, |row, column| {
         let full_row = row + POLYNOMIAL_DIMENSION;
@@ -1154,7 +1249,7 @@ fn reduced_equalities(
 }
 
 fn reduced_functional_row(
-    problem: &CanonicalProblem,
+    problem: &ManufacturedCase,
     null_space: &HouseholderNullSpace,
     functional: usize,
 ) -> Vec<f64> {
@@ -1165,8 +1260,14 @@ fn reduced_functional_row(
             .collect::<Vec<_>>(),
     );
     row.extend((0..POLYNOMIAL_DIMENSION).map(|column| problem.polynomial.get(functional, column)));
-    row.push(0.0);
-    assert_eq!(row.len(), reduced_dimension + POLYNOMIAL_DIMENSION + 1);
+    row.extend(std::iter::repeat_n(
+        0.0,
+        problem.canonical.semantic_latent_count,
+    ));
+    assert_eq!(
+        row.len(),
+        reduced_dimension + POLYNOMIAL_DIMENSION + problem.canonical.semantic_latent_count
+    );
     row
 }
 
@@ -1189,6 +1290,25 @@ impl ConeBlock {
     fn uses_common_scaling(self) -> bool {
         matches!(self, Self::SecondOrder(_))
     }
+
+    fn clarabel(self) -> SupportedConeT<f64> {
+        match self {
+            Self::Zero(dimension) => SupportedConeT::ZeroConeT(dimension),
+            Self::Nonnegative(dimension) => SupportedConeT::NonnegativeConeT(dimension),
+            Self::SecondOrder(dimension) => SupportedConeT::SecondOrderConeT(dimension),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UnscaledConicForm {
+    problem_class: ConvexProblemClass,
+    hessian: DenseMatrix,
+    linear_objective: Vec<f64>,
+    constraints: DenseMatrix,
+    constraint_rhs: Vec<f64>,
+    cone_blocks: Vec<ConeBlock>,
+    canonical_slack_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1197,30 +1317,136 @@ struct ScaledConicForm {
     linear_objective: Vec<f64>,
     constraints: DenseMatrix,
     constraint_rhs: Vec<f64>,
+    cone_blocks: Vec<ConeBlock>,
     variable_factors: Vec<f64>,
     constraint_factors: Vec<f64>,
 }
 
-fn scale_conic_form(
-    hessian: &DenseMatrix,
-    linear_objective: &[f64],
-    constraints: &DenseMatrix,
-    constraint_rhs: &[f64],
-    cone_blocks: &[ConeBlock],
-) -> Result<ScaledConicForm, ExperimentError> {
-    let mut scaled_hessian = hessian.clone();
-    let mut scaled_objective = linear_objective.to_vec();
-    let mut scaled_constraints = constraints.clone();
-    let mut scaled_rhs = constraint_rhs.to_vec();
-    let mut variable_factors = vec![1.0; hessian.columns];
-    let mut constraint_factors = vec![1.0; constraints.rows];
+fn solve_convex_form(
+    problem: &ManufacturedCase,
+    null_space: &HouseholderNullSpace,
+    form: UnscaledConicForm,
+) -> Result<ConvexRouteEvidence, ExperimentError> {
+    let scaled = scale_conic_form(&form)?;
+    let p = scaled.hessian.to_csc().to_triu();
+    let a = scaled.constraints.to_csc();
+    let cones = scaled
+        .cone_blocks
+        .iter()
+        .copied()
+        .map(ConeBlock::clarabel)
+        .collect::<Vec<_>>();
+    let mut solver = DefaultSolver::new(
+        &p,
+        &scaled.linear_objective,
+        &a,
+        &scaled.constraint_rhs,
+        &cones,
+        clarabel_settings(),
+    )
+    .map_err(|error| ExperimentError::new(format!("Clarabel setup failed: {error}")))?;
+    solver.solve();
+    if !matches!(
+        solver.solution.status,
+        SolverStatus::Solved | SolverStatus::AlmostSolved
+    ) {
+        return Err(ExperimentError::new(format!(
+            "Clarabel returned {} for {:?}",
+            solver.solution.status, form.problem_class
+        )));
+    }
+    let scaled_primal = solver.solution.x.clone();
+    let scaled_dual = solver.solution.z.clone();
+    let scaled_slack = solver.solution.s.clone();
+    let residuals = scaled_convex_residuals(&scaled, &scaled_primal, &scaled_dual, &scaled_slack);
+    let physical_reduced = scaled_primal
+        .iter()
+        .zip(&scaled.variable_factors)
+        .map(|(value, factor)| value * factor)
+        .collect::<Vec<_>>();
+    let physical_slacks = scaled_slack
+        .iter()
+        .zip(&scaled.constraint_factors)
+        .map(|(value, factor)| value / factor)
+        .collect::<Vec<_>>();
+    let mut recovered = recover_reduced_primal(
+        problem,
+        null_space,
+        &physical_reduced,
+        RecoveryMap::ExactHouseholder,
+    );
+    verify_recovery_candidate(null_space, &physical_reduced, &recovered).map_err(|violation| {
+        ExperimentError::new(format!(
+            "canonical recovery verification failed: {violation:e}"
+        ))
+    })?;
+    let physical_slack_equation_violation = physical_slack_equation_violation(
+        &form,
+        &physical_reduced,
+        &physical_slacks,
+        &recovered.slacks,
+    );
+    recovered.hard_violation = recovered
+        .hard_violation
+        .max(physical_slack_equation_violation);
+    let recovery_round_trip_error = conic_recovery_round_trip_error(
+        null_space,
+        &physical_reduced,
+        &scaled_primal,
+        &physical_slacks,
+        &scaled_slack,
+        &scaled.variable_factors,
+        &scaled.constraint_factors,
+        problem.normalization,
+        recovered.polynomial_coefficients,
+    );
+    let manufactured_truth_error = manufactured_truth_error(problem, &recovered);
+    Ok(ConvexRouteEvidence {
+        problem_class: form.problem_class,
+        scaled: residuals,
+        recovery_round_trip_error,
+        physical_slack_equation_violation,
+        manufactured_truth_error,
+        recovered,
+    })
+}
+
+fn physical_slack_equation_violation(
+    form: &UnscaledConicForm,
+    primal: &[f64],
+    backend_slacks: &[f64],
+    canonical_slacks: &[f64],
+) -> f64 {
+    let affine = form.constraints.multiply_vector(primal);
+    let equation_violation = affine
+        .iter()
+        .zip(backend_slacks)
+        .zip(&form.constraint_rhs)
+        .map(|((affine, slack), rhs)| (affine + slack - rhs).abs())
+        .fold(0.0_f64, f64::max);
+    let retained_start = form.constraints.rows - form.canonical_slack_indices.len();
+    let recovered_slack_violation = backend_slacks[retained_start..]
+        .iter()
+        .zip(&form.canonical_slack_indices)
+        .map(|(backend, canonical_index)| (backend - canonical_slacks[*canonical_index]).abs())
+        .fold(0.0_f64, f64::max);
+    equation_violation.max(recovered_slack_violation)
+}
+
+fn scale_conic_form(form: &UnscaledConicForm) -> Result<ScaledConicForm, ExperimentError> {
+    let mut scaled_hessian = form.hessian.clone();
+    let mut scaled_objective = form.linear_objective.clone();
+    let mut scaled_constraints = form.constraints.clone();
+    let mut scaled_rhs = form.constraint_rhs.clone();
+    let mut variable_factors = vec![1.0; form.hessian.columns];
+    let mut constraint_factors = vec![1.0; form.constraints.rows];
     for _ in 0..8 {
-        let variable_round = (0..hessian.columns)
+        let variable_round = (0..form.hessian.columns)
             .map(|column| {
-                let hessian_norm = (0..hessian.rows)
+                let hessian_norm = (0..form.hessian.rows)
                     .map(|row| scaled_hessian.get(row, column).abs())
                     .fold(0.0_f64, f64::max);
-                let constraint_norm = (0..constraints.rows)
+                let constraint_norm = (0..form.constraints.rows)
                     .map(|row| scaled_constraints.get(row, column).abs())
                     .fold(0.0_f64, f64::max);
                 bounded_power_of_two_factor(
@@ -1250,7 +1476,7 @@ fn scale_conic_form(
 
         let mut row_round = vec![1.0; scaled_constraints.rows];
         let mut start = 0;
-        for block in cone_blocks {
+        for block in &form.cone_blocks {
             let end = start + block.dimension();
             if block.uses_common_scaling() {
                 let mut norm = 0.0_f64;
@@ -1292,6 +1518,7 @@ fn scale_conic_form(
         linear_objective: scaled_objective,
         constraints: scaled_constraints,
         constraint_rhs: scaled_rhs,
+        cone_blocks: form.cone_blocks.clone(),
         variable_factors,
         constraint_factors,
     })
@@ -1309,48 +1536,43 @@ fn clarabel_settings() -> DefaultSettings<f64> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn scaled_convex_residuals(
-    hessian: &DenseMatrix,
-    linear_objective: &[f64],
-    constraints: &DenseMatrix,
-    constraint_rhs: &[f64],
-    cone_blocks: &[ConeBlock],
+    form: &ScaledConicForm,
     primal: &[f64],
     dual: &[f64],
     slack: &[f64],
 ) -> ScaledConvexResiduals {
-    let affine = constraints.multiply_vector(primal);
+    let affine = form.constraints.multiply_vector(primal);
     let equation_residual = affine
         .iter()
         .zip(slack)
-        .zip(constraint_rhs)
+        .zip(&form.constraint_rhs)
         .map(|((affine, slack), rhs)| (affine + slack - rhs).abs())
         .fold(0.0_f64, f64::max);
     let primal_scale = affine
         .iter()
         .chain(slack)
-        .chain(constraint_rhs)
+        .chain(&form.constraint_rhs)
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
-    let primal_cone_violation = cone_violation(slack, cone_blocks);
+    let primal_cone_violation = cone_violation(slack, &form.cone_blocks);
     let primal_residual =
         (equation_residual / primal_scale).max(primal_cone_violation / primal_scale);
 
-    let hessian_product = hessian.multiply_vector(primal);
+    let hessian_product = form.hessian.multiply_vector(primal);
     let mut stationarity_vector = hessian_product
         .iter()
-        .zip(linear_objective)
+        .zip(&form.linear_objective)
         .map(|(quadratic, linear)| quadratic + linear)
         .collect::<Vec<_>>();
     for (column, stationarity) in stationarity_vector.iter_mut().enumerate() {
-        *stationarity += (0..constraints.rows)
-            .map(|row| constraints.get(row, column) * dual[row])
+        *stationarity += (0..form.constraints.rows)
+            .map(|row| form.constraints.get(row, column) * dual[row])
             .sum::<f64>();
     }
     let stationarity_scale = hessian_product
         .iter()
-        .chain(linear_objective)
+        .chain(&form.linear_objective)
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
     let stationarity = stationarity_vector
@@ -1358,12 +1580,12 @@ fn scaled_convex_residuals(
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max)
         / stationarity_scale;
-    let dual_residual = cone_violation(dual, cone_blocks)
+    let dual_residual = dual_cone_violation(dual, &form.cone_blocks)
         / dual.iter().map(|value| value.abs()).fold(1.0_f64, f64::max);
     let primal_objective =
-        0.5 * dot_product(primal, &hessian_product) + dot_product(linear_objective, primal);
+        0.5 * dot_product(primal, &hessian_product) + dot_product(&form.linear_objective, primal);
     let dual_objective =
-        -0.5 * dot_product(primal, &hessian_product) - dot_product(constraint_rhs, dual);
+        -0.5 * dot_product(primal, &hessian_product) - dot_product(&form.constraint_rhs, dual);
     let complementarity =
         dot_product(slack, dual).abs() / (1.0 + primal_objective.abs().max(dual_objective.abs()));
     let relative_gap = (primal_objective - dual_objective).abs()
@@ -1378,6 +1600,38 @@ fn scaled_convex_residuals(
 }
 
 fn cone_violation(vector: &[f64], cone_blocks: &[ConeBlock]) -> f64 {
+    let mut violation = 0.0_f64;
+    let mut start = 0;
+    for block in cone_blocks {
+        let end = start + block.dimension();
+        match block {
+            ConeBlock::Zero(_) => {
+                violation = vector[start..end]
+                    .iter()
+                    .map(|value| value.abs())
+                    .fold(violation, f64::max);
+            }
+            ConeBlock::Nonnegative(_) => {
+                violation = vector[start..end]
+                    .iter()
+                    .map(|value| (-value).max(0.0))
+                    .fold(violation, f64::max);
+            }
+            ConeBlock::SecondOrder(_) => {
+                let tail_norm = vector[(start + 1)..end]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt();
+                violation = violation.max((tail_norm - vector[start]).max(0.0));
+            }
+        }
+        start = end;
+    }
+    violation
+}
+
+fn dual_cone_violation(vector: &[f64], cone_blocks: &[ConeBlock]) -> f64 {
     let mut violation = 0.0_f64;
     let mut start = 0;
     for block in cone_blocks {
@@ -1513,19 +1767,13 @@ fn bounded_power_of_two_factor(norm: f64, cumulative: f64) -> Result<f64, Experi
 fn inertia_from_lblt(
     factor: &faer::linalg::solvers::Lblt<f64>,
     dimension: usize,
-) -> InertiaEvidence {
+) -> Result<InertiaEvidence, ExperimentError> {
     let diagonal = (0..dimension)
         .map(|index| factor.B_diag()[index])
         .collect::<Vec<_>>();
     let subdiagonal = (0..dimension)
         .map(|index| factor.B_subdiag()[index])
         .collect::<Vec<_>>();
-    let scale = diagonal
-        .iter()
-        .chain(&subdiagonal)
-        .map(|value| value.abs())
-        .fold(1.0_f64, f64::max);
-    let tolerance = 4096.0 * f64::EPSILON * dimension as f64 * scale;
     let mut eigenvalues = Vec::with_capacity(dimension);
     let mut index = 0;
     while index < dimension {
@@ -1539,20 +1787,31 @@ fn inertia_from_lblt(
             index += 1;
         }
     }
-    InertiaEvidence {
-        positive: eigenvalues
-            .iter()
-            .filter(|value| **value > tolerance)
-            .count(),
-        negative: eigenvalues
-            .iter()
-            .filter(|value| **value < -tolerance)
-            .count(),
-        zero: eigenvalues
-            .iter()
-            .filter(|value| value.abs() <= tolerance)
-            .count(),
+    let scale = eigenvalues
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    let reject = 64.0 * f64::EPSILON * dimension as f64 * scale;
+    let accept = 4096.0 * f64::EPSILON * dimension as f64 * scale;
+    let mut inertia = InertiaEvidence {
+        positive: 0,
+        negative: 0,
+        zero: 0,
+    };
+    for eigenvalue in eigenvalues {
+        if eigenvalue.abs() <= reject {
+            inertia.zero += 1;
+        } else if eigenvalue.abs() < accept {
+            return Err(ExperimentError::new(format!(
+                "KKT inertia lies in the numerical decision gray zone at {eigenvalue:e}"
+            )));
+        } else if eigenvalue > 0.0 {
+            inertia.positive += 1;
+        } else {
+            inertia.negative += 1;
+        }
     }
+    Ok(inertia)
 }
 
 fn normalized_backward_error(matrix: &DenseMatrix, solution: &[f64], rhs: &[f64]) -> f64 {
@@ -1577,11 +1836,7 @@ fn normalized_backward_error(matrix: &DenseMatrix, solution: &[f64], rhs: &[f64]
     residual / (matrix_norm * solution_norm + rhs_norm).max(f64::MIN_POSITIVE)
 }
 
-fn recover_canonical(
-    problem: &CanonicalProblem,
-    primal: &[f64],
-    slacks: Vec<f64>,
-) -> CanonicalObservables {
+fn recover_canonical(problem: &ManufacturedCase, primal: &[f64]) -> CanonicalObservables {
     let coefficient_count = problem.kernel.rows;
     let field_coefficients = primal[..coefficient_count].to_vec();
     let standard_polynomial = [
@@ -1593,7 +1848,9 @@ fn recover_canonical(
     let polynomial_coefficients = problem
         .normalization
         .to_physical_polynomial(standard_polynomial);
-    let latent = primal[coefficient_count + POLYNOMIAL_DIMENSION];
+    let semantic_latents = (0..problem.canonical.semantic_latent_count)
+        .map(|latent| primal[coefficient_count + POLYNOMIAL_DIMENSION + latent])
+        .collect::<Vec<_>>();
     let functional_values = problem
         .kernel
         .multiply_vector(&field_coefficients)
@@ -1601,17 +1858,40 @@ fn recover_canonical(
         .zip(problem.polynomial.multiply_vector(&standard_polynomial))
         .map(|(kernel_value, polynomial_value)| kernel_value + polynomial_value)
         .collect::<Vec<_>>();
-    let mut residuals = vec![
-        functional_values[0] - latent,
-        functional_values[1] - latent,
-        latent - problem.truth_latent,
-    ];
-    residuals.extend(
-        functional_values[2..]
-            .iter()
-            .zip(&problem.truth_values[2..])
-            .map(|(actual, expected)| actual - expected),
-    );
+    let mut residuals = Vec::new();
+    let mut slacks = Vec::new();
+    let mut relation_violation = 0.0_f64;
+    for relation in &problem.canonical.relations {
+        match relation {
+            CanonicalRelation::SharedLevel { functional, latent } => {
+                let residual = functional_values[*functional] - semantic_latents[*latent];
+                residuals.push(residual);
+                relation_violation = relation_violation.max(residual.abs());
+            }
+            CanonicalRelation::LatentGauge { latent, value } => {
+                let residual = semantic_latents[*latent] - value;
+                residuals.push(residual);
+                relation_violation = relation_violation.max(residual.abs());
+            }
+            CanonicalRelation::FunctionalEquality { functional, value } => {
+                let residual = functional_values[*functional] - value;
+                residuals.push(residual);
+                relation_violation = relation_violation.max(residual.abs());
+            }
+            CanonicalRelation::FunctionalUpperBound { functional, upper } => {
+                let slack = upper - functional_values[*functional];
+                slacks.push(slack);
+                relation_violation = relation_violation.max((-slack).max(0.0));
+            }
+            CanonicalRelation::SecondOrderCone { components } => {
+                let cone_slacks =
+                    components.map(|(functional, rhs)| rhs - functional_values[functional]);
+                slacks.extend(cone_slacks);
+                relation_violation = relation_violation
+                    .max((cone_slacks[1].hypot(cone_slacks[2]) - cone_slacks[0]).max(0.0));
+            }
+        }
+    }
     let side_condition_violation = (0..POLYNOMIAL_DIMENSION)
         .map(|column| {
             (0..coefficient_count)
@@ -1620,10 +1900,7 @@ fn recover_canonical(
                 .abs()
         })
         .fold(0.0_f64, f64::max);
-    let hard_violation = residuals
-        .iter()
-        .map(|value| value.abs())
-        .fold(side_condition_violation, f64::max);
+    let hard_violation = side_condition_violation.max(relation_violation);
     let field_energy = dot_product(
         &field_coefficients,
         &problem.kernel.multiply_vector(&field_coefficients),
@@ -1631,7 +1908,7 @@ fn recover_canonical(
     CanonicalObservables {
         field_coefficients,
         polynomial_coefficients,
-        semantic_latents: vec![latent],
+        semantic_latents,
         functional_values,
         residuals,
         slacks,
@@ -1665,7 +1942,7 @@ fn scaling_round_trip_error(
         .fold(variable_error, f64::max)
 }
 
-fn manufactured_truth_error(problem: &CanonicalProblem, recovered: &CanonicalObservables) -> f64 {
+fn manufactured_truth_error(problem: &ManufacturedCase, recovered: &CanonicalObservables) -> f64 {
     let observable_error = recovered
         .field_coefficients
         .iter()

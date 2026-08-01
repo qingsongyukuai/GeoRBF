@@ -24,7 +24,9 @@ F_i(f)=a_i f(x_i)+b_i^\mathsf T\nabla f(x_i),
 
 comprising five value functionals, three coordinate derivatives, one value/derivative contraction, and one directional derivative. For Cubic `k(x,y)=||x-y||^3`, the probe assembles the symmetric generalized-functional pairing `K` from the analytic value, first, and mixed jets.
 
-The polynomial pairing is constructed in the specified normalized coordinates and has shape `10 x 4`. Its physical/normalized coefficient map is explicit and reversible. A fixed nonzero physical coefficient vector satisfying `P^T c=0` manufactures functional values, one shared-level semantic latent, hard residual truth, FieldEnergy, and objective.
+The physical canonical problem owns these functionals, eleven equality relations, one affine upper bound, one SOC, and one semantic latent. The equalities fix every functional value and the latent, so the upper bound and SOC are independently verified as redundant. Equality may elide both without changing the feasible set; QP retains the bound; SOCP retains the cone. The forms therefore derive from one canonical semantics rather than inventing truth-relative constraints below the lowering seam.
+
+The polynomial pairing is constructed in the specified normalized coordinates and has shape `10 x 4`. Its physical/normalized coefficient map is explicit and reversible. A fixed nonzero physical coefficient vector satisfying `P^T c=0` manufactures functional values, the semantic latent, hard residual truth, FieldEnergy, and objective. Rank and reduced-positivity evidence use the specified separated acceptance/rejection thresholds and return a numerical decision gray zone between them.
 
 ## Mathematical evidence
 
@@ -58,10 +60,10 @@ All forms receive exactly eight rounds of GeoRBF-owned max-norm Ruiz scaling. Ea
 | scaled complementarity | `6.8326e-12` | `7.8546e-12` | `1e-8` |
 | scaled relative gap | `2.0534e-11` | `2.1995e-11` | `1e-8` |
 | reduction/scaling/polynomial round-trip | `1.3878e-17` | `1.3878e-17` | `1e-11` |
-| physical hard violation | `2.6645e-15` | `2.6645e-15` | canonical tolerance |
+| physical slack equation / hard violation | `1.5345e-11` | `1.3853e-11` | `1e-8` |
 | manufactured truth error | `1.7764e-15` | `9.9920e-16` | `1e-8` |
 
-Recovery reconstructs field coefficients, the physical polynomial, the shared-level latent, canonical residuals, the QP affine slack or SOCP vector slack, CPD side condition, hard violation, FieldEnergy, and objective. Those physical observables—not backend row layouts, pivots, dual choices, or iteration trajectories—are compared across routes.
+Recovery reconstructs field coefficients, the physical polynomial, the shared-level latent, all canonical residuals and all four canonical slacks, the CPD side condition, hard violation, FieldEnergy, and objective. Independently unscaled backend slacks are checked against `A_physical x + s = b` and the corresponding canonical slack. Those physical observables—not backend row layouts, pivots, dual choices, or iteration trajectories—are compared across routes.
 
 ## Failure evidence
 
@@ -69,7 +71,7 @@ Three deliberately damaged cases fail at the intended boundary:
 
 - flattening all support/derivative `z` information gives `rank(P)=3` and is rejected before any solve;
 - subtracting known negative curvature along one valid null-space vector makes the reduced pairing nonpositive and is rejected before Clarabel;
-- corrupting one recovered field coefficient after an otherwise acceptable QP candidate violates the side condition, canonical hard relations, and reduction round-trip, producing a recovery-verification failure.
+- deliberately corrupting the Householder recovery map for an otherwise acceptable QP candidate violates the side condition, canonical hard relations, and map round-trip; the shared recovery validator rejects it as a recovery-verification failure.
 
 Every failure records `hidden_regularization_applied=false`. The probe does not attempt to rescue them with a smaller polynomial, ridge/jitter, an anchor, a kernel change, or relaxed tolerance.
 

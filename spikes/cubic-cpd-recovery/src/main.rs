@@ -104,6 +104,10 @@ fn print_convex(label: &str, evidence: &georbf_cubic_cpd_recovery_spike::ConvexR
         evidence.recovery_round_trip_error
     );
     println!(
+        "{label}.physical.slack_equation_violation={:.17e}",
+        evidence.physical_slack_equation_violation
+    );
+    println!(
         "{label}.canonical.hard_violation={:.17e}",
         evidence.recovered.hard_violation
     );
