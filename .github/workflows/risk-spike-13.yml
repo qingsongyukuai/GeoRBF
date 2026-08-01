@@ -1,0 +1,54 @@
+name: Risk spike 13 - faer and Clarabel
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/risk-spike-13.yml"
+      - "spikes/faer-clarabel/**"
+  pull_request:
+    paths:
+      - ".github/workflows/risk-spike-13.yml"
+      - "spikes/faer-clarabel/**"
+
+permissions:
+  contents: read
+
+jobs:
+  native-probe:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    env:
+      EXPECTED_TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        working-directory: spikes/faer-clarabel
+    steps:
+      - name: Check out the probe
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Verify types and compile targets
+        run: cargo check --locked --all-targets
+      - name: Run the T15 behavior seam
+        run: cargo test --locked --all-targets
+      - name: Emit the backend fingerprint and numerical evidence
+        run: cargo run --locked
+      - name: Audit dependencies, features, build scripts, native links, and licenses
+        run: python scripts/audit.py
+      - name: Emit the complete feature graph
+        run: cargo tree --locked --target all -e features
