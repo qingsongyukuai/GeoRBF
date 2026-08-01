@@ -1,0 +1,111 @@
+{
+  "case_id": "case-v1-ec9c5da89d9fa94f037a61ac791c3508def3238f96501aa9edae7b5673c86950",
+  "content_sha256": "sha256:9f91a2ab7fb90e04c2ab304f57982b1ac8c4177e2f096a5eaca6b2e8d80fdb94",
+  "input": {
+    "left": {
+      "gradient_coefficient": [
+        "1",
+        "-0.5",
+        "0.25"
+      ],
+      "support": [
+        "0",
+        "0",
+        "0"
+      ],
+      "value_coefficient": "2"
+    },
+    "manufactured_affine_field": {
+      "constant": "1.125",
+      "gradient": [
+        "-0.75",
+        "2",
+        "0.5"
+      ]
+    },
+    "metric": [
+      [
+        "1",
+        "0",
+        "0"
+      ],
+      [
+        "0",
+        "1",
+        "0"
+      ],
+      [
+        "0",
+        "0",
+        "1"
+      ]
+    ],
+    "right": {
+      "gradient_coefficient": [
+        "0.75",
+        "1",
+        "-0.25"
+      ],
+      "support": [
+        "1",
+        "-2",
+        "0.5"
+      ],
+      "value_coefficient": "-1.5"
+    }
+  },
+  "kind": "cubic_generalized_functional",
+  "output_sha256": "sha256:856035654212317863d49567179afd61a3ce30f8b5e1d2a256e47a305f14bbf1",
+  "precision": {
+    "output_significant_digits": 110,
+    "rounding": "ROUND_HALF_EVEN",
+    "working_decimal_digits": 120
+  },
+  "provenance": {
+    "description": "Manufactured analytic truth for two value/first-derivative functionals and their Cubic pairing.",
+    "requirements": [
+      "IR-002",
+      "KER-004",
+      "VAL-001",
+      "VAL-002",
+      "VAL-004"
+    ],
+    "source": "GeoRBF issues #3, #6, and #10",
+    "source_type": "manufactured_truth"
+  },
+  "result": {
+    "cubic_pairing": {
+      "decimal": "-3.0543685323969058615339082411767485152025864594261527011574162906218547139923312204019249144302292115123473892E+1",
+      "f64_hex": "-0x1.e8b2ef61dc324p+4"
+    },
+    "manufactured_affine_observations": {
+      "left": {
+        "decimal": "6.2500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000E-1",
+        "f64_hex": "0x1.4000000000000p-1"
+      },
+      "right": {
+        "decimal": "6.3750000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000E+0",
+        "f64_hex": "0x1.9800000000000p+2"
+      }
+    },
+    "pairing_contributions": {
+      "derivative_derivative": {
+        "decimal": "2.5367829739934114322183832679565761278306813192822701603718661757341593069996588836559858632910142145179576441E+0",
+        "f64_hex": "0x1.44b54df32cf81p+1"
+      },
+      "derivative_value": {
+        "decimal": "2.1910440041507610031499100645012040587956933007671865659340876404929714659650279551577103706328034062489779329E+1",
+        "f64_hex": "0x1.5e912993b3e7bp+4"
+      },
+      "value_derivative": {
+        "decimal": "-1.8903124741692840027175694674128035017060883379167884098254873761115832255384554907242991432910460759795103735E+1",
+        "f64_hex": "-0x1.2e7332eddc779p+4"
+      },
+      "value_value": {
+        "decimal": "-3.6087783597777240051880871650608066850752595542047778733032031725766588851188695732009347281010879632336107130E+1",
+        "f64_hex": "-0x1.20b3c7e30ca0bp+5"
+      }
+    }
+  },
+  "schema_version": "georbf-oracle-fixture-v1"
+}

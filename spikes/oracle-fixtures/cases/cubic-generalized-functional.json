@@ -1,0 +1,31 @@
+{
+  "input": {
+    "left": {
+      "gradient_coefficient": ["1", "-0.5", "0.25"],
+      "support": ["0", "0", "0"],
+      "value_coefficient": "2"
+    },
+    "manufactured_affine_field": {
+      "constant": "1.125",
+      "gradient": ["-0.75", "2", "0.5"]
+    },
+    "metric": [
+      ["1", "0", "0"],
+      ["0", "1", "0"],
+      ["0", "0", "1"]
+    ],
+    "right": {
+      "gradient_coefficient": ["0.75", "1", "-0.25"],
+      "support": ["1", "-2", "0.5"],
+      "value_coefficient": "-1.5"
+    }
+  },
+  "kind": "cubic_generalized_functional",
+  "provenance": {
+    "description": "Manufactured analytic truth for two value/first-derivative functionals and their Cubic pairing.",
+    "requirements": ["IR-002", "KER-004", "VAL-001", "VAL-002", "VAL-004"],
+    "source": "GeoRBF issues #3, #6, and #10",
+    "source_type": "manufactured_truth"
+  },
+  "schema_version": "georbf-oracle-case-v1"
+}

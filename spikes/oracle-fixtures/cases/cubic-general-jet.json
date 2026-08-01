@@ -1,0 +1,19 @@
+{
+  "input": {
+    "metric": [
+      ["2", "0", "0"],
+      ["0", "1", "0"],
+      ["0", "0", "0.5"]
+    ],
+    "x": ["1.25", "-2", "0.5"],
+    "y": ["-0.75", "1.5", "2"]
+  },
+  "kind": "cubic_general_jet",
+  "provenance": {
+    "description": "Analytic Cubic value, first jet, and mixed jet at a non-origin anisotropic support pair.",
+    "requirements": ["KER-002", "KER-004", "KER-005", "VAL-001", "VAL-002"],
+    "source": "GeoRBF issue #6",
+    "source_type": "analytic_contract"
+  },
+  "schema_version": "georbf-oracle-case-v1"
+}

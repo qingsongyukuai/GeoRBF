@@ -1,0 +1,56 @@
+name: Risk spike 15 - independent oracle fixtures
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/risk-spike-15.yml"
+      - "docs/risk-spikes/15-independent-oracle-fixtures.md"
+      - "spikes/oracle-fixtures/**"
+  pull_request:
+    paths:
+      - ".github/workflows/risk-spike-15.yml"
+      - "docs/risk-spikes/15-independent-oracle-fixtures.md"
+      - "spikes/oracle-fixtures/**"
+
+permissions:
+  contents: read
+
+jobs:
+  locked-interpreter:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: spikes/oracle-fixtures
+    steps:
+      - name: Check out the spike
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact interpreter
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.3"
+          cache: pip
+          cache-dependency-path: spikes/oracle-fixtures/requirements.lock
+      - name: Install the empty locked dependency closure
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Run the T13 behavior seam
+        run: python -m unittest discover -s tests -v
+      - name: Prove repeated zero-diff regeneration
+        run: |
+          python generate.py --check
+          python generate.py --check
+      - name: Verify the committed consumer artifacts
+        run: python verify.py
+
+  pinned-oci-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the spike
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Replay twice in the fixed OCI image
+        run: |
+          docker run --rm \
+            --mount type=bind,source="$GITHUB_WORKSPACE",target=/workspace,readonly \
+            --workdir /workspace/spikes/oracle-fixtures \
+            python:3.12.3-slim-bookworm@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63 \
+            sh -ec 'python -m pip install --require-hashes -r requirements.lock && python -m unittest discover -s tests -v && python generate.py --check && python generate.py --check && python verify.py'

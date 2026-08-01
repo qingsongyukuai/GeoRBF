@@ -1,0 +1,2 @@
+# This generator deliberately has no third-party dependencies.
+# CPython 3.12.3's decimal module is the independent high-precision stack.
