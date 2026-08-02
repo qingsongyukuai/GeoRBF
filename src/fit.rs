@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use crate::capacity::{CapacityExceededEvidence, CapacityExceededReason};
+use crate::capacity::{CapacityExceededEvidence, CapacityExceededReason, plan_equality_capacity};
 use crate::cubic_equality::{
     AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
     CanonicalHardEquality, CanonicalRelationToleranceEvidence, CpdEvidence, CubicCanonicalProblem,
@@ -123,10 +123,13 @@ impl ProblemSize {
         center_coefficients: usize,
         semantic_latents: usize,
         solver_hard_equalities: usize,
-    ) -> Self {
-        let primal_variables = center_coefficients + 4 + semantic_latents;
-        let equality_constraints = solver_hard_equalities + 4;
-        Self {
+    ) -> Option<Self> {
+        let primal_variables = center_coefficients
+            .checked_add(4)?
+            .checked_add(semantic_latents)?;
+        let equality_constraints = solver_hard_equalities.checked_add(4)?;
+        let kkt_dimension = primal_variables.checked_add(equality_constraints)?;
+        Some(Self {
             input_observations,
             scalar_hard_relations,
             canonical_hard_equalities,
@@ -136,8 +139,8 @@ impl ProblemSize {
             cone_blocks: 0,
             primal_variables,
             equality_constraints,
-            kkt_dimension: primal_variables + equality_constraints,
-        }
+            kkt_dimension,
+        })
     }
 
     /// Returns the independent top-level input count for audit context.
@@ -461,70 +464,16 @@ impl FitReport {
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
-    let lowering = lower_snapshot(snapshot);
-    let scalar_relation_count = scalar_observations(&snapshot.inner.observations).len()
-        + snapshot
-            .inner
-            .shared_level_sets
-            .iter()
-            .map(|group| group.members().len())
-            .sum::<usize>()
-        + snapshot.inner.additive_field_gauges.len();
-    let problem_size = ProblemSize::cubic_equality(
+    let scalar_relation_count = scalar_relation_count(snapshot).unwrap_or(usize::MAX);
+    let conservative_problem_size = conservative_problem_size(
         snapshot.inner.observations.len(),
         scalar_relation_count,
-        lowering.canonical_equalities.len(),
-        lowering.fitting_functional_count(),
-        lowering.semantic_latents.len(),
-        lowering.solver_equality_count(),
+        snapshot.inner.shared_level_sets.len(),
     );
-    let base_report = || FitReport {
-        problem_size,
-        resolved_kernel: snapshot.inner.resolved_kernel.clone(),
-        field_energy_normalization: snapshot.inner.field_energy_normalization,
-        numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
-        requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
-        hard_relations: Vec::new(),
-        shared_level_values: Vec::new(),
-        field_energy: None,
-        total_objective: None,
-        backend_fingerprint: None,
-        attempts: Vec::new(),
-        recovery_verification: None,
-        direct_input_conflict: None,
-        execution_failure: None,
-        cubic_analysis: None,
-        backend_rank: None,
-        inertia: None,
-        canonical_acceptance: None,
-        capacity: None,
-        analysis_failure: None,
-        unidentified_additive_gauge: None,
-        uninformative_shared_level_set: None,
-    };
-    if let Some(conflict) = lowering.direct_input_conflict.clone() {
-        let mut report = base_report();
-        report.direct_input_conflict = Some(conflict);
-        return Err(FitFailure {
-            diagnosis: ProblemDiagnosis::DirectInputConflict,
-            report: Box::new(report),
-        });
-    }
-    let referenced_groups = snapshot
-        .inner
-        .additive_field_gauges
-        .iter()
-        .filter_map(|gauge| match gauge.reference() {
-            AdditiveFieldGaugeReference::LevelSet(group_id) => Some(group_id),
-            AdditiveFieldGaugeReference::Point(_) => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if let Some(group) =
-        snapshot.inner.shared_level_sets.iter().find(|group| {
-            group.members().len() == 1 && !referenced_groups.contains(group.group_id())
-        })
-    {
-        let mut report = base_report();
+    if let Some(group) = snapshot.inner.shared_level_sets.iter().find(|group| {
+        group.members().len() == 1 && !snapshot_references_group(snapshot, group.group_id())
+    }) {
+        let mut report = empty_report(snapshot, conservative_problem_size);
         report.uninformative_shared_level_set = Some(UninformativeSharedLevelSetEvidence::new(
             group.group_id().clone(),
             group.members()[0].source_id().clone(),
@@ -563,7 +512,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             .iter()
             .map(|group| group.group_id().clone())
             .collect();
-        let mut report = base_report();
+        let mut report = empty_report(snapshot, conservative_problem_size);
         report.unidentified_additive_gauge = Some(UnidentifiedAdditiveGaugeEvidence::new(
             source_ids, group_ids, false,
         ));
@@ -572,6 +521,148 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             report: Box::new(report),
         });
     }
+    if let Err(evidence) = plan_snapshot_capacity(
+        scalar_relation_count,
+        snapshot.inner.shared_level_sets.len(),
+    ) {
+        let mut report = empty_report(snapshot, conservative_problem_size);
+        report.capacity = Some(public_capacity(&evidence));
+        return Err(FitFailure {
+            diagnosis: ProblemDiagnosis::CapacityExceeded,
+            report: Box::new(report),
+        });
+    }
+    let lowering = lower_snapshot(snapshot);
+    let problem_size = ProblemSize::cubic_equality(
+        snapshot.inner.observations.len(),
+        scalar_relation_count,
+        lowering.canonical_equalities.len(),
+        lowering.fitting_functional_count(),
+        lowering.semantic_latents.len(),
+        lowering.solver_equality_count(),
+    )
+    .expect("the conservative snapshot capacity plan proved exact dimensions representable");
+    let base_report = || empty_report(snapshot, problem_size);
+    if let Some(conflict) = lowering.direct_input_conflict.clone() {
+        let mut report = base_report();
+        report.direct_input_conflict = Some(conflict);
+        return Err(FitFailure {
+            diagnosis: ProblemDiagnosis::DirectInputConflict,
+            report: Box::new(report),
+        });
+    }
+    fit_snapshot_after_preflight(snapshot, lowering, problem_size, base_report)
+}
+
+fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitReport {
+    FitReport {
+        problem_size,
+        resolved_kernel: snapshot.inner.resolved_kernel.clone(),
+        field_energy_normalization: snapshot.inner.field_energy_normalization,
+        numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
+        requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
+        hard_relations: Vec::new(),
+        shared_level_values: Vec::new(),
+        field_energy: None,
+        total_objective: None,
+        backend_fingerprint: None,
+        attempts: Vec::new(),
+        recovery_verification: None,
+        direct_input_conflict: None,
+        execution_failure: None,
+        cubic_analysis: None,
+        backend_rank: None,
+        inertia: None,
+        canonical_acceptance: None,
+        capacity: None,
+        analysis_failure: None,
+        unidentified_additive_gauge: None,
+        uninformative_shared_level_set: None,
+    }
+}
+
+fn scalar_relation_count(snapshot: &ProblemSnapshot) -> Option<usize> {
+    snapshot
+        .inner
+        .observations
+        .iter()
+        .try_fold(0_usize, |count, observation| {
+            count.checked_add(match observation {
+                ObservationInput::FieldValue(_) => 1,
+                ObservationInput::Gradient(_) => 3,
+            })
+        })?
+        .checked_add(
+            snapshot
+                .inner
+                .shared_level_sets
+                .iter()
+                .try_fold(0_usize, |count, group| {
+                    count.checked_add(group.members().len())
+                })?,
+        )?
+        .checked_add(snapshot.inner.additive_field_gauges.len())
+}
+
+fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> bool {
+    snapshot.inner.additive_field_gauges.iter().any(|gauge| {
+        matches!(
+            gauge.reference(),
+            AdditiveFieldGaugeReference::LevelSet(referenced) if referenced == group_id
+        )
+    })
+}
+
+fn conservative_problem_size(
+    input_observations: usize,
+    scalar_relations: usize,
+    semantic_latents: usize,
+) -> ProblemSize {
+    let primal_variables = scalar_relations
+        .checked_add(4)
+        .and_then(|value| value.checked_add(semantic_latents))
+        .unwrap_or(usize::MAX);
+    let equality_constraints = scalar_relations.checked_add(4).unwrap_or(usize::MAX);
+    ProblemSize {
+        input_observations,
+        scalar_hard_relations: scalar_relations,
+        canonical_hard_equalities: scalar_relations,
+        center_coefficients: scalar_relations,
+        semantic_latents,
+        auxiliary_variables: 0,
+        cone_blocks: 0,
+        primal_variables,
+        equality_constraints,
+        kkt_dimension: primal_variables
+            .checked_add(equality_constraints)
+            .unwrap_or(usize::MAX),
+    }
+}
+
+fn plan_snapshot_capacity(
+    scalar_relations: usize,
+    semantic_latents: usize,
+) -> Result<(), CapacityExceededEvidence> {
+    let Some(primal_variables) = scalar_relations
+        .checked_add(4)
+        .and_then(|value| value.checked_add(semantic_latents))
+    else {
+        return Err(plan_equality_capacity(usize::MAX, usize::MAX)
+            .expect_err("maximal dimensions must overflow the capacity plan"));
+    };
+    let Some(equality_constraints) = scalar_relations.checked_add(4) else {
+        return Err(plan_equality_capacity(usize::MAX, usize::MAX)
+            .expect_err("maximal dimensions must overflow the capacity plan"));
+    };
+    plan_equality_capacity(primal_variables, equality_constraints).map(|_| ())
+}
+
+fn fit_snapshot_after_preflight(
+    snapshot: &ProblemSnapshot,
+    lowering: EqualityLowering,
+    problem_size: ProblemSize,
+    base_report: impl Fn() -> FitReport,
+) -> Result<FitSuccess, FitFailure> {
     let solution = match CubicEqualityCore::solve_canonical(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
@@ -779,31 +870,53 @@ struct CanonicalEqualityKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum MemberConstraintNode {
+enum CanonicalValueNode {
+    AbsoluteReference,
     Group(GroupId),
     Support([u64; 3]),
 }
 
 #[derive(Debug, Default)]
-struct MemberConstraintForest {
-    node_index: BTreeMap<MemberConstraintNode, usize>,
+struct CanonicalValueConstraintForest {
+    node_index: BTreeMap<CanonicalValueNode, usize>,
     parent: Vec<usize>,
 }
 
-impl MemberConstraintForest {
+impl CanonicalValueConstraintForest {
     fn admits_independent_edge(&mut self, group_id: &GroupId, support: [f64; 3]) -> bool {
-        let group = self.intern(MemberConstraintNode::Group(group_id.clone()));
-        let support = self.intern(MemberConstraintNode::Support(support.map(f64::to_bits)));
-        let group_root = self.root(group);
-        let support_root = self.root(support);
-        if group_root == support_root {
+        self.admits_edge(
+            CanonicalValueNode::Group(group_id.clone()),
+            CanonicalValueNode::Support(canonical_support_bits(support)),
+        )
+    }
+
+    fn admits_absolute_support(&mut self, support: [f64; 3]) -> bool {
+        self.admits_edge(
+            CanonicalValueNode::AbsoluteReference,
+            CanonicalValueNode::Support(canonical_support_bits(support)),
+        )
+    }
+
+    fn admits_absolute_group(&mut self, group_id: &GroupId) -> bool {
+        self.admits_edge(
+            CanonicalValueNode::AbsoluteReference,
+            CanonicalValueNode::Group(group_id.clone()),
+        )
+    }
+
+    fn admits_edge(&mut self, left: CanonicalValueNode, right: CanonicalValueNode) -> bool {
+        let left = self.intern(left);
+        let right = self.intern(right);
+        let left_root = self.root(left);
+        let right_root = self.root(right);
+        if left_root == right_root {
             return false;
         }
-        self.parent[support_root] = group_root;
+        self.parent[right_root] = left_root;
         true
     }
 
-    fn intern(&mut self, node: MemberConstraintNode) -> usize {
+    fn intern(&mut self, node: CanonicalValueNode) -> usize {
         if let Some(index) = self.node_index.get(&node) {
             return *index;
         }
@@ -822,6 +935,16 @@ impl MemberConstraintForest {
         self.parent[index] = root;
         root
     }
+}
+
+fn canonical_support_bits(support: [f64; 3]) -> [u64; 3] {
+    support.map(|coordinate| {
+        if coordinate == 0.0 {
+            0.0_f64.to_bits()
+        } else {
+            coordinate.to_bits()
+        }
+    })
 }
 
 fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEqualityKey, f64) {
@@ -880,11 +1003,16 @@ fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEquali
 
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
+    let mut value_constraints = CanonicalValueConstraintForest::default();
     for observation in scalar_observations(&snapshot.inner.observations) {
-        lowering.push_source(field_equality(
-            &observation,
-            CanonicalEqualityParticipation::SolverConstraint,
-        ));
+        let participation = if observation.component == DirectInputComponent::FieldValue
+            && !value_constraints.admits_absolute_support(observation.support)
+        {
+            CanonicalEqualityParticipation::VerificationOnly
+        } else {
+            CanonicalEqualityParticipation::SolverConstraint
+        };
+        lowering.push_source(field_equality(&observation, participation));
     }
 
     let latent_index_by_group = snapshot
@@ -894,7 +1022,6 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         .enumerate()
         .map(|(index, group)| (group.group_id().clone(), index))
         .collect::<BTreeMap<_, _>>();
-    let mut member_constraints = MemberConstraintForest::default();
     for group in &snapshot.inner.shared_level_sets {
         let latent = lowering.semantic_latents.len();
         debug_assert_eq!(latent_index_by_group[group.group_id()], latent);
@@ -932,7 +1059,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 provenance,
                 FunctionalDimension::FieldValue,
                 0.0,
-                if member_constraints
+                if value_constraints
                     .admits_independent_edge(group.group_id(), member.location().components())
                 {
                     CanonicalEqualityParticipation::SolverConstraint
@@ -960,6 +1087,14 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         };
         match gauge.reference() {
             AdditiveFieldGaugeReference::Point(point) => {
+                let participation = if participation
+                    == CanonicalEqualityParticipation::SolverConstraint
+                    && !value_constraints.admits_absolute_support(point.components())
+                {
+                    CanonicalEqualityParticipation::VerificationOnly
+                } else {
+                    participation
+                };
                 lowering.push_source(field_equality(
                     &ScalarObservation {
                         source_id: gauge.source_id().clone(),
@@ -973,6 +1108,14 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 ));
             }
             AdditiveFieldGaugeReference::LevelSet(group_id) => {
+                let participation = if participation
+                    == CanonicalEqualityParticipation::SolverConstraint
+                    && !value_constraints.admits_absolute_group(group_id)
+                {
+                    CanonicalEqualityParticipation::VerificationOnly
+                } else {
+                    participation
+                };
                 let role = SemanticRolePath::new("additive-field-gauge/level-set");
                 let provenance =
                     relation_provenance(gauge.source_id().clone(), Some(group_id.clone()), role);
@@ -1844,6 +1987,24 @@ fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
 mod tests {
     use super::*;
     use crate::cubic_equality::RecoveryVerificationFailureReason;
+
+    #[test]
+    fn snapshot_capacity_preflight_covers_all_source_relations_before_lowering() {
+        assert!(plan_snapshot_capacity(2_000, 8).is_ok());
+        let evidence = plan_snapshot_capacity(10_000, 0)
+            .expect_err("all caller relations must count even if presolve could remove rows");
+        assert!(!evidence.large_allocation_attempted);
+        assert!(!evidence.backend_invocation_attempted);
+        assert!(ProblemSize::cubic_equality(0, 0, 0, usize::MAX, 1, 0).is_none());
+    }
+
+    #[test]
+    fn incidence_identity_canonicalizes_signed_zero_coordinates() {
+        assert_eq!(
+            canonical_support_bits([-0.0, 1.0, 0.0]),
+            canonical_support_bits([0.0, 1.0, -0.0])
+        );
+    }
 
     #[test]
     fn recovery_mapping_retains_quantified_side_condition_evidence() {

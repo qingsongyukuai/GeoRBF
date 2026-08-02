@@ -1,6 +1,6 @@
 use georbf::diagnostics::ProblemDiagnosis;
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
-use georbf::observation::GradientObservation;
+use georbf::observation::{FieldValueObservation, GradientObservation};
 use georbf::problem::{AddError, BuildError};
 use georbf::relation::{
     AdditiveFieldGauge, GaugeError, GroupBuildError, GroupMemberAddError, HorizonBuilder,
@@ -461,6 +461,61 @@ fn additional_gauges_verify_the_additive_representative_without_changing_geometr
 }
 
 #[test]
+fn absolute_observations_close_group_cycles_without_redundant_kkt_rows() {
+    let group_id = GroupId::new("absolutely-observed-horizon");
+    let left = point(-1.0, 0.0, 0.5);
+    let right = point(1.0, 0.0, -0.5);
+    let mut horizon = HorizonBuilder::new(group_id.clone());
+    horizon
+        .add_member(SourceId::new("absolute/member-left"), left)
+        .unwrap();
+    horizon
+        .add_member(SourceId::new("absolute/member-right"), right)
+        .unwrap();
+    let mut builder = problem_builder();
+    builder.add(horizon.build().unwrap()).unwrap();
+    builder
+        .add(
+            FieldValueObservation::try_new(SourceId::new("absolute/value-left"), left, 3.0)
+                .unwrap(),
+        )
+        .unwrap();
+    builder
+        .add(
+            FieldValueObservation::try_new(SourceId::new("absolute/value-right"), right, 3.0)
+                .unwrap(),
+        )
+        .unwrap();
+    builder
+        .add(GradientObservation::new(
+            SourceId::new("absolute/gradient"),
+            point(0.0, 1.0, 0.0),
+            Vector3::try_new(0.5, -0.25, 1.0).unwrap(),
+        ))
+        .unwrap();
+
+    let success = builder
+        .build()
+        .unwrap()
+        .fit()
+        .expect("the compatible absolute/member cycle should verify without rank loss");
+    assert_close(success.model().shared_level_value(&group_id).unwrap(), 3.0);
+    assert!(
+        success
+            .report()
+            .hard_relations()
+            .iter()
+            .all(|relation| relation.residual().abs() <= relation.tolerance())
+    );
+    assert_eq!(success.report().problem_size().input_observations(), 3);
+    assert_eq!(
+        success.report().problem_size().canonical_hard_equalities(),
+        7
+    );
+    assert_eq!(success.report().problem_size().equality_constraints(), 10);
+}
+
+#[test]
 fn a_level_set_gauge_makes_a_single_member_group_informative() {
     let group_id = GroupId::new("referenced-singleton");
     let mut group = SharedLevelSetBuilder::new(group_id.clone());
@@ -557,16 +612,17 @@ fn overlapping_member_cycles_do_not_merge_semantic_latent_identity() {
     let mut builder = problem_builder();
     for group_name in ["group-a", "group-b"] {
         let mut group = SharedLevelSetBuilder::new(GroupId::new(group_name));
+        let shared_zero = if group_name == "group-b" { -0.0 } else { 0.0 };
         group
             .add_member(
                 SourceId::new(format!("{group_name}/left")),
-                point(-1.0, 0.0, 0.5),
+                point(-1.0, shared_zero, 0.5),
             )
             .unwrap();
         group
             .add_member(
                 SourceId::new(format!("{group_name}/right")),
-                point(1.0, 0.0, -0.5),
+                point(1.0, shared_zero, -0.5),
             )
             .unwrap();
         if group_name == "group-b" {

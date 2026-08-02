@@ -59,14 +59,23 @@ impl GroupDraft {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<(GroupId, Vec<SharedLevelSetMember>), GroupBuildError> {
+    fn finish(mut self) -> Result<CompletedGroup, GroupBuildError> {
         if self.members.is_empty() {
             return Err(GroupBuildError::EmptyGroup);
         }
         self.members
             .sort_by(|left, right| left.source_id.cmp(&right.source_id));
-        Ok((self.group_id, self.members))
+        Ok(CompletedGroup {
+            group_id: self.group_id,
+            members: self.members,
+        })
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompletedGroup {
+    group_id: GroupId,
+    members: Vec<SharedLevelSetMember>,
 }
 
 /// Atomically constructs a general mathematical shared level set.
@@ -94,27 +103,23 @@ impl SharedLevelSetBuilder {
 
     /// Finishes a non-empty immutable group.
     pub fn build(self) -> Result<SharedLevelSet, GroupBuildError> {
-        let (group_id, members) = self.draft.finish()?;
-        Ok(SharedLevelSet { group_id, members })
+        self.draft.finish().map(SharedLevelSet)
     }
 }
 
 /// A general group of positions sharing one unknown semantic field value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SharedLevelSet {
-    group_id: GroupId,
-    members: Vec<SharedLevelSetMember>,
-}
+pub struct SharedLevelSet(CompletedGroup);
 
 impl SharedLevelSet {
     /// Returns this group's caller-owned stable identity.
     pub fn group_id(&self) -> &GroupId {
-        &self.group_id
+        &self.0.group_id
     }
 
     /// Returns all members in stable SourceId order.
     pub fn members(&self) -> &[SharedLevelSetMember] {
-        &self.members
+        &self.0.members
     }
 }
 
@@ -143,27 +148,23 @@ impl HorizonBuilder {
 
     /// Finishes a non-empty immutable horizon.
     pub fn build(self) -> Result<Horizon, GroupBuildError> {
-        let (group_id, members) = self.draft.finish()?;
-        Ok(Horizon { group_id, members })
+        self.draft.finish().map(Horizon)
     }
 }
 
 /// A stratigraphic shared level set with one unknown horizon field value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Horizon {
-    group_id: GroupId,
-    members: Vec<SharedLevelSetMember>,
-}
+pub struct Horizon(CompletedGroup);
 
 impl Horizon {
     /// Returns this horizon's caller-owned stable identity.
     pub fn group_id(&self) -> &GroupId {
-        &self.group_id
+        &self.0.group_id
     }
 
     /// Returns all horizon members in stable SourceId order.
     pub fn members(&self) -> &[SharedLevelSetMember] {
-        &self.members
+        &self.0.members
     }
 }
 

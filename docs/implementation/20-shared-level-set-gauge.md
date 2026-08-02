@@ -46,11 +46,12 @@ The current all-hard Cubic path derives a deterministic equality realization:
 
 No member is assigned a known value or selected as a semantic reference. Exact
 duplicate relations share a canonical row while retaining every caller-owned
-assessment. Member equations enter the KKT through a deterministic spanning
-forest of the group/point incidence graph; cycle-closing member equations stay
-in Canonical IR as verification-only relations. This avoids redundant KKT rows
-for coincident or partially overlapping groups without merging `GroupId`
-identity.
+assessment. Member equations, true field-value observations, and the active
+gauge enter the KKT through a deterministic spanning forest of the
+group/point/absolute-reference incidence graph; cycle-closing equations stay in
+Canonical IR as verification-only relations. This avoids redundant KKT rows
+for coincident, partially overlapping, or absolutely observed groups without
+merging `GroupId` identity.
 
 If no true field-value observation exists, the first gauge in stable `SourceId`
 order supplies the one solver constraint that selects the additive constant.
@@ -93,6 +94,11 @@ top-level inputs leaves the recovered shared-value map and all canonical
 observables unchanged. Compatible secondary gauges leave geometry and energy
 unchanged; an incompatible secondary gauge is retained in the failed recovery
 report with its own provenance, residual, and physical tolerance.
+
+Capacity preflight counts every scalar source relation and semantic latent
+before Canonical IR allocation. Its conservative dense plan assumes no
+duplicate or verification-only row can be removed, so canonical and report
+storage remain bounded even when the eventual independent KKT is smaller.
 
 The manufactured affine case also closes a tolerance-policy edge: because an
 affine field has zero Cubic seminorm, NUM-009's characteristic field scale now
