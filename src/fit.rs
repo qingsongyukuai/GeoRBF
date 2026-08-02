@@ -566,14 +566,6 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             UnidentifiedAdditiveGaugeEvidence::new(source_ids, group_ids, false),
         );
     }
-    if let Err(evidence) = source_lifecycle_capacity {
-        preflight_report.capacity = Some(public_capacity(&evidence));
-        return Err(FitFailure {
-            diagnosis: primary_preflight_diagnosis(&preflight_report)
-                .expect("source lifecycle capacity always supplies a diagnosis"),
-            report: Box::new(preflight_report),
-        });
-    }
     let lowering = lower_snapshot(snapshot);
     let fitting_uses = solver_fitting_uses(&lowering.canonical_equalities);
     let exact_problem_size = ProblemSize::cubic_equality(
@@ -589,12 +581,17 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     }
     preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
     preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
-    if let Err(evidence) = plan_snapshot_capacity(
-        &lowering,
-        fitting_uses.len(),
-        scalar_relation_count,
-        source_identifier_bytes,
-    ) {
+    let capacity_failure = match source_lifecycle_capacity {
+        Ok(()) => plan_snapshot_capacity(
+            &lowering,
+            fitting_uses.len(),
+            scalar_relation_count,
+            source_identifier_bytes,
+        )
+        .err(),
+        Err(evidence) => Some(evidence),
+    };
+    if let Some(evidence) = capacity_failure {
         preflight_report.capacity = Some(public_capacity(&evidence));
         if let Some(failure) = preflight_polynomial_analysis_failure(&fitting_uses) {
             retain_representation_failure(
