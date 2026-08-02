@@ -374,7 +374,7 @@ pub(crate) enum RepresentationFailure {
         solver_invoked: bool,
     },
     PolynomialRankDeficient {
-        rank: usize,
+        rank: Option<usize>,
         mode: VerifiedCanonicalMode,
     },
     PolynomialRankGrayZone {
@@ -547,7 +547,7 @@ impl CubicRepresentation {
     }
 }
 
-pub(crate) fn preflight_polynomial_rank_deficiency(
+pub(crate) fn preflight_polynomial_analysis_failure(
     fitting_uses: &[FunctionalUse],
 ) -> Option<RepresentationFailure> {
     if fitting_uses.is_empty() {
@@ -557,11 +557,33 @@ pub(crate) fn preflight_polynomial_rank_deficiency(
         .iter()
         .map(|usage| usage.functional().clone())
         .collect::<Vec<_>>();
-    let (coordinates, _, polynomial) = assemble_polynomial_pairing(&functionals).ok()?;
+    let (coordinates, _, polynomial) = match assemble_polynomial_pairing(&functionals) {
+        Ok(pairing) => pairing,
+        Err(failure) => return Some(failure),
+    };
     match verify_polynomial_rank(&polynomial, &functionals, &coordinates) {
-        Err(failure @ RepresentationFailure::PolynomialRankDeficient { .. }) => Some(failure),
-        Ok(_) | Err(_) => None,
+        Ok(_) => None,
+        Err(failure) => Some(failure),
     }
+}
+
+pub(crate) fn solver_fitting_uses(equalities: &[CanonicalHardEquality]) -> Vec<FunctionalUse> {
+    let mut fitting_uses = Vec::<FunctionalUse>::new();
+    for usage in equalities
+        .iter()
+        .filter(|equality| {
+            equality.participation() == CanonicalEqualityParticipation::SolverConstraint
+        })
+        .filter_map(CanonicalHardEquality::field)
+    {
+        if !fitting_uses
+            .iter()
+            .any(|existing| existing.functional() == usage.functional())
+        {
+            fitting_uses.push(usage.clone());
+        }
+    }
+    fitting_uses
 }
 
 fn assemble_polynomial_pairing(
@@ -651,8 +673,13 @@ fn verify_polynomial_rank(
     functionals: &[CanonicalFunctional],
     coordinates: &CubicSolveCoordinateTransform,
 ) -> Result<(Vec<f64>, usize, PolynomialRankEvidence), RepresentationFailure> {
-    let exact_zero_column = (0..polynomial.columns)
-        .find(|column| (0..polynomial.rows).all(|row| polynomial.get(row, *column) == 0.0));
+    if let Some(column) = (0..polynomial.columns)
+        .find(|column| (0..polynomial.rows).all(|row| polynomial.get(row, *column) == 0.0))
+    {
+        let mut standard_mode = [0.0; POLYNOMIAL_DIMENSION];
+        standard_mode[column] = 1.0;
+        return polynomial_rank_failure(None, functionals, coordinates, standard_mode);
+    }
     let matrix = polynomial.to_faer();
     let analysis = analyze_spectral_rank(matrix.as_ref()).map_err(|failure| match failure {
         SpectralAnalysisFailure::WorkspaceAllocation(failure) => {
@@ -670,16 +697,11 @@ fn verify_polynomial_rank(
             }
         }
     })?;
-    if let Some(column) = exact_zero_column {
-        let mut standard_mode = [0.0; POLYNOMIAL_DIMENSION];
-        standard_mode[column] = 1.0;
-        return polynomial_rank_failure(analysis.rank, functionals, coordinates, standard_mode);
-    }
     if polynomial.rows < POLYNOMIAL_DIMENSION {
         let standard_mode =
             smallest_right_mode(matrix.as_ref(), AlgebraicAnalysisStage::PolynomialRank)?;
         return polynomial_rank_failure(
-            analysis.rank,
+            Some(analysis.rank),
             functionals,
             coordinates,
             standard_mode
@@ -692,7 +714,7 @@ fn verify_polynomial_rank(
             let standard_mode =
                 smallest_right_mode(matrix.as_ref(), AlgebraicAnalysisStage::PolynomialRank)?;
             return polynomial_rank_failure(
-                analysis.rank,
+                Some(analysis.rank),
                 functionals,
                 coordinates,
                 standard_mode
@@ -727,7 +749,7 @@ fn verify_polynomial_rank(
 }
 
 fn polynomial_rank_failure(
-    rank: usize,
+    rank: Option<usize>,
     functionals: &[CanonicalFunctional],
     coordinates: &CubicSolveCoordinateTransform,
     standard_mode: [f64; POLYNOMIAL_DIMENSION],
@@ -1530,20 +1552,7 @@ impl CubicEqualityCore {
                 return Err(CubicEqualityFailure::NonFiniteTarget { equality: index });
             }
         }
-        let mut fitting_uses = Vec::<FunctionalUse>::new();
-        for equality in problem.equalities.iter().filter(|equality| {
-            equality.participation == CanonicalEqualityParticipation::SolverConstraint
-        }) {
-            let Some(field) = equality.field.as_ref() else {
-                continue;
-            };
-            if !fitting_uses
-                .iter()
-                .any(|existing| existing.functional() == field.functional())
-            {
-                fitting_uses.push(field.clone());
-            }
-        }
+        let fitting_uses = solver_fitting_uses(&problem.equalities);
         let representation = CubicRepresentation::new(fitting_uses, metric)
             .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
         #[cfg(test)]
@@ -2633,7 +2642,7 @@ mod tests {
         assert_eq!(
             failure,
             RepresentationFailure::PolynomialRankDeficient {
-                rank: 3,
+                rank: None,
                 mode: VerifiedCanonicalMode {
                     residual: 0.0,
                     execution: AnalysisExecutionEvidence::pre_backend(),
@@ -2673,7 +2682,38 @@ mod tests {
     }
 
     #[test]
-    fn exact_zero_column_reports_the_rank_of_the_remaining_pairing() {
+    fn capacity_preflight_polynomial_analysis_retains_gray_zone_failure() {
+        let functionals = [
+            functional([0.0; 3], 1.0, [0.0; 3]),
+            functional([0.0; 3], 0.0, [1.0, 0.0, 0.0]),
+            functional([0.0; 3], 0.0, [0.0, 1.0, 0.0]),
+            functional([0.0; 3], 0.0, [0.0, 0.0, 1.0e-13]),
+        ];
+        let fitting_uses = functionals
+            .into_iter()
+            .enumerate()
+            .map(|(index, functional)| {
+                FunctionalUse::new(
+                    functional,
+                    UsageProvenance::new(
+                        SourceId::new(format!("gray-{index}")),
+                        None,
+                        RelationId::new(format!("gray-relation-{index}")),
+                        ResidualId::new(format!("gray-residual-{index}")),
+                        SemanticRolePath::new(format!("gray/{index}")),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            preflight_polynomial_analysis_failure(&fitting_uses),
+            Some(RepresentationFailure::PolynomialRankGrayZone { .. })
+        ));
+    }
+
+    #[test]
+    fn exact_zero_column_does_not_invent_the_rank_of_the_remaining_pairing() {
         let functionals = [0.0, 1.0, 2.0]
             .into_iter()
             .map(|coordinate| functional([coordinate, coordinate, 0.0], 1.0, [0.0; 3]))
@@ -2697,7 +2737,7 @@ mod tests {
             .expect_err("the exact zero column proves a missing affine mode");
         assert!(matches!(
             failure,
-            RepresentationFailure::PolynomialRankDeficient { rank: 2, .. }
+            RepresentationFailure::PolynomialRankDeficient { rank: None, .. }
         ));
     }
 

@@ -15,7 +15,7 @@ use crate::cubic_equality::{
     RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
     RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
-    preflight_polynomial_rank_deficiency,
+    preflight_polynomial_analysis_failure, solver_fitting_uses,
 };
 use crate::diagnostics::{
     AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
@@ -510,15 +510,8 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         snapshot.inner.shared_level_sets.len(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
-    if let Err(evidence) =
-        plan_source_lifecycle_capacity(scalar_relation_count, source_identifier_bytes)
-    {
-        preflight_report.capacity = Some(public_capacity(&evidence));
-        return Err(FitFailure {
-            diagnosis: ProblemDiagnosis::CapacityExceeded,
-            report: Box::new(preflight_report),
-        });
-    }
+    let source_lifecycle_capacity =
+        plan_source_lifecycle_capacity(scalar_relation_count, source_identifier_bytes);
     preflight_report.uninformative_shared_level_sets = snapshot
         .inner
         .shared_level_sets
@@ -573,8 +566,16 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             UnidentifiedAdditiveGaugeEvidence::new(source_ids, group_ids, false),
         );
     }
+    if let Err(evidence) = source_lifecycle_capacity {
+        preflight_report.capacity = Some(public_capacity(&evidence));
+        return Err(FitFailure {
+            diagnosis: primary_preflight_diagnosis(&preflight_report)
+                .expect("source lifecycle capacity always supplies a diagnosis"),
+            report: Box::new(preflight_report),
+        });
+    }
     let lowering = lower_snapshot(snapshot);
-    let fitting_uses = lowering.fitting_uses();
+    let fitting_uses = solver_fitting_uses(&lowering.canonical_equalities);
     let exact_problem_size = ProblemSize::cubic_equality(
         snapshot.inner.observations.len(),
         scalar_relation_count,
@@ -595,7 +596,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         source_identifier_bytes,
     ) {
         preflight_report.capacity = Some(public_capacity(&evidence));
-        if let Some(failure) = preflight_polynomial_rank_deficiency(&fitting_uses) {
+        if let Some(failure) = preflight_polynomial_analysis_failure(&fitting_uses) {
             retain_representation_failure(
                 &mut preflight_report,
                 &failure,
@@ -1058,26 +1059,6 @@ impl EqualityLowering {
                 equality.participation() == CanonicalEqualityParticipation::SolverConstraint
             })
             .count()
-    }
-
-    fn fitting_uses(&self) -> Vec<FunctionalUse> {
-        let mut fitting_uses = Vec::<FunctionalUse>::new();
-        for usage in self
-            .canonical_equalities
-            .iter()
-            .filter(|equality| {
-                equality.participation() == CanonicalEqualityParticipation::SolverConstraint
-            })
-            .filter_map(CanonicalHardEquality::field)
-        {
-            if !fitting_uses
-                .iter()
-                .any(|existing| existing.functional() == usage.functional())
-            {
-                fitting_uses.push(usage.clone());
-            }
-        }
-        fitting_uses
     }
 }
 
@@ -1801,7 +1782,7 @@ fn retain_representation_failure(
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
                 domain: RankEvidenceDomain::CubicPolynomialPairing,
                 dimension: 4,
-                rank: Some(*rank),
+                rank: *rank,
                 exact_zero_index: None,
                 rrqr_ratio: None,
                 singular_values: Vec::new(),

@@ -51,16 +51,19 @@ conflict while retaining gauge evidence. A shift-invariant over-capacity
 problem reports the gauge problem while retaining the checked 8 GiB capacity
 plan. No large allocation or backend call occurs in either case.
 
-Capacity planning has two checked stages. Before evidence cloning or canonical
-lowering, a source-lifecycle guard charges 2 KiB of fixed lowering/report
-storage per scalar relation plus eight copies of caller identifier bytes. After
+Capacity planning has two checked stages. A source-lifecycle guard charges 2
+KiB of fixed lowering/report storage per scalar relation plus eight copies of
+caller identifier bytes; scan-only singleton and additive-gauge proofs are
+formed first so they retain their specified priority over this guard. After
 deduplication, the all-live plan uses distinct solver-row, canonical-relation,
 and source-report sizes, so exact duplicates consume linear audit storage but
 do not inflate dense KKT storage. Once lowering has completed, every preflight
 failure reports the exact canonical and KKT dimensions. If an exact capacity
 failure coexists with a recoverable `Pi1` null mode, the bounded four-column
 polynomial analysis retains both proofs and selects the higher-priority
-`UnidentifiedFieldMode` diagnosis.
+`UnidentifiedFieldMode` diagnosis. If that bounded analysis reaches a gray
+zone or another typed analysis failure, the report retains it as secondary
+evidence while capacity remains primary.
 
 ## Interpretable rank deficiency
 
