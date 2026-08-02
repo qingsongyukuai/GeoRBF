@@ -676,9 +676,20 @@ fn verify_polynomial_rank(
     if let Some(column) = (0..polynomial.columns)
         .find(|column| (0..polynomial.rows).all(|row| polynomial.get(row, *column) == 0.0))
     {
+        let nonzero_columns = (0..polynomial.columns)
+            .filter(|candidate| {
+                (0..polynomial.rows).any(|row| polynomial.get(row, *candidate) != 0.0)
+            })
+            .count();
+        let structurally_proven_rank = (polynomial.rows == 1 || nonzero_columns == 1).then_some(1);
         let mut standard_mode = [0.0; POLYNOMIAL_DIMENSION];
         standard_mode[column] = 1.0;
-        return polynomial_rank_failure(None, functionals, coordinates, standard_mode);
+        return polynomial_rank_failure(
+            structurally_proven_rank,
+            functionals,
+            coordinates,
+            standard_mode,
+        );
     }
     let matrix = polynomial.to_faer();
     let analysis = analyze_spectral_rank(matrix.as_ref()).map_err(|failure| match failure {
