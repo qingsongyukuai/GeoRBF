@@ -53,19 +53,22 @@ plan. No large allocation or backend call occurs in either case.
 
 Capacity planning has two checked stages. A source-lifecycle guard is computed
 before evidence assembly and charges 2 KiB of fixed lowering/report storage per
-scalar relation plus eight copies of caller identifier bytes. Its diagnosis is
-deferred until the linear canonical/preflight pass has recovered any
-higher-priority conflict or field-mode proof; no dense KKT allocation,
-factorization workspace, or backend call is attempted. After deduplication, the
-all-live plan uses distinct solver-row, canonical-relation, and source-report
-sizes, so exact duplicates consume linear audit storage but do not inflate
-dense KKT storage. Once lowering has completed, every preflight failure reports
-the exact canonical and KKT dimensions. If an exact capacity failure coexists
-with a recoverable `Pi1` null mode, the bounded four-column polynomial analysis
-retains both proofs and selects the higher-priority `UnidentifiedFieldMode`
-diagnosis. If that bounded analysis reaches a gray zone or another typed
-analysis failure, the report retains it as secondary evidence while capacity
-remains primary.
+scalar relation plus eight copies of caller identifier bytes. Lowering and the
+eventual success report are separate 1 KiB/four-copy phases in that sum. When
+the combined lifecycle is over budget but the lowering-only subplan is within
+budget, diagnosis is deferred until that linear canonical/preflight pass has
+recovered any higher-priority conflict or field-mode proof. If even the
+lowering-only subplan exceeds 8 GiB, the fit returns without attempting it. No
+dense KKT allocation, factorization workspace, or backend call is attempted in
+either case. After deduplication, the all-live plan uses distinct solver-row,
+canonical-relation, and source-report sizes, so exact duplicates consume linear
+audit storage but do not inflate dense KKT storage. Once lowering has
+completed, every preflight failure reports the exact canonical and KKT
+dimensions. If an exact capacity failure coexists with a recoverable `Pi1` null
+mode, the bounded four-column polynomial analysis retains both proofs and
+selects the higher-priority `UnidentifiedFieldMode` diagnosis. If that bounded
+analysis reaches a gray zone or another typed analysis failure, the report
+retains it as secondary evidence while capacity remains primary.
 
 ## Interpretable rank deficiency
 

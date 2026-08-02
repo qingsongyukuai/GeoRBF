@@ -5,13 +5,14 @@ use crate::faer_backend;
 pub(crate) const CAPACITY_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const REPORT_FIXED_BYTES: u64 = 4 * 1024;
 const KKT_REPORT_BYTES_PER_DIMENSION: u64 = 8 * size_of::<f64>() as u64;
-// Covers the simultaneously live canonical/source lowering records and final
-// HardRelationAssessment, including their fixed Vec/Box headers and one-term
-// functional storage. Variable caller identity storage is charged separately.
-const SOURCE_RELATION_LIFECYCLE_FIXED_BYTES: u64 = 2 * 1024;
+// Cover the fixed Vec/Box headers and one-term functional storage in the
+// canonical/source lowering records and the final HardRelationAssessment.
+// Variable caller identity storage is charged separately for each phase.
+const SOURCE_LOWERING_FIXED_BYTES_PER_RELATION: u64 = 1024;
+const SOURCE_REPORT_FIXED_BYTES_PER_RELATION: u64 = 1024;
 // A source/group identity can be cloned into canonical provenance, usage-edge
 // provenance, relation/residual identifiers, conflict proof, and final report.
-const SOURCE_IDENTIFIER_LIFECYCLE_MULTIPLIER: u64 = 8;
+const SOURCE_IDENTIFIER_BYTES_PER_PHASE_MULTIPLIER: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapacityComponent {
@@ -111,8 +112,14 @@ pub(crate) struct EqualityCapacityShape {
     pub(crate) primal_variables: usize,
     pub(crate) equality_constraints: usize,
     pub(crate) canonical_relations: usize,
-    pub(crate) source_relations: usize,
-    pub(crate) source_identifier_bytes: usize,
+    pub(crate) source_lowering: SourceStorageShape,
+    pub(crate) source_report: SourceStorageShape,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SourceStorageShape {
+    pub(crate) relations: usize,
+    pub(crate) identifier_bytes: usize,
 }
 
 pub(crate) fn plan_equality_capacity(
@@ -123,8 +130,8 @@ pub(crate) fn plan_equality_capacity(
         primal_variables,
         equality_constraints,
         canonical_relations: equality_constraints,
-        source_relations: 0,
-        source_identifier_bytes: 0,
+        source_lowering: SourceStorageShape::default(),
+        source_report: SourceStorageShape::default(),
     })
 }
 
@@ -135,8 +142,8 @@ pub(crate) fn plan_equality_capacity_for(
         primal_variables,
         equality_constraints,
         canonical_relations,
-        source_relations,
-        source_identifier_bytes,
+        source_lowering,
+        source_report,
     } = shape;
     let kkt_dimension = primal_variables
         .checked_add(equality_constraints)
@@ -151,18 +158,43 @@ pub(crate) fn plan_equality_capacity_for(
     let variables = usize_as_u64(primal_variables, CapacityComponent::Canonical)?;
     let canonical_relations = usize_as_u64(canonical_relations, CapacityComponent::Canonical)?;
     let equalities = usize_as_u64(equality_constraints, CapacityComponent::EqualityDense)?;
-    let source_relations = usize_as_u64(source_relations, CapacityComponent::Report)?;
-    let source_identifier_bytes = usize_as_u64(source_identifier_bytes, CapacityComponent::Report)?;
+    let source_lowering_relations =
+        usize_as_u64(source_lowering.relations, CapacityComponent::Canonical)?;
+    let source_lowering_identifier_bytes = usize_as_u64(
+        source_lowering.identifier_bytes,
+        CapacityComponent::Canonical,
+    )?;
+    let source_report_relations = usize_as_u64(source_report.relations, CapacityComponent::Report)?;
+    let source_report_identifier_bytes =
+        usize_as_u64(source_report.identifier_bytes, CapacityComponent::Report)?;
     let dimension = usize_as_u64(kkt_dimension, CapacityComponent::KktDimension)?;
     let scalar_bytes = size_of::<f64>() as u64;
     let index_bytes = size_of::<usize>() as u64;
 
     let canonical_scalars =
         checked_add(CapacityComponent::Canonical, variables, canonical_relations)?;
-    let canonical_bytes = checked_mul(
+    let canonical_scalar_bytes = checked_mul(
         CapacityComponent::Canonical,
         canonical_scalars,
         scalar_bytes,
+    )?;
+    let source_lowering_fixed_bytes = checked_mul(
+        CapacityComponent::Canonical,
+        source_lowering_relations,
+        SOURCE_LOWERING_FIXED_BYTES_PER_RELATION,
+    )?;
+    let source_lowering_identity_bytes = checked_mul(
+        CapacityComponent::Canonical,
+        source_lowering_identifier_bytes,
+        SOURCE_IDENTIFIER_BYTES_PER_PHASE_MULTIPLIER,
+    )?;
+    let canonical_bytes = checked_sum(
+        CapacityComponent::Canonical,
+        &[
+            canonical_scalar_bytes,
+            source_lowering_fixed_bytes,
+            source_lowering_identity_bytes,
+        ],
     )?;
 
     let hessian_scalars = checked_mul(CapacityComponent::EqualityDense, variables, variables)?;
@@ -251,13 +283,13 @@ pub(crate) fn plan_equality_capacity_for(
     )?;
     let source_relation_fixed_bytes = checked_mul(
         CapacityComponent::Report,
-        source_relations,
-        SOURCE_RELATION_LIFECYCLE_FIXED_BYTES,
+        source_report_relations,
+        SOURCE_REPORT_FIXED_BYTES_PER_RELATION,
     )?;
     let source_identifier_lifecycle_bytes = checked_mul(
         CapacityComponent::Report,
-        source_identifier_bytes,
-        SOURCE_IDENTIFIER_LIFECYCLE_MULTIPLIER,
+        source_report_identifier_bytes,
+        SOURCE_IDENTIFIER_BYTES_PER_PHASE_MULTIPLIER,
     )?;
     let report_bytes = checked_sum(
         CapacityComponent::Report,

@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::capacity::{
-    CapacityExceededEvidence, CapacityExceededReason, EqualityCapacityShape,
+    CapacityExceededEvidence, CapacityExceededReason, EqualityCapacityShape, SourceStorageShape,
     plan_equality_capacity, plan_equality_capacity_for,
 };
 use crate::cubic_equality::{
@@ -512,6 +512,8 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
     let source_lifecycle_capacity =
         plan_source_lifecycle_capacity(scalar_relation_count, source_identifier_bytes);
+    let source_preflight_capacity =
+        plan_source_preflight_capacity(scalar_relation_count, source_identifier_bytes);
     preflight_report.uninformative_shared_level_sets = snapshot
         .inner
         .shared_level_sets
@@ -565,6 +567,16 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         preflight_report.unidentified_additive_gauge = Some(
             UnidentifiedAdditiveGaugeEvidence::new(source_ids, group_ids, false),
         );
+    }
+    if source_lifecycle_capacity.is_err() && source_preflight_capacity.is_err() {
+        let evidence =
+            source_lifecycle_capacity.expect_err("the source lifecycle failure was checked above");
+        preflight_report.capacity = Some(public_capacity(&evidence));
+        return Err(FitFailure {
+            diagnosis: primary_preflight_diagnosis(&preflight_report)
+                .expect("source lifecycle capacity always supplies a diagnosis"),
+            report: Box::new(preflight_report),
+        });
     }
     let lowering = lower_snapshot(snapshot);
     let fitting_uses = solver_fitting_uses(&lowering.canonical_equalities);
@@ -788,8 +800,14 @@ fn plan_snapshot_capacity(
         primal_variables,
         equality_constraints,
         canonical_relations,
-        source_relations: scalar_relations,
-        source_identifier_bytes,
+        source_lowering: SourceStorageShape {
+            relations: scalar_relations,
+            identifier_bytes: source_identifier_bytes,
+        },
+        source_report: SourceStorageShape {
+            relations: scalar_relations,
+            identifier_bytes: source_identifier_bytes,
+        },
     })
     .map(|_| ())
 }
@@ -802,8 +820,31 @@ fn plan_source_lifecycle_capacity(
         primal_variables: 0,
         equality_constraints: 0,
         canonical_relations: 0,
-        source_relations: scalar_relations,
-        source_identifier_bytes,
+        source_lowering: SourceStorageShape {
+            relations: scalar_relations,
+            identifier_bytes: source_identifier_bytes,
+        },
+        source_report: SourceStorageShape {
+            relations: scalar_relations,
+            identifier_bytes: source_identifier_bytes,
+        },
+    })
+    .map(|_| ())
+}
+
+fn plan_source_preflight_capacity(
+    scalar_relations: usize,
+    source_identifier_bytes: usize,
+) -> Result<(), CapacityExceededEvidence> {
+    plan_equality_capacity_for(EqualityCapacityShape {
+        primal_variables: 0,
+        equality_constraints: 0,
+        canonical_relations: 0,
+        source_lowering: SourceStorageShape {
+            relations: scalar_relations,
+            identifier_bytes: source_identifier_bytes,
+        },
+        source_report: SourceStorageShape::default(),
     })
     .map(|_| ())
 }
@@ -2495,6 +2536,11 @@ mod tests {
             .expect_err("source/report lifecycle storage is guarded before evidence cloning");
         assert!(!lifecycle_evidence.large_allocation_attempted);
         assert!(!lifecycle_evidence.backend_invocation_attempted);
+        assert!(plan_source_preflight_capacity(4_194_304, 0).is_ok());
+        let preflight_evidence = plan_source_preflight_capacity(8_388_608, 0)
+            .expect_err("oversized canonical lowering is rejected before materialization");
+        assert!(!preflight_evidence.large_allocation_attempted);
+        assert!(!preflight_evidence.backend_invocation_attempted);
         let evidence = plan_snapshot_capacity(&lowering, 0, usize::MAX, 0)
             .expect_err("report storage arithmetic remains checked before allocation");
         assert!(!evidence.large_allocation_attempted);
