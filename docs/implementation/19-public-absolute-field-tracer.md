@@ -51,9 +51,12 @@ condition evidence, backend rank and inertia, and the full physical canonical
 acceptance envelope. Backend termination remains distinct from the problem
 diagnosis. Failed backend and recovery paths retain the same available attempt,
 rank/inertia/capacity, per-source relation, side-condition, and physical
-rejection evidence. Directly contradictory exact values or gradient components
-at one point are diagnosed before backend execution with both stable SourceIds,
-the semantic component, and incompatible targets.
+rejection evidence. Failures before a candidate retain their typed coordinate,
+analysis-stage, workspace, contract-threshold, backend-input, or scaling payload
+instead of collapsing to an empty numerical report. Directly contradictory
+exact values or gradient components at one point are diagnosed before backend
+execution with both stable SourceIds, the semantic component, and incompatible
+targets.
 
 Lowering derives stable internal RelationId and ResidualId values from each
 SourceId and semantic role. Equality assembly adds stable derived block, row,

@@ -640,6 +640,132 @@ impl CapacityEvidence {
     }
 }
 
+/// Failure point within Cubic representation or Equality KKT analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnalysisFailureStage {
+    /// Complete Cubic polynomial-rank analysis.
+    CubicPolynomialRank,
+    /// Cholesky positivity check of the reduced Cubic pairing.
+    CubicReducedCholesky,
+    /// Inertia check of the reduced Cubic pairing.
+    CubicReducedInertia,
+    /// Spectral analysis of the reduced Cubic pairing.
+    CubicReducedSpectrum,
+    /// Backend KKT rank confirmation.
+    BackendRankConfirmation,
+    /// Backend KKT inertia analysis.
+    BackendInertia,
+    /// Backend rank-analysis workspace.
+    BackendRankWorkspace,
+    /// Backend inertia-analysis workspace.
+    BackendInertiaWorkspace,
+    /// Primary symmetric-indefinite factorization workspace.
+    BackendFactorWorkspace,
+    /// Primary linear-solve workspace.
+    BackendSolveWorkspace,
+    /// Full-SVD rescue workspace.
+    BackendSvdRescueWorkspace,
+}
+
+/// Reason a finite input could not define an invertible solve-coordinate map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SolveCoordinateFailureReason {
+    /// The bounding-box center was not finite.
+    BoundingBoxCenterNotFinite,
+    /// The characteristic support length was not finite.
+    CharacteristicLengthNotFinite,
+    /// Cubing the characteristic length did not produce an invertible scale.
+    FieldRecoveryScaleNotInvertible,
+    /// Transforming a canonical functional produced a non-finite value.
+    StandardFunctionalNotFinite,
+}
+
+/// Physical or representation contract quantity that exceeded its limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnalysisContractQuantity {
+    /// Null-space reconstruction defect.
+    NullSpaceDefect,
+    /// Reduced-pairing symmetry defect.
+    ReducedSymmetryDefect,
+    /// Complete-affine reproduction error.
+    AffineReproductionError,
+}
+
+/// Backend-standard-form input array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BackendInputField {
+    /// Primal Hessian.
+    Hessian,
+    /// Equality Jacobian.
+    EqualityJacobian,
+    /// Stationarity right-hand side.
+    StationarityRightHandSide,
+    /// Equality right-hand side.
+    EqualityRightHandSide,
+}
+
+/// Deterministic KKT scaling failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScalingFailureReason {
+    /// Matrix, right-hand-side, and dimension shapes disagreed.
+    InvalidShape,
+    /// A row had exactly zero norm.
+    ZeroNorm { index: usize },
+    /// A row norm was non-finite.
+    NonFiniteNorm { index: usize },
+}
+
+/// Structured evidence for a numerical-analysis failure without a candidate.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum AnalysisFailureEvidence {
+    /// The representer span was empty after canonical construction.
+    EmptyRepresenterSpan,
+    /// A checked physical-to-solve coordinate transform was not invertible.
+    InvalidSolveCoordinateTransform {
+        reason: SolveCoordinateFailureReason,
+        backend_invoked: bool,
+    },
+    /// A numerical analysis failed without a stronger rank or inertia result.
+    NumericalAnalysis {
+        stage: AnalysisFailureStage,
+        backend_invoked: bool,
+    },
+    /// A checked workspace allocation failed.
+    WorkspaceAllocation {
+        stage: AnalysisFailureStage,
+        bytes: u64,
+        alignment: usize,
+        backend_invoked: bool,
+    },
+    /// Null-space construction workspace could not be allocated.
+    NullSpaceWorkspaceAllocation,
+    /// A quantified representation contract exceeded its policy limit.
+    ContractThresholdExceeded {
+        quantity: AnalysisContractQuantity,
+        observed: f64,
+        limit: f64,
+    },
+    /// A backend-standard-form array had the wrong checked length.
+    InvalidBackendInputLength {
+        field: BackendInputField,
+        expected: usize,
+        actual: usize,
+    },
+    /// A backend-standard-form input contained a non-finite value.
+    NonFiniteBackendInput {
+        field: BackendInputField,
+        index: usize,
+    },
+    /// Deterministic diagonal KKT scaling could not be formed.
+    ScalingFailure { reason: ScalingFailureReason },
+}
+
 /// Backend termination evidence, distinct from [`ProblemDiagnosis`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

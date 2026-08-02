@@ -1,4 +1,7 @@
-use georbf::diagnostics::{ProblemDiagnosis, RankDecision, RankEvidenceDomain};
+use georbf::diagnostics::{
+    AnalysisFailureEvidence, ProblemDiagnosis, RankDecision, RankEvidenceDomain,
+    SolveCoordinateFailureReason,
+};
 use georbf::geometry::{
     FieldUnitLabel, GeometryError, GlobalAnisotropyMetric, GlobalAnisotropyMetricError, Handedness,
     InputCoordinateFrame, LengthUnitLabel,
@@ -159,6 +162,37 @@ fn contradictory_hard_values_return_typed_source_evidence_without_solver_attempt
     );
     assert_eq!(conflict.first_target(), 1.0);
     assert_eq!(conflict.second_target(), 2.0);
+}
+
+#[test]
+fn finite_but_unscalable_coordinates_retain_their_typed_failure_reason() {
+    let mut builder = ProblemBuilder::new(frame(), FieldUnitLabel::new("field-unit"));
+    for (source, x, target) in [("left", -1.0e103, -1.0), ("right", 1.0e103, 1.0)] {
+        builder
+            .add(
+                FieldValueObservation::try_new(
+                    SourceId::new(source),
+                    Point3::try_new(x, 0.0, 0.0).unwrap(),
+                    target,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let failure = builder
+        .build()
+        .unwrap()
+        .fit()
+        .expect_err("cubing the characteristic solve length must fail closed");
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+    assert!(matches!(
+        failure.report().analysis_failure(),
+        Some(AnalysisFailureEvidence::InvalidSolveCoordinateTransform {
+            reason: SolveCoordinateFailureReason::FieldRecoveryScaleNotInvertible,
+            backend_invoked: false,
+        })
+    ));
 }
 
 #[test]

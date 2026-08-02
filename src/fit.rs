@@ -6,20 +6,23 @@ use std::fmt;
 
 use crate::capacity::{CapacityExceededEvidence, CapacityExceededReason};
 use crate::cubic_equality::{
-    CanonicalRelationToleranceEvidence, CpdEvidence, CubicEqualityCore, CubicEqualityFailure,
-    CubicEqualitySolution, HardEquality, PhysicalSideConditionEvidence,
-    RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
-    RepresentationFailure,
+    AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalRelationToleranceEvidence,
+    CpdEvidence, CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, HardEquality,
+    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
+    ReducedPairingFailureClassification, RepresentationFailure,
+    SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
 };
 use crate::diagnostics::{
+    AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
-    BackendFingerprintParts, CanonicalAcceptanceEvidence, CanonicalAcceptanceEvidenceParts,
-    CapacityEvidence, CapacityFailureKind, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
-    DirectInputConflictEvidence, InertiaCounts, InertiaEvidence, LinearResidualEvidence,
-    ProblemDiagnosis, RankDecision, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
-    RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts, ResidualDimension,
-    ScalingSummary, SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord,
-    SolveAttemptRecordParts, SolveAttemptTermination,
+    BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
+    CanonicalAcceptanceEvidenceParts, CapacityEvidence, CapacityFailureKind, CubicAnalysisEvidence,
+    CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts, InertiaEvidence,
+    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankEvidence, RankEvidenceDomain,
+    RankEvidenceParts, RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts,
+    ResidualDimension, ScalingFailureReason, ScalingSummary, SideConditionEvidence,
+    SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
+    SolveCoordinateFailureReason,
 };
 use crate::functional::{
     CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, RelationId,
@@ -27,12 +30,15 @@ use crate::functional::{
 };
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::kkt::{
+    AlgebraicAnalysisPhase as InternalBackendAnalysisPhase,
     AlgebraicRankEvidence as InternalRankEvidence,
     BackendAttemptSettings as InternalAttemptSettings,
     BackendContractViolationReason as InternalBackendContractReason,
     BackendFingerprint as InternalBackendFingerprint, Inertia as InternalInertia,
-    KktAttemptFailureReason, KktAttemptKind, KktAttemptRecord, KktFailure, NumericalFailureReason,
-    RankClassification as InternalRankDecision, SolveAttemptTermination as InternalTermination,
+    KktAttemptFailureReason, KktAttemptKind, KktAttemptRecord, KktFailure,
+    KktInputField as InternalBackendInputField, NumericalFailureReason,
+    RankClassification as InternalRankDecision, RuizScalingFailure as InternalScalingFailure,
+    SolveAttemptTermination as InternalTermination, WorkspacePhase as InternalWorkspacePhase,
 };
 use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
@@ -285,6 +291,7 @@ pub struct FitReport {
     inertia: Option<InertiaEvidence>,
     canonical_acceptance: Option<CanonicalAcceptanceEvidence>,
     capacity: Option<CapacityEvidence>,
+    analysis_failure: Option<AnalysisFailureEvidence>,
 }
 
 impl FitReport {
@@ -384,6 +391,11 @@ impl FitReport {
     pub fn capacity(&self) -> Option<CapacityEvidence> {
         self.capacity
     }
+
+    /// Returns structured numerical-analysis failure evidence when available.
+    pub fn analysis_failure(&self) -> Option<&AnalysisFailureEvidence> {
+        self.analysis_failure.as_ref()
+    }
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
@@ -413,6 +425,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         inertia: None,
         canonical_acceptance: None,
         capacity: None,
+        analysis_failure: None,
     };
     if let Some(conflict) = direct_input_conflict(&scalar_observations) {
         let mut report = base_report();
@@ -633,6 +646,7 @@ fn success_report(
         )),
         canonical_acceptance: Some(public_success_acceptance(solution)),
         capacity: None,
+        analysis_failure: None,
     }
 }
 
@@ -780,8 +794,21 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
         .canonical_hard_equalities
         .saturating_sub(4);
     match failure {
+        RepresentationFailure::EmptyRepresenterSpan => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::EmptyRepresenterSpan);
+        }
         RepresentationFailure::Capacity(evidence) => {
             report.capacity = Some(public_capacity(evidence));
+        }
+        RepresentationFailure::InvalidSolveCoordinateTransform {
+            reason,
+            solver_invoked,
+        } => {
+            report.analysis_failure =
+                Some(AnalysisFailureEvidence::InvalidSolveCoordinateTransform {
+                    reason: public_solve_coordinate_failure(*reason),
+                    backend_invoked: *solver_invoked,
+                });
         }
         RepresentationFailure::PolynomialRankDeficient { rank, .. } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
@@ -855,10 +882,55 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
                 backend_invoked: *solver_invoked,
             }));
         }
+        RepresentationFailure::AlgebraicAnalysisFailure {
+            stage,
+            solver_invoked,
+        } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::NumericalAnalysis {
+                stage: public_cubic_analysis_stage(*stage),
+                backend_invoked: *solver_invoked,
+            });
+        }
+        RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
+            stage,
+            bytes,
+            alignment,
+            solver_invoked,
+        } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::WorkspaceAllocation {
+                stage: public_cubic_analysis_stage(*stage),
+                bytes: *bytes,
+                alignment: *alignment,
+                backend_invoked: *solver_invoked,
+            });
+        }
+        RepresentationFailure::NullSpaceWorkspaceAllocation => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::NullSpaceWorkspaceAllocation);
+        }
+        RepresentationFailure::NullSpaceDefect { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::NullSpaceDefect,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::ReducedSymmetryContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::ReducedSymmetryDefect,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
         RepresentationFailure::AffineReproductionBackend(failure) => {
             retain_kkt_failure(report, failure);
         }
-        _ => {}
+        RepresentationFailure::AffineReproductionContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::AffineReproductionError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
     }
 }
 
@@ -868,6 +940,40 @@ fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
     match failure {
         KktFailure::Capacity(evidence) => {
             report.capacity = Some(public_capacity(evidence));
+        }
+        KktFailure::InvalidLength {
+            field,
+            expected,
+            actual,
+        } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::InvalidBackendInputLength {
+                field: public_backend_input_field(*field),
+                expected: *expected,
+                actual: *actual,
+            });
+        }
+        KktFailure::NonFiniteInput { field, index } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::NonFiniteBackendInput {
+                field: public_backend_input_field(*field),
+                index: *index,
+            });
+        }
+        KktFailure::WorkspaceAllocation {
+            phase,
+            bytes,
+            alignment,
+        } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::WorkspaceAllocation {
+                stage: public_backend_workspace_stage(*phase),
+                bytes: *bytes,
+                alignment: *alignment,
+                backend_invoked: matches!(phase, InternalWorkspacePhase::SvdRescue),
+            });
+        }
+        KktFailure::Scaling(reason) => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ScalingFailure {
+                reason: public_scaling_failure(*reason),
+            });
         }
         KktFailure::RankDeficient { evidence }
         | KktFailure::NumericalDecisionGrayZone { evidence } => {
@@ -883,6 +989,12 @@ fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
             backend_invoked,
         } => {
             report.inertia = Some(public_inertia(*expected, *observed, *backend_invoked));
+        }
+        KktFailure::AlgebraicAnalysisFailure { phase } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::NumericalAnalysis {
+                stage: public_backend_analysis_stage(*phase),
+                backend_invoked: false,
+            });
         }
         KktFailure::BackendContractViolation {
             analysis: Some(analysis),
@@ -903,7 +1015,78 @@ fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
                 true,
             ));
         }
-        _ => {}
+        KktFailure::BackendContractViolation { analysis: None, .. }
+        | KktFailure::NumericalFailure { analysis: None, .. } => {}
+    }
+}
+
+fn public_solve_coordinate_failure(
+    reason: InternalSolveCoordinateFailure,
+) -> SolveCoordinateFailureReason {
+    match reason {
+        InternalSolveCoordinateFailure::BoundingBoxCenterNotFinite => {
+            SolveCoordinateFailureReason::BoundingBoxCenterNotFinite
+        }
+        InternalSolveCoordinateFailure::CharacteristicLengthNotFinite => {
+            SolveCoordinateFailureReason::CharacteristicLengthNotFinite
+        }
+        InternalSolveCoordinateFailure::FieldRecoveryScaleNotInvertible => {
+            SolveCoordinateFailureReason::FieldRecoveryScaleNotInvertible
+        }
+        InternalSolveCoordinateFailure::StandardFunctionalNotFinite => {
+            SolveCoordinateFailureReason::StandardFunctionalNotFinite
+        }
+    }
+}
+
+fn public_cubic_analysis_stage(stage: InternalCubicAnalysisStage) -> AnalysisFailureStage {
+    match stage {
+        InternalCubicAnalysisStage::PolynomialRank => AnalysisFailureStage::CubicPolynomialRank,
+        InternalCubicAnalysisStage::ReducedCholesky => AnalysisFailureStage::CubicReducedCholesky,
+        InternalCubicAnalysisStage::ReducedInertia => AnalysisFailureStage::CubicReducedInertia,
+        InternalCubicAnalysisStage::ReducedSpectrum => AnalysisFailureStage::CubicReducedSpectrum,
+    }
+}
+
+fn public_backend_analysis_stage(stage: InternalBackendAnalysisPhase) -> AnalysisFailureStage {
+    match stage {
+        InternalBackendAnalysisPhase::RankConfirmation => {
+            AnalysisFailureStage::BackendRankConfirmation
+        }
+        InternalBackendAnalysisPhase::Inertia => AnalysisFailureStage::BackendInertia,
+    }
+}
+
+fn public_backend_workspace_stage(stage: InternalWorkspacePhase) -> AnalysisFailureStage {
+    match stage {
+        InternalWorkspacePhase::RankAnalysis => AnalysisFailureStage::BackendRankWorkspace,
+        InternalWorkspacePhase::InertiaAnalysis => AnalysisFailureStage::BackendInertiaWorkspace,
+        InternalWorkspacePhase::Factor => AnalysisFailureStage::BackendFactorWorkspace,
+        InternalWorkspacePhase::Solve => AnalysisFailureStage::BackendSolveWorkspace,
+        InternalWorkspacePhase::SvdRescue => AnalysisFailureStage::BackendSvdRescueWorkspace,
+    }
+}
+
+fn public_backend_input_field(field: InternalBackendInputField) -> BackendInputField {
+    match field {
+        InternalBackendInputField::Hessian => BackendInputField::Hessian,
+        InternalBackendInputField::EqualityJacobian => BackendInputField::EqualityJacobian,
+        InternalBackendInputField::StationarityRightHandSide => {
+            BackendInputField::StationarityRightHandSide
+        }
+        InternalBackendInputField::EqualityRightHandSide => {
+            BackendInputField::EqualityRightHandSide
+        }
+    }
+}
+
+fn public_scaling_failure(reason: InternalScalingFailure) -> ScalingFailureReason {
+    match reason {
+        InternalScalingFailure::InvalidShape => ScalingFailureReason::InvalidShape,
+        InternalScalingFailure::ZeroNorm { index } => ScalingFailureReason::ZeroNorm { index },
+        InternalScalingFailure::NonFiniteNorm { index } => {
+            ScalingFailureReason::NonFiniteNorm { index }
+        }
     }
 }
 
