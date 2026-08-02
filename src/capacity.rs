@@ -3,7 +3,8 @@ use std::mem::size_of;
 use crate::faer_backend;
 
 pub(crate) const CAPACITY_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-pub(crate) const REPORT_FIXED_BYTES: u64 = 512;
+pub(crate) const REPORT_FIXED_BYTES: u64 = 4 * 1024;
+const REPORT_SCALARS_PER_KKT_DIMENSION: u64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapacityComponent {
@@ -12,8 +13,14 @@ pub(crate) enum CapacityComponent {
     EqualityDense,
     Kkt,
     FactorStorage,
+    AnalysisAuxiliary,
+    SvdRescueStorage,
     FaerFactorWorkspace,
     FaerSolveWorkspace,
+    FaerRrqrWorkspace,
+    FaerSingularValuesWorkspace,
+    FaerInertiaWorkspace,
+    FaerSvdRescueWorkspace,
     Recovery,
     Report,
     Peak,
@@ -36,7 +43,7 @@ pub(crate) enum CapacityExceededReason {
     },
     LimitExceeded {
         planned_peak_bytes: u64,
-        components: CapacityComponents,
+        components: Box<CapacityComponents>,
     },
 }
 
@@ -54,6 +61,14 @@ pub(crate) struct FaerWorkspaceEvidence {
     pub(crate) factor_alignment: usize,
     pub(crate) solve_bytes: u64,
     pub(crate) solve_alignment: usize,
+    pub(crate) rrqr_bytes: u64,
+    pub(crate) rrqr_alignment: usize,
+    pub(crate) singular_values_bytes: u64,
+    pub(crate) singular_values_alignment: usize,
+    pub(crate) inertia_bytes: u64,
+    pub(crate) inertia_alignment: usize,
+    pub(crate) svd_rescue_bytes: u64,
+    pub(crate) svd_rescue_alignment: usize,
     pub(crate) peak_bytes: u64,
 }
 
@@ -63,6 +78,8 @@ pub(crate) struct CapacityComponents {
     pub(crate) equality_dense_bytes: u64,
     pub(crate) kkt_bytes: u64,
     pub(crate) factor_storage_bytes: u64,
+    pub(crate) analysis_auxiliary_bytes: u64,
+    pub(crate) svd_rescue_storage_bytes: u64,
     pub(crate) recovery_bytes: u64,
     pub(crate) report_bytes: u64,
     pub(crate) faer_workspace: FaerWorkspaceEvidence,
@@ -135,6 +152,49 @@ pub(crate) fn plan_equality_capacity(
         factor_vector_bytes,
     )?;
 
+    let rrqr_coefficients = checked_mul(
+        CapacityComponent::AnalysisAuxiliary,
+        dimension,
+        usize_as_u64(
+            faer_backend::rrqr_block_size(kkt_dimension),
+            CapacityComponent::AnalysisAuxiliary,
+        )?,
+    )?;
+    let analysis_auxiliary_scalars = checked_add(
+        CapacityComponent::AnalysisAuxiliary,
+        rrqr_coefficients,
+        checked_mul(CapacityComponent::AnalysisAuxiliary, dimension, 2)?,
+    )?;
+    let analysis_auxiliary_indices =
+        checked_mul(CapacityComponent::AnalysisAuxiliary, dimension, 2)?;
+    let analysis_auxiliary_bytes = checked_add(
+        CapacityComponent::AnalysisAuxiliary,
+        checked_mul(
+            CapacityComponent::AnalysisAuxiliary,
+            analysis_auxiliary_scalars,
+            scalar_bytes,
+        )?,
+        checked_mul(
+            CapacityComponent::AnalysisAuxiliary,
+            analysis_auxiliary_indices,
+            index_bytes,
+        )?,
+    )?;
+    let svd_rescue_matrix_scalars = checked_mul(
+        CapacityComponent::SvdRescueStorage,
+        checked_mul(CapacityComponent::SvdRescueStorage, dimension, dimension)?,
+        2,
+    )?;
+    let svd_rescue_storage_bytes = checked_mul(
+        CapacityComponent::SvdRescueStorage,
+        checked_add(
+            CapacityComponent::SvdRescueStorage,
+            svd_rescue_matrix_scalars,
+            checked_mul(CapacityComponent::SvdRescueStorage, dimension, 2)?,
+        )?,
+        scalar_bytes,
+    )?;
+
     let faer_workspace = faer_workspace(kkt_dimension)?;
     let recovery_bytes = checked_mul(
         CapacityComponent::Recovery,
@@ -143,7 +203,15 @@ pub(crate) fn plan_equality_capacity(
     )?;
     let report_bytes = checked_add(
         CapacityComponent::Report,
-        checked_mul(CapacityComponent::Report, dimension, scalar_bytes)?,
+        checked_mul(
+            CapacityComponent::Report,
+            checked_mul(
+                CapacityComponent::Report,
+                dimension,
+                REPORT_SCALARS_PER_KKT_DIMENSION,
+            )?,
+            scalar_bytes,
+        )?,
         REPORT_FIXED_BYTES,
     )?;
     let components = CapacityComponents {
@@ -151,6 +219,8 @@ pub(crate) fn plan_equality_capacity(
         equality_dense_bytes,
         kkt_bytes,
         factor_storage_bytes,
+        analysis_auxiliary_bytes,
+        svd_rescue_storage_bytes,
         recovery_bytes,
         report_bytes,
         faer_workspace: faer_workspace.clone(),
@@ -162,6 +232,8 @@ pub(crate) fn plan_equality_capacity(
             equality_dense_bytes,
             kkt_bytes,
             factor_storage_bytes,
+            analysis_auxiliary_bytes,
+            svd_rescue_storage_bytes,
             faer_workspace.peak_bytes,
             recovery_bytes,
             report_bytes,
@@ -175,7 +247,7 @@ pub(crate) fn plan_equality_capacity(
             backend_invocation_attempted: false,
             reason: CapacityExceededReason::LimitExceeded {
                 planned_peak_bytes: peak_bytes,
-                components,
+                components: Box::new(components),
             },
         });
     }
@@ -193,34 +265,69 @@ pub(crate) fn plan_equality_capacity(
 fn faer_workspace(dimension: usize) -> Result<FaerWorkspaceEvidence, CapacityExceededEvidence> {
     let factor = faer_backend::factor_workspace_requirement(dimension);
     let solve = faer_backend::solve_workspace_requirement(dimension);
-    let factor_alignment = factor.align_bytes();
-    let solve_alignment = solve.align_bytes();
-    if factor_alignment == 0 {
-        return Err(overflow(
-            CapacityComponent::FaerFactorWorkspace,
-            ArithmeticOperation::FaerStackLayout,
-            usize_as_evidence(dimension),
-            0,
-        ));
-    }
-    if solve_alignment == 0 {
-        return Err(overflow(
-            CapacityComponent::FaerSolveWorkspace,
-            ArithmeticOperation::FaerStackLayout,
-            usize_as_evidence(dimension),
-            1,
-        ));
-    }
-    let factor_bytes = usize_as_u64(factor.size_bytes(), CapacityComponent::FaerFactorWorkspace)?;
-    let solve_bytes = usize_as_u64(solve.size_bytes(), CapacityComponent::FaerSolveWorkspace)?;
+    let rrqr = faer_backend::rrqr_workspace_requirement(dimension);
+    let singular_values = faer_backend::singular_values_workspace_requirement(dimension);
+    let inertia = faer_backend::inertia_workspace_requirement(dimension);
+    let svd_rescue = faer_backend::svd_rescue_workspace_requirement(dimension);
+    let (factor_bytes, factor_alignment) =
+        stack_layout(factor, CapacityComponent::FaerFactorWorkspace, dimension)?;
+    let (solve_bytes, solve_alignment) =
+        stack_layout(solve, CapacityComponent::FaerSolveWorkspace, dimension)?;
+    let (rrqr_bytes, rrqr_alignment) =
+        stack_layout(rrqr, CapacityComponent::FaerRrqrWorkspace, dimension)?;
+    let (singular_values_bytes, singular_values_alignment) = stack_layout(
+        singular_values,
+        CapacityComponent::FaerSingularValuesWorkspace,
+        dimension,
+    )?;
+    let (inertia_bytes, inertia_alignment) =
+        stack_layout(inertia, CapacityComponent::FaerInertiaWorkspace, dimension)?;
+    let (svd_rescue_bytes, svd_rescue_alignment) = stack_layout(
+        svd_rescue,
+        CapacityComponent::FaerSvdRescueWorkspace,
+        dimension,
+    )?;
 
     Ok(FaerWorkspaceEvidence {
         factor_bytes,
         factor_alignment,
         solve_bytes,
         solve_alignment,
-        peak_bytes: factor_bytes.max(solve_bytes),
+        rrqr_bytes,
+        rrqr_alignment,
+        singular_values_bytes,
+        singular_values_alignment,
+        inertia_bytes,
+        inertia_alignment,
+        svd_rescue_bytes,
+        svd_rescue_alignment,
+        peak_bytes: factor_bytes
+            .max(solve_bytes)
+            .max(rrqr_bytes)
+            .max(singular_values_bytes)
+            .max(inertia_bytes)
+            .max(svd_rescue_bytes),
     })
+}
+
+fn stack_layout(
+    requirement: faer::dyn_stack::StackReq,
+    component: CapacityComponent,
+    dimension: usize,
+) -> Result<(u64, usize), CapacityExceededEvidence> {
+    let alignment = requirement.align_bytes();
+    if alignment == 0 {
+        return Err(overflow(
+            component,
+            ArithmeticOperation::FaerStackLayout,
+            usize_as_evidence(dimension),
+            0,
+        ));
+    }
+    Ok((
+        usize_as_u64(requirement.size_bytes(), component)?,
+        alignment,
+    ))
 }
 
 fn checked_sum(
@@ -304,8 +411,19 @@ mod tests {
 
     #[test]
     fn first_equality_shape_over_eight_gib_is_rejected_before_allocation() {
-        assert!(plan_equality_capacity(0, 23_151).is_ok());
-        let evidence = plan_equality_capacity(0, 23_152)
+        let mut accepted = 0;
+        let mut rejected = 23_151;
+        while rejected - accepted > 1 {
+            let candidate = accepted + (rejected - accepted) / 2;
+            if plan_equality_capacity(0, candidate).is_ok() {
+                accepted = candidate;
+            } else {
+                rejected = candidate;
+            }
+        }
+        assert_eq!(accepted, 9_841);
+        assert_eq!(rejected, 9_842);
+        let evidence = plan_equality_capacity(0, rejected)
             .expect_err("the first over-limit shape must be rejected deterministically");
 
         assert!(!evidence.large_allocation_attempted);
@@ -317,9 +435,11 @@ mod tests {
         else {
             panic!("representable capacity excess must not be reported as overflow");
         };
-        assert_eq!(planned_peak_bytes, 8_589_948_160);
-        assert_eq!(planned_peak_bytes - evidence.limit_bytes, 13_568);
-        assert_eq!(components.faer_workspace.factor_bytes, 12_039_040);
+        assert_eq!(planned_peak_bytes, 8_590_810_592);
+        assert_eq!(planned_peak_bytes - evidence.limit_bytes, 876_000);
+        assert_eq!(components.faer_workspace.factor_bytes, 5_120_960);
+        assert!(components.svd_rescue_storage_bytes > components.factor_storage_bytes);
+        assert!(components.faer_workspace.svd_rescue_bytes > 0);
     }
 
     #[test]

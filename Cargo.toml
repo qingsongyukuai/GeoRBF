@@ -15,6 +15,7 @@ include = [
     "/rust-toolchain.toml",
     "/docs/implementation/16-production-equality-spine.md",
     "/docs/implementation/17-cubic-equality-core.md",
+    "/docs/implementation/18-cubic-equality-numerical-policy.md",
     "/validation/oracle/cubic-v1/**",
 ]
 

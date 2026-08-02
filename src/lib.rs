@@ -1,8 +1,9 @@
 //! GeoRBF product crate.
 //!
 //! Version 0.1.0 establishes the internal Cubic generalized-functional Equality
-//! core and its KKT execution spine. Domain inputs and fitting APIs are
-//! intentionally not public until they are complete.
+//! core, versioned numerical policy, bounded KKT attempts, and physical Recover
+//! and Verify boundary. Domain inputs and fitting APIs are intentionally not
+//! public until they are complete.
 
 #![forbid(unsafe_code)]
 

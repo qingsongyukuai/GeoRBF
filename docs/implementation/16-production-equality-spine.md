@@ -32,6 +32,11 @@ is 12,039,040 bytes. This test computes only layouts; it performs no large
 allocation and invokes no backend. A separate `usize::MAX + usize::MAX` case
 returns typed arithmetic-overflow evidence.
 
+Issue #18 extends this original LBLT-only plan with rank/inertia analysis and
+the bounded full-SVD rescue. Its all-live evidence and adjacent capacity
+boundary supersede these issue #16-only numbers; see
+[`18-cubic-equality-numerical-policy.md`](18-cubic-equality-numerical-policy.md).
+
 ## Peak plan
 
 Checked arithmetic covers canonical scalars; the dense Equality Hessian,

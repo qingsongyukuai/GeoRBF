@@ -3,6 +3,9 @@ use faer::linalg::cholesky::lblt::{
     factor::{self, LbltParams, PivotingStrategy},
     solve,
 };
+use faer::linalg::evd::{self, ComputeEigenvectors};
+use faer::linalg::qr::col_pivoting;
+use faer::linalg::svd::{self, ComputeSvdVectors};
 use faer::{Par, Spec};
 
 pub(crate) const CRATE_NAME: &str = "faer";
@@ -37,4 +40,49 @@ pub(crate) fn factor_workspace_requirement(dimension: usize) -> StackReq {
 
 pub(crate) fn solve_workspace_requirement(dimension: usize) -> StackReq {
     solve::solve_in_place_scratch::<usize, f64>(dimension, 1, parallelism())
+}
+
+pub(crate) fn rrqr_block_size(dimension: usize) -> usize {
+    faer::linalg::qr::no_pivoting::factor::recommended_block_size::<f64>(dimension, dimension)
+}
+
+pub(crate) fn rrqr_workspace_requirement(dimension: usize) -> StackReq {
+    col_pivoting::factor::qr_in_place_scratch::<usize, f64>(
+        dimension,
+        dimension,
+        rrqr_block_size(dimension),
+        parallelism(),
+        Default::default(),
+    )
+}
+
+pub(crate) fn singular_values_workspace_requirement(dimension: usize) -> StackReq {
+    svd::svd_scratch::<f64>(
+        dimension,
+        dimension,
+        ComputeSvdVectors::No,
+        ComputeSvdVectors::No,
+        parallelism(),
+        Default::default(),
+    )
+}
+
+pub(crate) fn inertia_workspace_requirement(dimension: usize) -> StackReq {
+    evd::self_adjoint_evd_scratch::<f64>(
+        dimension,
+        ComputeEigenvectors::No,
+        parallelism(),
+        Default::default(),
+    )
+}
+
+pub(crate) fn svd_rescue_workspace_requirement(dimension: usize) -> StackReq {
+    svd::svd_scratch::<f64>(
+        dimension,
+        dimension,
+        ComputeSvdVectors::Full,
+        ComputeSvdVectors::Full,
+        parallelism(),
+        Default::default(),
+    )
 }

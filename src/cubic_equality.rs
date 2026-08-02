@@ -10,10 +10,12 @@ use faer::{Conj, Side};
 use crate::capacity::{CapacityExceededEvidence, plan_equality_capacity};
 use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::faer_backend;
-use crate::functional::{CanonicalFunctional, FunctionalDimension, FunctionalUse};
+use crate::functional::{
+    CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, UsageProvenance,
+};
 use crate::kkt::{EqualityKktSystem, KktFailure, KktSolveEvidence, solve_equality_kkt};
 use crate::math::dot3;
-use crate::numerical::EQUALITY_KKT_POLICY_V1;
+use crate::numerical::{EQUALITY_KKT_POLICY_V1, SpectralRankDecision};
 
 const POLYNOMIAL_DIMENSION: usize = 4;
 
@@ -75,10 +77,13 @@ impl DenseMatrix {
 pub(crate) struct PolynomialCoordinates {
     center: [f64; 3],
     length: f64,
+    degenerate_extent: bool,
 }
 
 impl PolynomialCoordinates {
-    fn from_functionals(functionals: &[CanonicalFunctional]) -> Self {
+    fn from_functionals(
+        functionals: &[CanonicalFunctional],
+    ) -> Result<Self, RepresentationFailure> {
         let mut minimum = [f64::INFINITY; 3];
         let mut maximum = [f64::NEG_INFINITY; 3];
         for functional in functionals {
@@ -89,19 +94,93 @@ impl PolynomialCoordinates {
                 }
             }
         }
-        let center = std::array::from_fn(|axis| 0.5 * (minimum[axis] + maximum[axis]));
+        let center = std::array::from_fn(|axis| 0.5 * minimum[axis] + 0.5 * maximum[axis]);
+        if center.iter().any(|value| !value.is_finite()) {
+            return Err(RepresentationFailure::InvalidSolveCoordinateTransform {
+                reason: "non-finite bounding-box center",
+                solver_invoked: false,
+            });
+        }
         let length = functionals
             .iter()
             .flat_map(CanonicalFunctional::terms)
-            .map(|term| {
-                let displacement = subtract(term.support(), center);
-                dot3(displacement, displacement).sqrt()
-            })
+            .map(|term| stable_norm(subtract(term.support(), center)))
             .fold(0.0_f64, f64::max);
-        Self {
-            center,
-            length: if length > 0.0 { length } else { 1.0 },
+        if !length.is_finite() {
+            return Err(RepresentationFailure::InvalidSolveCoordinateTransform {
+                reason: "non-finite characteristic length",
+                solver_invoked: false,
+            });
         }
+        let degenerate_extent = length == 0.0;
+        let coordinates = Self {
+            center,
+            length: if degenerate_extent { 1.0 } else { length },
+            degenerate_extent,
+        };
+        let kernel_scale = coordinates.length.powi(3);
+        if !kernel_scale.is_finite() || kernel_scale <= 0.0 {
+            return Err(RepresentationFailure::InvalidSolveCoordinateTransform {
+                reason: "non-invertible Cubic field recovery scale",
+                solver_invoked: false,
+            });
+        }
+        Ok(coordinates)
+    }
+
+    pub(crate) fn center(self) -> [f64; 3] {
+        self.center
+    }
+
+    pub(crate) fn length(self) -> f64 {
+        self.length
+    }
+
+    pub(crate) fn degenerate_extent(self) -> bool {
+        self.degenerate_extent
+    }
+
+    pub(crate) fn to_standard_functional(
+        self,
+        physical: &CanonicalFunctional,
+    ) -> CanonicalFunctional {
+        let terms = physical
+            .terms()
+            .iter()
+            .map(|term| {
+                FunctionalTerm::new(
+                    std::array::from_fn(|axis| {
+                        (term.support()[axis] - self.center[axis]) / self.length
+                    }),
+                    term.value_coefficient(),
+                    term.gradient_coefficient().map(|value| value / self.length),
+                )
+            })
+            .collect();
+        CanonicalFunctional::new(physical.dimension(), terms)
+            .expect("an invertible similarity transform preserves a nonzero finite functional")
+    }
+
+    pub(crate) fn to_physical_field_coefficients(self, standard: &[f64]) -> Vec<f64> {
+        let kernel_scale = self.length.powi(3);
+        standard
+            .iter()
+            .map(|coefficient| coefficient / kernel_scale)
+            .collect()
+    }
+
+    fn to_standard_field_coefficients(self, physical: &[f64]) -> Vec<f64> {
+        let kernel_scale = self.length.powi(3);
+        physical
+            .iter()
+            .map(|coefficient| coefficient * kernel_scale)
+            .collect()
+    }
+
+    fn is_valid_recovery_map(self) -> bool {
+        self.center.iter().all(|value| value.is_finite())
+            && self.length.is_finite()
+            && self.length > 0.0
     }
 
     fn pairing(self, functional: &CanonicalFunctional) -> [f64; POLYNOMIAL_DIMENSION] {
@@ -158,11 +237,27 @@ pub(crate) struct CpdEvidence {
     pub(crate) polynomial_dimension: usize,
     pub(crate) polynomial_rank: usize,
     pub(crate) singular_values: Vec<f64>,
+    pub(crate) polynomial_rrqr_ratio: f64,
+    pub(crate) polynomial_svd_ratio: f64,
+    pub(crate) polynomial_rank_reject_ratio: f64,
+    pub(crate) polynomial_rank_accept_ratio: f64,
     pub(crate) null_space_defect: f64,
     pub(crate) reduced_symmetry_defect: f64,
     pub(crate) symmetry_defect_limit: f64,
     pub(crate) reduced_smallest_eigenvalue: f64,
     pub(crate) affine_reproduction_error: f64,
+    pub(crate) solve_coordinate_center: [f64; 3],
+    pub(crate) solve_coordinate_length: f64,
+    pub(crate) degenerate_extent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PolynomialRankEvidence {
+    pub(crate) rrqr_ratio: f64,
+    pub(crate) svd_ratio: f64,
+    pub(crate) reject_ratio: f64,
+    pub(crate) accept_ratio: f64,
+    pub(crate) backend_invoked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -213,10 +308,17 @@ pub(crate) enum FieldEnergyNormalizationError {
 pub(crate) enum RepresentationFailure {
     EmptyRepresenterSpan,
     Capacity(Box<CapacityExceededEvidence>),
+    InvalidSolveCoordinateTransform {
+        reason: &'static str,
+        solver_invoked: bool,
+    },
     PolynomialRankDeficient {
         rank: usize,
         solver_invoked: bool,
         hidden_regularization_applied: bool,
+    },
+    PolynomialRankGrayZone {
+        evidence: PolynomialRankEvidence,
     },
     NumericalDecisionGrayZone {
         stage: &'static str,
@@ -273,13 +375,24 @@ impl CubicRepresentation {
             .iter()
             .map(|usage| usage.functional().clone())
             .collect::<Vec<_>>();
-        let coordinates = PolynomialCoordinates::from_functionals(&functionals);
-        let polynomial =
-            DenseMatrix::from_fn(functionals.len(), POLYNOMIAL_DIMENSION, |row, column| {
-                coordinates.pairing(&functionals[row])[column]
-            });
-        let (singular_values, polynomial_rank) = verify_polynomial_rank(&polynomial)?;
-        let kernel = assemble_kernel_pairing(&functionals, &metric);
+        let coordinates = PolynomialCoordinates::from_functionals(&functionals)?;
+        let standard_functionals = functionals
+            .iter()
+            .map(|functional| coordinates.to_standard_functional(functional))
+            .collect::<Vec<_>>();
+        let polynomial = DenseMatrix::from_fn(
+            standard_functionals.len(),
+            POLYNOMIAL_DIMENSION,
+            |row, column| {
+                standard_functionals[row].evaluate_affine(
+                    if column == 0 { 1.0 } else { 0.0 },
+                    std::array::from_fn(|axis| if axis + 1 == column { 1.0 } else { 0.0 }),
+                )
+            },
+        );
+        let (singular_values, polynomial_rank, polynomial_rank_evidence) =
+            verify_polynomial_rank(&polynomial)?;
+        let kernel = assemble_kernel_pairing(&standard_functionals, &metric);
         let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank);
         let (mut reduced, null_space_defect) =
             materialize_reduced_pairing(&kernel, &polynomial, &null_space)?;
@@ -320,11 +433,18 @@ impl CubicRepresentation {
                 polynomial_dimension: POLYNOMIAL_DIMENSION,
                 polynomial_rank,
                 singular_values,
+                polynomial_rrqr_ratio: polynomial_rank_evidence.rrqr_ratio,
+                polynomial_svd_ratio: polynomial_rank_evidence.svd_ratio,
+                polynomial_rank_reject_ratio: polynomial_rank_evidence.reject_ratio,
+                polynomial_rank_accept_ratio: polynomial_rank_evidence.accept_ratio,
                 null_space_defect,
                 reduced_symmetry_defect,
                 symmetry_defect_limit,
                 reduced_smallest_eigenvalue,
                 affine_reproduction_error,
+                solve_coordinate_center: coordinates.center(),
+                solve_coordinate_length: coordinates.length(),
+                degenerate_extent: coordinates.degenerate_extent(),
             },
             field_energy_normalization: CubicFieldEnergyNormalization::all_hard(),
         })
@@ -343,6 +463,10 @@ impl CubicRepresentation {
     }
 
     pub(crate) fn polynomial_coordinates(&self) -> PolynomialCoordinates {
+        self.coordinates
+    }
+
+    pub(crate) fn solve_coordinate_transform(&self) -> PolynomialCoordinates {
         self.coordinates
     }
 
@@ -399,7 +523,29 @@ impl HouseholderNullSpace {
 
 fn verify_polynomial_rank(
     polynomial: &DenseMatrix,
-) -> Result<(Vec<f64>, usize), RepresentationFailure> {
+) -> Result<(Vec<f64>, usize, PolynomialRankEvidence), RepresentationFailure> {
+    let exact_nonzero_columns = (0..polynomial.columns)
+        .filter(|column| (0..polynomial.rows).any(|row| polynomial.get(row, *column) != 0.0))
+        .count();
+    if exact_nonzero_columns != POLYNOMIAL_DIMENSION {
+        return Err(RepresentationFailure::PolynomialRankDeficient {
+            rank: exact_nonzero_columns,
+            solver_invoked: false,
+            hidden_regularization_applied: false,
+        });
+    }
+    let qr = polynomial.to_faer().col_piv_qr();
+    let rrqr_largest = (0..POLYNOMIAL_DIMENSION)
+        .map(|index| qr.R()[(index, index)].abs())
+        .fold(0.0_f64, f64::max);
+    let rrqr_smallest = (0..POLYNOMIAL_DIMENSION)
+        .map(|index| qr.R()[(index, index)].abs())
+        .fold(f64::INFINITY, f64::min);
+    let rrqr_ratio = if rrqr_largest > 0.0 {
+        rrqr_smallest / rrqr_largest
+    } else {
+        0.0
+    };
     let singular_values = polynomial.to_faer().singular_values().map_err(|_| {
         RepresentationFailure::NumericalDecisionGrayZone {
             stage: "polynomial-rank",
@@ -410,26 +556,49 @@ fn verify_polynomial_rank(
     let largest = singular_values.first().copied().unwrap_or(0.0);
     let smallest = singular_values.last().copied().unwrap_or(0.0);
     let dimension = polynomial.rows.max(polynomial.columns);
-    let (reject, accept) = EQUALITY_KKT_POLICY_V1.spectral_thresholds(dimension, largest);
+    let (reject, _) = EQUALITY_KKT_POLICY_V1.spectral_thresholds(dimension, largest);
+    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V1.spectral_ratio_thresholds(dimension);
+    let svd_ratio = if largest > 0.0 {
+        smallest / largest
+    } else {
+        0.0
+    };
     let rank = singular_values
         .iter()
         .filter(|singular_value| **singular_value > reject)
         .count();
-    if rank != POLYNOMIAL_DIMENSION || smallest <= reject {
-        return Err(RepresentationFailure::PolynomialRankDeficient {
-            rank,
-            solver_invoked: false,
-            hidden_regularization_applied: false,
-        });
+    match EQUALITY_KKT_POLICY_V1.classify_spectral_ratio(dimension, svd_ratio) {
+        SpectralRankDecision::Reject => {
+            return Err(RepresentationFailure::PolynomialRankDeficient {
+                rank,
+                solver_invoked: false,
+                hidden_regularization_applied: false,
+            });
+        }
+        SpectralRankDecision::GrayZone => {
+            return Err(RepresentationFailure::PolynomialRankGrayZone {
+                evidence: PolynomialRankEvidence {
+                    rrqr_ratio,
+                    svd_ratio,
+                    reject_ratio,
+                    accept_ratio,
+                    backend_invoked: false,
+                },
+            });
+        }
+        SpectralRankDecision::Accept => {}
     }
-    if smallest < accept {
-        return Err(RepresentationFailure::NumericalDecisionGrayZone {
-            stage: "polynomial-rank",
-            solver_invoked: false,
-            hidden_regularization_applied: false,
-        });
-    }
-    Ok((singular_values, rank))
+    Ok((
+        singular_values,
+        rank,
+        PolynomialRankEvidence {
+            rrqr_ratio,
+            svd_ratio,
+            reject_ratio,
+            accept_ratio,
+            backend_invoked: false,
+        },
+    ))
 }
 
 fn assemble_kernel_pairing(
@@ -734,22 +903,85 @@ pub(crate) struct CubicEqualitySolution {
     pub(crate) side_condition_violation: f64,
     pub(crate) hard_equality_violations: FunctionalViolationEnvelope,
     pub(crate) polynomial_round_trip_error: f64,
+    pub(crate) field_coefficient_round_trip_error: f64,
+    pub(crate) field_energy_round_trip_error: f64,
+    pub(crate) recovery_finite: bool,
+    pub(crate) provenance_verified: bool,
+    pub(crate) semantic_latent_count: usize,
     pub(crate) field_energy: f64,
+    pub(crate) total_objective: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryVerificationFailureReason {
+    InvalidRecoveryMap,
+    ProvenanceMismatch,
+    NonFiniteRecoveredQuantity,
+    SideConditionViolation,
+    HardEqualityViolation,
+    PolynomialRoundTripViolation,
+    FieldCoefficientRoundTripViolation,
+    FieldEnergyRoundTripViolation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecoveryVerificationFailureEvidence {
+    pub(crate) reasons: Vec<RecoveryVerificationFailureReason>,
+    pub(crate) side_condition_violation: Option<f64>,
+    pub(crate) hard_equality_violations: Option<FunctionalViolationEnvelope>,
+    pub(crate) polynomial_round_trip_error: Option<f64>,
+    pub(crate) field_coefficient_round_trip_error: Option<f64>,
+    pub(crate) field_energy_round_trip_error: Option<f64>,
+    pub(crate) no_model_produced: bool,
+}
+
+impl RecoveryVerificationFailureEvidence {
+    fn early(reason: RecoveryVerificationFailureReason) -> Self {
+        Self {
+            reasons: vec![reason],
+            side_condition_violation: None,
+            hard_equality_violations: None,
+            polynomial_round_trip_error: None,
+            field_coefficient_round_trip_error: None,
+            field_energy_round_trip_error: None,
+            no_model_produced: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RecoveryProvenanceMap {
+    usages: Vec<UsageProvenance>,
+}
+
+impl RecoveryProvenanceMap {
+    fn from_representation(representation: &CubicRepresentation) -> Self {
+        Self {
+            usages: representation
+                .fitting_uses
+                .iter()
+                .map(|usage| usage.provenance().clone())
+                .collect(),
+        }
+    }
+
+    fn verifies(&self, representation: &CubicRepresentation) -> bool {
+        self.usages.len() == representation.fitting_uses.len()
+            && self
+                .usages
+                .iter()
+                .zip(&representation.fitting_uses)
+                .all(|(expected, actual)| expected == actual.provenance())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CubicEqualityFailure {
     EmptyEqualitySet,
-    NonFiniteTarget {
-        equality: usize,
-    },
+    NonFiniteTarget { equality: usize },
     Representation(Box<RepresentationFailure>),
     Backend(Box<KktFailure>),
-    RecoveryVerification {
-        side_condition_violation: f64,
-        hard_equality_violations: FunctionalViolationEnvelope,
-        polynomial_round_trip_error: f64,
-    },
+    RecoveryVerification(Box<RecoveryVerificationFailureEvidence>),
 }
 
 pub(crate) struct CubicEqualityCore;
@@ -779,142 +1011,271 @@ impl CubicEqualityCore {
             metric,
         )
         .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
-        let coefficient_count = representation.kernel.rows;
-        let primal_variables = coefficient_count + POLYNOMIAL_DIMENSION;
-        let equality_constraints = POLYNOMIAL_DIMENSION + targets.len();
-        let hessian = DenseMatrix::from_fn(primal_variables, primal_variables, |row, column| {
-            if row < coefficient_count && column < coefficient_count {
-                representation.kernel.get(row, column)
+        let recovery_provenance = RecoveryProvenanceMap::from_representation(&representation);
+        let (assembly, backend) = solve_standard_form(&representation, &targets)?;
+        recover_and_verify(
+            representation,
+            targets,
+            assembly,
+            backend,
+            recovery_provenance,
+        )
+    }
+}
+
+fn solve_standard_form(
+    representation: &CubicRepresentation,
+    targets: &[f64],
+) -> Result<(EqualityAssemblyEvidence, KktSolveEvidence), CubicEqualityFailure> {
+    let coefficient_count = representation.kernel.rows;
+    let primal_variables = coefficient_count + POLYNOMIAL_DIMENSION;
+    let equality_constraints = POLYNOMIAL_DIMENSION + targets.len();
+    let hessian = DenseMatrix::from_fn(primal_variables, primal_variables, |row, column| {
+        if row < coefficient_count && column < coefficient_count {
+            representation.kernel.get(row, column)
+        } else {
+            0.0
+        }
+    });
+    let equality_jacobian =
+        DenseMatrix::from_fn(equality_constraints, primal_variables, |row, column| {
+            if row < POLYNOMIAL_DIMENSION {
+                if column < coefficient_count {
+                    representation.polynomial.get(column, row)
+                } else {
+                    0.0
+                }
             } else {
-                0.0
+                let functional = row - POLYNOMIAL_DIMENSION;
+                if column < coefficient_count {
+                    representation.kernel.get(functional, column)
+                } else {
+                    representation
+                        .polynomial
+                        .get(functional, column - coefficient_count)
+                }
             }
         });
-        let equality_jacobian =
-            DenseMatrix::from_fn(equality_constraints, primal_variables, |row, column| {
-                if row < POLYNOMIAL_DIMENSION {
-                    if column < coefficient_count {
-                        representation.polynomial.get(column, row)
-                    } else {
-                        0.0
-                    }
-                } else {
-                    let functional = row - POLYNOMIAL_DIMENSION;
-                    if column < coefficient_count {
-                        representation.kernel.get(functional, column)
-                    } else {
-                        representation
-                            .polynomial
-                            .get(functional, column - coefficient_count)
-                    }
-                }
-            });
-        let stationarity_rhs = vec![0.0; primal_variables];
-        let equality_rhs = std::iter::repeat_n(0.0, POLYNOMIAL_DIMENSION)
-            .chain(targets.iter().copied())
-            .collect::<Vec<_>>();
-        let backend = solve_equality_kkt(&EqualityKktSystem {
+    let stationarity_rhs = vec![0.0; primal_variables];
+    let equality_rhs = std::iter::repeat_n(0.0, POLYNOMIAL_DIMENSION)
+        .chain(targets.iter().copied())
+        .collect::<Vec<_>>();
+    let backend = solve_equality_kkt(&EqualityKktSystem {
+        primal_variables,
+        equality_constraints,
+        hessian: hessian.values(),
+        equality_jacobian: equality_jacobian.values(),
+        stationarity_rhs: &stationarity_rhs,
+        equality_rhs: &equality_rhs,
+    })
+    .map_err(|failure| CubicEqualityFailure::Backend(Box::new(failure)))?;
+    Ok((
+        EqualityAssemblyEvidence {
             primal_variables,
-            equality_constraints,
-            hessian: hessian.values(),
-            equality_jacobian: equality_jacobian.values(),
-            stationarity_rhs: &stationarity_rhs,
-            equality_rhs: &equality_rhs,
-        })
-        .map_err(|failure| CubicEqualityFailure::Backend(Box::new(failure)))?;
+            field_coefficients: coefficient_count,
+            polynomial_coefficients: POLYNOMIAL_DIMENSION,
+            side_conditions: POLYNOMIAL_DIMENSION,
+            hard_equalities: targets.len(),
+        },
+        backend,
+    ))
+}
 
-        let coefficients = backend.candidate[..coefficient_count].to_vec();
-        let standard_polynomial: [f64; 4] = backend.candidate
-            [coefficient_count..coefficient_count + POLYNOMIAL_DIMENSION]
-            .try_into()
-            .expect("the augmented primal retains exactly four polynomial coefficients");
-        let physical_polynomial = representation.coordinates.to_physical(standard_polynomial);
-        let field = RecoveredCubicField {
-            representers: representation
-                .fitting_uses
-                .iter()
-                .map(|usage| usage.functional().clone())
-                .collect(),
-            metric: representation.metric.clone(),
-            coefficients,
-            physical_polynomial,
-        };
-        let hard_equalities = representation
+fn recover_and_verify(
+    representation: CubicRepresentation,
+    targets: Vec<f64>,
+    assembly: EqualityAssemblyEvidence,
+    backend: KktSolveEvidence,
+    recovery_provenance: RecoveryProvenanceMap,
+) -> Result<CubicEqualitySolution, CubicEqualityFailure> {
+    if !representation.coordinates.is_valid_recovery_map() {
+        return Err(CubicEqualityFailure::RecoveryVerification(Box::new(
+            RecoveryVerificationFailureEvidence::early(
+                RecoveryVerificationFailureReason::InvalidRecoveryMap,
+            ),
+        )));
+    }
+    let provenance_verified = recovery_provenance.verifies(&representation);
+    if !provenance_verified {
+        return Err(CubicEqualityFailure::RecoveryVerification(Box::new(
+            RecoveryVerificationFailureEvidence::early(
+                RecoveryVerificationFailureReason::ProvenanceMismatch,
+            ),
+        )));
+    }
+
+    let coefficient_count = assembly.field_coefficients;
+    let standard_coefficients = &backend.candidate[..coefficient_count];
+    let coefficients = representation
+        .coordinates
+        .to_physical_field_coefficients(standard_coefficients);
+    let standard_polynomial: [f64; 4] = backend.candidate
+        [coefficient_count..coefficient_count + POLYNOMIAL_DIMENSION]
+        .try_into()
+        .expect("the augmented primal retains exactly four polynomial coefficients");
+    let physical_polynomial = representation.coordinates.to_physical(standard_polynomial);
+    let field = RecoveredCubicField {
+        representers: representation
             .fitting_uses
             .iter()
-            .cloned()
-            .zip(&targets)
-            .map(|(usage, target)| {
-                let value = field.evaluate_functional(usage.functional());
-                RecoveredHardEquality {
-                    usage,
-                    target: *target,
-                    value,
-                    residual: value - *target,
-                }
-            })
-            .collect::<Vec<_>>();
-        let side_condition_violation = (0..POLYNOMIAL_DIMENSION)
-            .map(|column| {
-                representation
-                    .fitting_uses
-                    .iter()
-                    .zip(&field.coefficients)
-                    .map(|(usage, coefficient)| {
-                        representation.coordinates.pairing(usage.functional())[column] * coefficient
-                    })
-                    .sum::<f64>()
-                    .abs()
-            })
-            .fold(0.0_f64, f64::max);
-        let hard_equality_violations = FunctionalViolationEnvelope::from_dimensioned_residuals(
-            hard_equalities
-                .iter()
-                .map(|equality| (equality.usage.functional().dimension(), equality.residual)),
-        );
-        let recovered_standard_polynomial = representation
-            .coordinates
-            .to_standard(field.physical_polynomial);
-        let polynomial_round_trip_error = recovered_standard_polynomial
-            .iter()
-            .zip(standard_polynomial)
-            .map(|(actual, expected)| (actual - expected).abs() / expected.abs().max(1.0))
-            .fold(0.0_f64, f64::max);
-        if side_condition_violation > EQUALITY_KKT_POLICY_V1.side_condition_limit
-            || !hard_equality_violations.is_within_policy()
-            || polynomial_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
-        {
-            return Err(CubicEqualityFailure::RecoveryVerification {
-                side_condition_violation,
-                hard_equality_violations,
-                polynomial_round_trip_error,
-            });
-        }
-        let native_cubic_energy = field.native_cubic_energy();
-        let field_energy = representation
-            .field_energy_normalization
-            .dimensionless_energy(native_cubic_energy);
-        Ok(CubicEqualitySolution {
-            representation: representation.evidence.clone(),
-            assembly: EqualityAssemblyEvidence {
-                primal_variables,
-                field_coefficients: coefficient_count,
-                polynomial_coefficients: POLYNOMIAL_DIMENSION,
-                side_conditions: POLYNOMIAL_DIMENSION,
-                hard_equalities: targets.len(),
-            },
-            backend,
-            field,
-            hard_equalities,
-            side_condition_violation,
-            hard_equality_violations,
-            polynomial_round_trip_error,
-            field_energy,
+            .map(|usage| usage.functional().clone())
+            .collect(),
+        metric: representation.metric.clone(),
+        coefficients,
+        physical_polynomial,
+    };
+    let hard_equalities = representation
+        .fitting_uses
+        .iter()
+        .cloned()
+        .zip(&targets)
+        .map(|(usage, target)| {
+            let value = field.evaluate_functional(usage.functional());
+            RecoveredHardEquality {
+                usage,
+                target: *target,
+                value,
+                residual: value - *target,
+            }
         })
+        .collect::<Vec<_>>();
+    let side_condition_violation = (0..POLYNOMIAL_DIMENSION)
+        .map(|column| {
+            representation
+                .fitting_uses
+                .iter()
+                .zip(&field.coefficients)
+                .map(|(usage, coefficient)| {
+                    representation.coordinates.pairing(usage.functional())[column] * coefficient
+                })
+                .sum::<f64>()
+                .abs()
+        })
+        .fold(0.0_f64, f64::max);
+    let hard_equality_violations = FunctionalViolationEnvelope::from_dimensioned_residuals(
+        hard_equalities
+            .iter()
+            .map(|equality| (equality.usage.functional().dimension(), equality.residual)),
+    );
+    let recovered_standard_polynomial = representation
+        .coordinates
+        .to_standard(field.physical_polynomial);
+    let polynomial_round_trip_error =
+        relative_slice_error(&recovered_standard_polynomial, &standard_polynomial);
+    let recovered_standard_coefficients = representation
+        .coordinates
+        .to_standard_field_coefficients(&field.coefficients);
+    let field_coefficient_round_trip_error =
+        relative_slice_error(&recovered_standard_coefficients, standard_coefficients);
+
+    let native_cubic_energy = field.native_cubic_energy();
+    let field_energy = representation
+        .field_energy_normalization
+        .dimensionless_energy(native_cubic_energy);
+    let standard_energy = dot_product(
+        standard_coefficients,
+        &representation.kernel.multiply_vector(standard_coefficients),
+    );
+    let recovered_energy = standard_energy / representation.coordinates.length().powi(3);
+    let field_energy_round_trip_error =
+        (field_energy - recovered_energy).abs() / recovered_energy.abs().max(1.0);
+    let total_objective = 0.5 * field_energy;
+    let recovery_finite = field.coefficients.iter().all(|value| value.is_finite())
+        && field
+            .physical_polynomial
+            .iter()
+            .all(|value| value.is_finite())
+        && hard_equalities
+            .iter()
+            .all(|equality| equality.value.is_finite() && equality.residual.is_finite())
+        && side_condition_violation.is_finite()
+        && polynomial_round_trip_error.is_finite()
+        && field_coefficient_round_trip_error.is_finite()
+        && field_energy.is_finite()
+        && field_energy_round_trip_error.is_finite()
+        && total_objective.is_finite();
+
+    let mut reasons = Vec::new();
+    if !recovery_finite {
+        reasons.push(RecoveryVerificationFailureReason::NonFiniteRecoveredQuantity);
     }
+    if side_condition_violation > EQUALITY_KKT_POLICY_V1.side_condition_limit {
+        reasons.push(RecoveryVerificationFailureReason::SideConditionViolation);
+    }
+    if !hard_equality_violations.is_within_policy() {
+        reasons.push(RecoveryVerificationFailureReason::HardEqualityViolation);
+    }
+    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+        reasons.push(RecoveryVerificationFailureReason::PolynomialRoundTripViolation);
+    }
+    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+        reasons.push(RecoveryVerificationFailureReason::FieldCoefficientRoundTripViolation);
+    }
+    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+        reasons.push(RecoveryVerificationFailureReason::FieldEnergyRoundTripViolation);
+    }
+    if !reasons.is_empty() {
+        return Err(CubicEqualityFailure::RecoveryVerification(Box::new(
+            RecoveryVerificationFailureEvidence {
+                reasons,
+                side_condition_violation: Some(side_condition_violation),
+                hard_equality_violations: Some(hard_equality_violations),
+                polynomial_round_trip_error: Some(polynomial_round_trip_error),
+                field_coefficient_round_trip_error: Some(field_coefficient_round_trip_error),
+                field_energy_round_trip_error: Some(field_energy_round_trip_error),
+                no_model_produced: true,
+            },
+        )));
+    }
+
+    Ok(CubicEqualitySolution {
+        representation: representation.evidence.clone(),
+        assembly,
+        backend,
+        field,
+        hard_equalities,
+        side_condition_violation,
+        hard_equality_violations,
+        polynomial_round_trip_error,
+        field_coefficient_round_trip_error,
+        field_energy_round_trip_error,
+        recovery_finite,
+        provenance_verified,
+        semantic_latent_count: 0,
+        field_energy,
+        total_objective,
+    })
+}
+
+fn relative_slice_error(actual: &[f64], expected: &[f64]) -> f64 {
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(actual, expected)| (actual - expected).abs() / expected.abs().max(1.0))
+        .fold(0.0_f64, f64::max)
 }
 
 fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn stable_norm(vector: [f64; 3]) -> f64 {
+    let scale = vector
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        0.0
+    } else if !scale.is_finite() {
+        f64::INFINITY
+    } else {
+        scale
+            * vector
+                .map(|value| (value / scale).powi(2))
+                .into_iter()
+                .sum::<f64>()
+                .sqrt()
+    }
 }
 
 fn dot_product(left: &[f64], right: &[f64]) -> f64 {
@@ -1018,6 +1379,8 @@ mod tests {
         assert_eq!(evidence.fitting_functional_count, 10);
         assert_eq!(evidence.polynomial_dimension, 4);
         assert_eq!(evidence.polynomial_rank, 4);
+        assert!(evidence.polynomial_rrqr_ratio > evidence.polynomial_rank_accept_ratio);
+        assert!(evidence.polynomial_svd_ratio > evidence.polynomial_rank_accept_ratio);
         assert_eq!(representation.kernel_pairing().shape(), (10, 10));
         assert_eq!(representation.polynomial_pairing().shape(), (10, 4));
         assert!(evidence.null_space_defect <= 1.0e-12);
@@ -1045,6 +1408,39 @@ mod tests {
         for (actual, expected) in round_trip.into_iter().zip(TRUTH_POLYNOMIAL) {
             assert_close(actual, expected, 1.0e-15);
         }
+    }
+
+    #[test]
+    fn solve_coordinates_are_deterministic_and_recover_physical_field_coefficients() {
+        let representation = CubicRepresentation::new(usages(), GlobalAnisotropyMetric::identity())
+            .expect("the manufactured representer span is Cubic-admissible");
+        let transform = representation.solve_coordinate_transform();
+
+        assert_eq!(transform.center(), [0.0; 3]);
+        assert_close(transform.length(), 3.0_f64.sqrt(), 1.0e-15);
+        assert!(!transform.degenerate_extent());
+
+        let physical = manufactured_functionals()[5].clone();
+        let standard = transform.to_standard_functional(&physical);
+        let physical_term = physical.terms()[0];
+        let standard_term = standard.terms()[0];
+        for (actual, expected) in standard_term
+            .support()
+            .into_iter()
+            .zip(physical_term.support().map(|value| value / 3.0_f64.sqrt()))
+        {
+            assert_close(actual, expected, 1.0e-15);
+        }
+        for (actual, expected) in standard_term.gradient_coefficient().into_iter().zip(
+            physical_term
+                .gradient_coefficient()
+                .map(|value| value / 3.0_f64.sqrt()),
+        ) {
+            assert_close(actual, expected, 1.0e-15);
+        }
+
+        let recovered = transform.to_physical_field_coefficients(&[3.0_f64.sqrt().powi(3)]);
+        assert_close(recovered[0], 1.0, 1.0e-15);
     }
 
     #[test]
@@ -1104,7 +1500,13 @@ mod tests {
             0.0
         );
         assert!(solution.polynomial_round_trip_error <= 1.0e-11);
+        assert!(solution.field_coefficient_round_trip_error <= 1.0e-11);
+        assert!(solution.field_energy_round_trip_error <= 1.0e-11);
+        assert!(solution.recovery_finite);
+        assert!(solution.provenance_verified);
+        assert_eq!(solution.semantic_latent_count, 0);
         assert_close(solution.field_energy, 0.818_826_203_475_800_5, 1.0e-8);
+        assert_close(solution.total_objective, 0.409_413_101_737_900_25, 1.0e-8);
 
         let sample = solution.field.sample([0.2, -0.3, 0.4]);
         assert_close(sample.value, 0.334_298_988_103_683_4, 1.0e-8);
@@ -1153,6 +1555,65 @@ mod tests {
     }
 
     #[test]
+    fn polynomial_rank_band_returns_stable_gray_zone_evidence() {
+        let gray_ratio = 1.0e-13;
+        let polynomial = DenseMatrix::from_fn(4, 4, |row, column| {
+            if row == column {
+                if row == 3 { gray_ratio } else { 1.0 }
+            } else {
+                0.0
+            }
+        });
+
+        let failure = verify_polynomial_rank(&polynomial)
+            .expect_err("a ratio between the reject and accept bands is not guessed");
+        match failure {
+            RepresentationFailure::PolynomialRankGrayZone { evidence } => {
+                assert!(evidence.rrqr_ratio > evidence.reject_ratio);
+                assert!(evidence.rrqr_ratio < evidence.accept_ratio);
+                assert!(evidence.svd_ratio > evidence.reject_ratio);
+                assert!(evidence.svd_ratio < evidence.accept_ratio);
+                assert!(!evidence.backend_invoked);
+            }
+            other => panic!("unexpected failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrepresentable_similarity_scale_fails_before_assembly_or_backend_invocation() {
+        let extreme = [
+            [1.0e308, 1.0e308, 1.0e308],
+            [-1.0e308, 1.0e308, -1.0e308],
+            [1.0e308, -1.0e308, -1.0e308],
+            [-1.0e308, -1.0e308, 1.0e308],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, support)| {
+            FunctionalUse::new(
+                functional(support, 1.0, [0.0; 3]),
+                UsageProvenance::new(
+                    SourceId::new(format!("extreme-{index}")),
+                    None,
+                    RelationId::new(format!("extreme-relation-{index}")),
+                    SemanticRolePath::new(format!("hard-equality/{index}")),
+                ),
+            )
+        })
+        .collect();
+
+        let failure = CubicRepresentation::new(extreme, GlobalAnisotropyMetric::identity())
+            .expect_err("an infinite derived radius has no reversible f64 recovery map");
+        assert_eq!(
+            failure,
+            RepresentationFailure::InvalidSolveCoordinateTransform {
+                reason: "non-invertible Cubic field recovery scale",
+                solver_invoked: false,
+            }
+        );
+    }
+
+    #[test]
     fn recovery_violation_envelopes_keep_value_and_derivative_units_separate() {
         let envelope = FunctionalViolationEnvelope::from_dimensioned_residuals([
             (FunctionalDimension::FieldValue, 2.0e-9),
@@ -1162,5 +1623,67 @@ mod tests {
         assert_eq!(envelope.field_value, 2.0e-9);
         assert_eq!(envelope.field_value_per_length, 7.0e-9);
         assert!(envelope.is_within_policy());
+    }
+
+    #[test]
+    fn damaged_coordinate_map_is_a_recovery_failure_not_a_backend_contract_failure() {
+        let representation = CubicRepresentation::new(usages(), GlobalAnisotropyMetric::identity())
+            .expect("the manufactured representation is valid");
+        let targets = MANUFACTURED_TARGETS.to_vec();
+        let recovery_provenance = RecoveryProvenanceMap::from_representation(&representation);
+        let (assembly, backend) = solve_standard_form(&representation, &targets)
+            .expect("the undamaged standard form should produce a backend candidate");
+        let mut damaged = representation;
+        damaged.coordinates.length = 0.0;
+
+        let failure = recover_and_verify(damaged, targets, assembly, backend, recovery_provenance)
+            .expect_err("an invalid inverse coordinate map must fail during recovery");
+
+        match failure {
+            CubicEqualityFailure::RecoveryVerification(evidence) => {
+                assert_eq!(
+                    evidence.reasons,
+                    vec![RecoveryVerificationFailureReason::InvalidRecoveryMap]
+                );
+                assert!(evidence.no_model_produced);
+            }
+            other => panic!("unexpected failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damaged_provenance_map_fails_recovery_without_returning_a_partial_model() {
+        let representation = CubicRepresentation::new(usages(), GlobalAnisotropyMetric::identity())
+            .expect("the manufactured representation is valid");
+        let targets = MANUFACTURED_TARGETS.to_vec();
+        let mut recovery_provenance = RecoveryProvenanceMap::from_representation(&representation);
+        recovery_provenance.usages[0] = UsageProvenance::new(
+            SourceId::new("corrupted-source"),
+            None,
+            RelationId::new("corrupted-relation"),
+            SemanticRolePath::new("corrupted-role"),
+        );
+        let (assembly, backend) = solve_standard_form(&representation, &targets)
+            .expect("the standard form should still satisfy its backend contract");
+
+        let failure = recover_and_verify(
+            representation,
+            targets,
+            assembly,
+            backend,
+            recovery_provenance,
+        )
+        .expect_err("canonical provenance must round-trip before a model exists");
+
+        match failure {
+            CubicEqualityFailure::RecoveryVerification(evidence) => {
+                assert_eq!(
+                    evidence.reasons,
+                    vec![RecoveryVerificationFailureReason::ProvenanceMismatch]
+                );
+                assert!(evidence.no_model_produced);
+            }
+            other => panic!("unexpected failure: {other:?}"),
+        }
     }
 }
