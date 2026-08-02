@@ -1,0 +1,90 @@
+{
+  "cases": [
+    {
+      "case_id": "case-v1-d3562269dbc1bbbe0c94ed504452a03288396b7cfcac56c1f777e76628462086",
+      "case_path": "cases/cubic-origin.json",
+      "case_sha256": "sha256:0eae84c29abb6a7c71b1d97733f8cf69181426a6f83507c2444268c6ce179f14",
+      "fixture_path": "fixtures/cubic-origin.json",
+      "fixture_sha256": "sha256:a43c91b2165c760cec7abfb05604f0253abdce41febdfb13f8c4544fe5928e97",
+      "kind": "cubic_origin",
+      "output_sha256": "sha256:c7a0f2fa158836555c45a25eda226254529403831a0c377a4ad6f7c2d16d5e80",
+      "provenance": {
+        "description": "Analytic Cubic origin branch with canonical positive zero for every supported jet component.",
+        "requirements": [
+          "KER-004",
+          "VAL-001",
+          "VAL-002"
+        ],
+        "source": "GeoRBF issue #6",
+        "source_type": "analytic_contract"
+      }
+    },
+    {
+      "case_id": "case-v1-ec9c5da89d9fa94f037a61ac791c3508def3238f96501aa9edae7b5673c86950",
+      "case_path": "cases/cubic-generalized-functional.json",
+      "case_sha256": "sha256:a62164c189d26acf7d8d51f286e545a7aaf1d3a7a6bdc89bea3f2b34296128ad",
+      "fixture_path": "fixtures/cubic-generalized-functional.json",
+      "fixture_sha256": "sha256:8ff330dd24c5bf6efb076ff4636da058451057713567ce3a77b2b86fb94bf6b0",
+      "kind": "cubic_generalized_functional",
+      "output_sha256": "sha256:856035654212317863d49567179afd61a3ce30f8b5e1d2a256e47a305f14bbf1",
+      "provenance": {
+        "description": "Manufactured analytic truth for two value/first-derivative functionals and their Cubic pairing.",
+        "requirements": [
+          "IR-002",
+          "KER-004",
+          "VAL-001",
+          "VAL-002",
+          "VAL-004"
+        ],
+        "source": "GeoRBF issues #3, #6, and #10",
+        "source_type": "manufactured_truth"
+      }
+    },
+    {
+      "case_id": "case-v1-fb096a2d18463c80697b610cf201a01cb895e752bcde547f7fe94d64e448a647",
+      "case_path": "cases/cubic-general-jet.json",
+      "case_sha256": "sha256:b24f2609b51c4cb646cc903478cabfb23e6f74d3e766d68b978939303ac9be26",
+      "fixture_path": "fixtures/cubic-general-jet.json",
+      "fixture_sha256": "sha256:dbbe6bfbfe8836a253c1beac55b2662498a4775e4ad3f0cc6aa0f5c347e7ab46",
+      "kind": "cubic_general_jet",
+      "output_sha256": "sha256:a070035b6bface57abd2945358a0a9fa892dbe03400733108024f72974108368",
+      "provenance": {
+        "description": "Analytic Cubic value, first jet, and mixed jet at a non-origin anisotropic support pair.",
+        "requirements": [
+          "KER-002",
+          "KER-004",
+          "KER-005",
+          "VAL-001",
+          "VAL-002"
+        ],
+        "source": "GeoRBF issue #6",
+        "source_type": "analytic_contract"
+      }
+    }
+  ],
+  "dependencies": {
+    "lockfile": "requirements.lock",
+    "lockfile_sha256": "sha256:949f57e178d3154c00a2def37d20d6cd3c1b2b8977aa025cd5269baf2858e396",
+    "packages": []
+  },
+  "generator": {
+    "path": "generate.py",
+    "sha256": "sha256:38d85ee14503bb5596d3543e02384dd753233288852897d5d721226519b42689",
+    "version": "risk-spike-15-v1"
+  },
+  "interpreter": {
+    "implementation": "CPython",
+    "version": "3.12.3"
+  },
+  "oci_image": "python:3.12.3-slim-bookworm@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63",
+  "precision": {
+    "output_significant_digits": 110,
+    "rounding": "ROUND_HALF_EVEN",
+    "working_decimal_digits": 120
+  },
+  "schema_version": "georbf-oracle-manifest-v1",
+  "verifier": {
+    "path": "verify.py",
+    "sha256": "sha256:fd0cc0fad3c1e36242cb52f432eca8c74b8d9bdadd1e39f8f7fdc096f369306b"
+  }
+}

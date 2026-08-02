@@ -1,0 +1,19 @@
+{
+  "input": {
+    "metric": [
+      ["2", "0", "0"],
+      ["0", "1", "0"],
+      ["0", "0", "0.5"]
+    ],
+    "x": ["1.25", "-2", "0.5"],
+    "y": ["1.25", "-2", "0.5"]
+  },
+  "kind": "cubic_origin",
+  "provenance": {
+    "description": "Analytic Cubic origin branch with canonical positive zero for every supported jet component.",
+    "requirements": ["KER-004", "VAL-001", "VAL-002"],
+    "source": "GeoRBF issue #6",
+    "source_type": "analytic_contract"
+  },
+  "schema_version": "georbf-oracle-case-v1"
+}

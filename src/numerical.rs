@@ -5,9 +5,39 @@ pub(crate) struct NumericalPolicyId(pub(crate) &'static str);
 pub(crate) struct EqualityKktNumericalPolicy {
     pub(crate) id: NumericalPolicyId,
     pub(crate) backend_standard_form_backward_error_limit: f64,
+    pub(crate) spectral_reject_multiplier: f64,
+    pub(crate) spectral_accept_multiplier: f64,
+    pub(crate) reduced_symmetry_multiplier: f64,
+    pub(crate) null_space_defect_limit: f64,
+    pub(crate) affine_reproduction_limit: f64,
+    pub(crate) side_condition_limit: f64,
+    pub(crate) field_value_recovery_limit: f64,
+    pub(crate) field_derivative_recovery_limit: f64,
+    pub(crate) recovery_round_trip_limit: f64,
+    pub(crate) metric_determinant_one_multiplier: f64,
 }
 
 pub(crate) const EQUALITY_KKT_POLICY_V1: EqualityKktNumericalPolicy = EqualityKktNumericalPolicy {
     id: NumericalPolicyId("georbf-v1"),
     backend_standard_form_backward_error_limit: 1.0e-11,
+    spectral_reject_multiplier: 64.0,
+    spectral_accept_multiplier: 4096.0,
+    reduced_symmetry_multiplier: 256.0,
+    null_space_defect_limit: 1.0e-12,
+    affine_reproduction_limit: 1.0e-11,
+    side_condition_limit: 1.0e-10,
+    field_value_recovery_limit: 1.0e-8,
+    field_derivative_recovery_limit: 1.0e-8,
+    recovery_round_trip_limit: 1.0e-11,
+    metric_determinant_one_multiplier: 64.0,
 };
+
+impl EqualityKktNumericalPolicy {
+    pub(crate) fn spectral_thresholds(self, dimension: usize, scale: f64) -> (f64, f64) {
+        let unit_scale = f64::EPSILON * dimension as f64 * scale;
+        (
+            self.spectral_reject_multiplier * unit_scale,
+            self.spectral_accept_multiplier * unit_scale,
+        )
+    }
+}
