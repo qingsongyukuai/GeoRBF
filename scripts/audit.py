@@ -73,6 +73,13 @@ def run(*command: str) -> str:
     return subprocess.run(command, check=True, text=True, capture_output=True).stdout
 
 
+def canonical_text_sha256(path: Path) -> str:
+    """Hash UTF-8 text after normalizing platform-specific line endings."""
+    text = path.read_text(encoding="utf-8")
+    canonical_text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+
+
 def main() -> int:
     rustc_verbose = run("rustc", "--version", "--verbose")
     rustc_version = rustc_verbose.splitlines()[0]
@@ -114,7 +121,7 @@ def main() -> int:
     }
     failures: list[str] = []
     lockfile = Path(__file__).resolve().parents[1] / "Cargo.lock"
-    lockfile_sha256 = hashlib.sha256(lockfile.read_bytes()).hexdigest()
+    lockfile_sha256 = canonical_text_sha256(lockfile)
     if lockfile_sha256 != AUDITED_LOCKFILE_SHA256:
         failures.append(
             "lockfile identity is not in the audited pure-Rust envelope: "

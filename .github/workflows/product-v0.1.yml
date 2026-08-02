@@ -10,6 +10,7 @@ on:
       - "rust-toolchain.toml"
       - "src/**"
       - "scripts/audit.py"
+      - "scripts/test_audit.py"
   pull_request:
     paths:
       - ".github/workflows/product-v0.1.yml"
@@ -18,6 +19,7 @@ on:
       - "rust-toolchain.toml"
       - "src/**"
       - "scripts/audit.py"
+      - "scripts/test_audit.py"
 
 permissions:
   contents: read
@@ -52,6 +54,8 @@ jobs:
         run: cargo check --locked --all-targets
       - name: Run the issue 16 capacity and KKT behavior cases
         run: cargo test --locked --all-targets
+      - name: Test cross-platform audit identity
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
       - name: Audit dependencies, features, build scripts, native links, and licenses
         run: python scripts/audit.py
       - name: Emit the complete feature graph
