@@ -11,3 +11,8 @@ Triage uses the five default canonical labels. See `docs/agents/triage-labels.md
 ### Domain docs
 
 Domain documentation uses the single-context layout. See `docs/agents/domain.md`.
+
+### Cross-platform text
+
+Tracked text and byte-identified fixtures use canonical LF line endings. See
+`docs/agents/cross-platform-text.md`.
