@@ -53,7 +53,10 @@ Canonical IR as verification-only relations. This avoids redundant KKT rows
 for coincident, partially overlapping, or absolutely observed groups without
 merging `GroupId` identity. The forest also carries exact value offsets, so a
 cycle that proves incompatible absolute targets becomes `DirectInputConflict`
-before backend invocation instead of a numerical or recovery failure.
+before backend invocation instead of a numerical or recovery failure. Its
+graph-specific evidence reports the complete contradictory path of caller-owned
+`SourceId`s, every participating `GroupId`, and the implied and declared value
+differences; direct pairwise conflicts retain their separate two-source evidence.
 
 If no true field-value observation exists, the first gauge in stable `SourceId`
 order supplies the one solver constraint that selects the additive constant.

@@ -158,6 +158,66 @@ impl DirectInputConflictEvidence {
     }
 }
 
+/// Complete provenance for a contradiction proved by a hard-relation graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelationGraphConflictEvidence {
+    source_ids: Box<[SourceId]>,
+    group_ids: Box<[GroupId]>,
+    semantic_role: SemanticRolePath,
+    implied_difference: f64,
+    declared_difference: f64,
+    backend_invoked: bool,
+}
+
+impl RelationGraphConflictEvidence {
+    pub(crate) fn new(
+        source_ids: Vec<SourceId>,
+        group_ids: Vec<GroupId>,
+        semantic_role: SemanticRolePath,
+        implied_difference: f64,
+        declared_difference: f64,
+    ) -> Self {
+        Self {
+            source_ids: source_ids.into(),
+            group_ids: group_ids.into(),
+            semantic_role,
+            implied_difference,
+            declared_difference,
+            backend_invoked: false,
+        }
+    }
+
+    /// Returns every caller-owned source on the contradictory graph cycle.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns every referenced semantic group on the contradictory cycle.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Returns the semantic role of the relation that closed the cycle.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the difference implied by the existing graph path.
+    pub fn implied_difference(&self) -> f64 {
+        self.implied_difference
+    }
+
+    /// Returns the incompatible difference declared by the closing relation.
+    pub fn declared_difference(&self) -> f64 {
+        self.declared_difference
+    }
+
+    /// Reports whether a backend was invoked before proving the contradiction.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+}
+
 /// Physical dimension of one scalar hard-relation residual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

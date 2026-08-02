@@ -1,6 +1,6 @@
 //! Strict fit outcomes and physical-unit fit reports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 
@@ -21,9 +21,9 @@ use crate::diagnostics::{
     CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts, InertiaEvidence,
     LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankEvidence, RankEvidenceDomain,
     RankEvidenceParts, RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts,
-    ResidualDimension, ScalingFailureReason, ScalingSummary, SideConditionEvidence,
-    SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
-    SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
+    RelationGraphConflictEvidence, ResidualDimension, ScalingFailureReason, ScalingSummary,
+    SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts,
+    SolveAttemptTermination, SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence,
 };
 use crate::functional::{
@@ -338,6 +338,7 @@ pub struct FitReport {
     attempts: Vec<SolveAttemptRecord>,
     recovery_verification: Option<RecoveryVerificationEvidence>,
     direct_input_conflict: Option<DirectInputConflictEvidence>,
+    relation_graph_conflict: Option<RelationGraphConflictEvidence>,
     execution_failure: Option<AttemptFailureEvidence>,
     cubic_analysis: Option<CubicAnalysisEvidence>,
     backend_rank: Option<RankEvidence>,
@@ -413,6 +414,11 @@ impl FitReport {
     /// Returns stable source evidence for a direct hard-input conflict.
     pub fn direct_input_conflict(&self) -> Option<&DirectInputConflictEvidence> {
         self.direct_input_conflict.as_ref()
+    }
+
+    /// Returns complete path provenance for a hard relation-graph conflict.
+    pub fn relation_graph_conflict(&self) -> Option<&RelationGraphConflictEvidence> {
+        self.relation_graph_conflict.as_ref()
     }
 
     /// Returns the terminal backend-contract or numerical failure evidence.
@@ -548,9 +554,10 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     )
     .expect("the conservative snapshot capacity plan proved exact dimensions representable");
     let base_report = || empty_report(snapshot, problem_size);
-    if let Some(conflict) = lowering.direct_input_conflict.clone() {
+    if lowering.direct_input_conflict.is_some() || lowering.relation_graph_conflict.is_some() {
         let mut report = base_report();
-        report.direct_input_conflict = Some(conflict);
+        report.direct_input_conflict = lowering.direct_input_conflict.clone();
+        report.relation_graph_conflict = lowering.relation_graph_conflict.clone();
         return Err(FitFailure {
             diagnosis: ProblemDiagnosis::DirectInputConflict,
             report: Box::new(report),
@@ -574,6 +581,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         attempts: Vec::new(),
         recovery_verification: None,
         direct_input_conflict: None,
+        relation_graph_conflict: None,
         execution_failure: None,
         cubic_analysis: None,
         backend_rank: None,
@@ -787,6 +795,7 @@ struct EqualityLowering {
     canonical_equalities: Vec<CanonicalHardEquality>,
     canonical_index_by_key: BTreeMap<CanonicalEqualityKey, (usize, f64)>,
     direct_input_conflict: Option<DirectInputConflictEvidence>,
+    relation_graph_conflict: Option<RelationGraphConflictEvidence>,
     semantic_latents: Vec<SemanticLatentDefinition>,
 }
 
@@ -797,6 +806,7 @@ impl EqualityLowering {
             canonical_equalities: Vec::new(),
             canonical_index_by_key: BTreeMap::new(),
             direct_input_conflict: None,
+            relation_graph_conflict: None,
             semantic_latents: Vec::new(),
         }
     }
@@ -835,21 +845,21 @@ impl EqualityLowering {
     fn record_graph_conflict(
         &mut self,
         outcome: &CanonicalValueEdgeOutcome,
-        source_id: &SourceId,
         semantic_role: &SemanticRolePath,
         declared_difference: f64,
     ) {
         let CanonicalValueEdgeOutcome::Conflict {
-            existing_source,
+            proof_source_ids,
+            proof_group_ids,
             implied,
         } = outcome
         else {
             return;
         };
-        if self.direct_input_conflict.is_none() {
-            self.direct_input_conflict = Some(DirectInputConflictEvidence::new(
-                existing_source.clone(),
-                source_id.clone(),
+        if self.relation_graph_conflict.is_none() {
+            self.relation_graph_conflict = Some(RelationGraphConflictEvidence::new(
+                proof_source_ids.clone(),
+                proof_group_ids.clone(),
                 semantic_role.clone(),
                 *implied,
                 declared_difference,
@@ -902,9 +912,10 @@ enum CanonicalValueNode {
 #[derive(Debug, Default)]
 struct CanonicalValueConstraintForest {
     node_index: BTreeMap<CanonicalValueNode, usize>,
+    nodes: Vec<CanonicalValueNode>,
     parent: Vec<usize>,
     value_minus_parent: Vec<f64>,
-    anchor_source: Vec<Option<SourceId>>,
+    adjacency: Vec<Vec<(usize, SourceId)>>,
 }
 
 impl CanonicalValueConstraintForest {
@@ -912,12 +923,13 @@ impl CanonicalValueConstraintForest {
         &mut self,
         group_id: &GroupId,
         support: [f64; 3],
+        source_id: &SourceId,
     ) -> CanonicalValueEdgeOutcome {
         self.add_edge(
             CanonicalValueNode::Group(group_id.clone()),
             CanonicalValueNode::Support(canonical_support_bits(support)),
             0.0,
-            None,
+            source_id,
         )
     }
 
@@ -931,7 +943,7 @@ impl CanonicalValueConstraintForest {
             CanonicalValueNode::AbsoluteReference,
             CanonicalValueNode::Support(canonical_support_bits(support)),
             value,
-            Some(source_id),
+            source_id,
         )
     }
 
@@ -945,7 +957,7 @@ impl CanonicalValueConstraintForest {
             CanonicalValueNode::AbsoluteReference,
             CanonicalValueNode::Group(group_id.clone()),
             value,
-            Some(source_id),
+            source_id,
         )
     }
 
@@ -954,7 +966,7 @@ impl CanonicalValueConstraintForest {
         left: CanonicalValueNode,
         right: CanonicalValueNode,
         right_minus_left: f64,
-        source_id: Option<&SourceId>,
+        source_id: &SourceId,
     ) -> CanonicalValueEdgeOutcome {
         let left = self.intern(left);
         let right = self.intern(right);
@@ -966,21 +978,16 @@ impl CanonicalValueConstraintForest {
                 CanonicalValueEdgeOutcome::Redundant
             } else {
                 CanonicalValueEdgeOutcome::Conflict {
-                    existing_source: self.anchor_source[left_root]
-                        .clone()
-                        .or_else(|| source_id.cloned())
-                        .expect("an inconsistent absolute-value cycle retains a source"),
+                    proof_source_ids: self.proof_source_ids(left, right, source_id),
+                    proof_group_ids: self.proof_group_ids(left, right),
                     implied,
                 }
             };
         }
         self.parent[right_root] = left_root;
         self.value_minus_parent[right_root] = right_minus_left + left_minus_root - right_minus_root;
-        let anchor = self.anchor_source[left_root]
-            .clone()
-            .or_else(|| self.anchor_source[right_root].clone())
-            .or_else(|| source_id.cloned());
-        self.anchor_source[left_root] = anchor;
+        self.adjacency[left].push((right, source_id.clone()));
+        self.adjacency[right].push((left, source_id.clone()));
         CanonicalValueEdgeOutcome::Independent
     }
 
@@ -989,9 +996,10 @@ impl CanonicalValueConstraintForest {
             return *index;
         }
         let index = self.parent.len();
+        self.nodes.push(node.clone());
         self.parent.push(index);
         self.value_minus_parent.push(0.0);
-        self.anchor_source.push(None);
+        self.adjacency.push(Vec::new());
         self.node_index.insert(node, index);
         index
     }
@@ -1007,6 +1015,67 @@ impl CanonicalValueConstraintForest {
         self.value_minus_parent[index] = local_offset + parent_offset;
         (root, self.value_minus_parent[index])
     }
+
+    fn proof_source_ids(
+        &self,
+        start: usize,
+        end: usize,
+        closing_source: &SourceId,
+    ) -> Vec<SourceId> {
+        let path = self.proof_path(start, end);
+        let mut sources = path
+            .windows(2)
+            .map(|nodes| {
+                self.adjacency[nodes[0]]
+                    .iter()
+                    .find(|(neighbor, _)| *neighbor == nodes[1])
+                    .expect("the recovered proof path retains every edge source")
+                    .1
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        sources.push(closing_source.clone());
+        sources
+    }
+
+    fn proof_group_ids(&self, start: usize, end: usize) -> Vec<GroupId> {
+        let mut groups = self
+            .proof_path(start, end)
+            .into_iter()
+            .filter_map(|index| match &self.nodes[index] {
+                CanonicalValueNode::Group(group_id) => Some(group_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        groups.sort();
+        groups.dedup();
+        groups
+    }
+
+    fn proof_path(&self, start: usize, end: usize) -> Vec<usize> {
+        let mut predecessor = vec![None::<usize>; self.adjacency.len()];
+        let mut queue = VecDeque::from([start]);
+        predecessor[start] = Some(start);
+        while let Some(node) = queue.pop_front() {
+            if node == end {
+                break;
+            }
+            for (neighbor, _) in &self.adjacency[node] {
+                if predecessor[*neighbor].is_none() {
+                    predecessor[*neighbor] = Some(node);
+                    queue.push_back(*neighbor);
+                }
+            }
+        }
+        let mut path = vec![end];
+        let mut cursor = end;
+        while cursor != start {
+            cursor = predecessor[cursor].expect("equal union-find roots imply an adjacency path");
+            path.push(cursor);
+        }
+        path.reverse();
+        path
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1014,7 +1083,8 @@ enum CanonicalValueEdgeOutcome {
     Independent,
     Redundant,
     Conflict {
-        existing_source: SourceId,
+        proof_source_ids: Vec<SourceId>,
+        proof_group_ids: Vec<GroupId>,
         implied: f64,
     },
 }
@@ -1095,12 +1165,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             )
         });
         if let Some(edge) = &edge {
-            lowering.record_graph_conflict(
-                edge,
-                &observation.source_id,
-                &observation.semantic_role,
-                observation.target,
-            );
+            lowering.record_graph_conflict(edge, &observation.semantic_role, observation.target);
         }
         let participation = if edge
             .as_ref()
@@ -1134,9 +1199,12 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         });
         for member in group.members() {
             let role = SemanticRolePath::new("shared-level-set/member/value");
-            let edge = value_constraints
-                .add_member_equality(group.group_id(), member.location().components());
-            lowering.record_graph_conflict(&edge, member.source_id(), &role, 0.0);
+            let edge = value_constraints.add_member_equality(
+                group.group_id(),
+                member.location().components(),
+                member.source_id(),
+            );
+            lowering.record_graph_conflict(&edge, &role, 0.0);
             let provenance = relation_provenance(
                 member.source_id().clone(),
                 Some(group.group_id().clone()),
@@ -1192,7 +1260,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     gauge.value(),
                     gauge.source_id(),
                 );
-                lowering.record_graph_conflict(&edge, gauge.source_id(), &role, gauge.value());
+                lowering.record_graph_conflict(&edge, &role, gauge.value());
                 let participation = if participation
                     == CanonicalEqualityParticipation::SolverConstraint
                     && matches!(edge, CanonicalValueEdgeOutcome::Independent)
@@ -1220,7 +1288,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     gauge.value(),
                     gauge.source_id(),
                 );
-                lowering.record_graph_conflict(&edge, gauge.source_id(), &role, gauge.value());
+                lowering.record_graph_conflict(&edge, &role, gauge.value());
                 let participation = if participation
                     == CanonicalEqualityParticipation::SolverConstraint
                     && matches!(edge, CanonicalValueEdgeOutcome::Independent)
@@ -1345,6 +1413,7 @@ fn success_report(
         attempts,
         recovery_verification: None,
         direct_input_conflict: None,
+        relation_graph_conflict: None,
         execution_failure: None,
         cubic_analysis: Some(public_cubic_analysis(&solution.representation)),
         backend_rank: Some(public_rank_evidence(

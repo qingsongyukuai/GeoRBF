@@ -551,7 +551,35 @@ fn absolute_observations_close_group_cycles_without_redundant_kkt_rows() {
         .fit()
         .expect_err("a graph-provable shared-level contradiction must fail pre-backend");
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
-    assert!(failure.report().direct_input_conflict().is_some());
+    assert!(failure.report().direct_input_conflict().is_none());
+    let conflict = failure
+        .report()
+        .relation_graph_conflict()
+        .expect("the report retains the complete contradictory graph path");
+    assert_eq!(
+        conflict
+            .source_ids()
+            .iter()
+            .map(|source| source.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "conflict/member-left",
+            "conflict/value-left",
+            "conflict/value-right",
+            "conflict/member-right",
+        ]
+    );
+    assert_eq!(
+        conflict.group_ids(),
+        &[GroupId::new("absolutely-observed-horizon")]
+    );
+    assert_eq!(
+        conflict.semantic_role().as_str(),
+        "shared-level-set/member/value"
+    );
+    assert_close(conflict.implied_difference(), 1.0);
+    assert_close(conflict.declared_difference(), 0.0);
+    assert!(!conflict.backend_invoked());
     assert!(failure.report().attempts().is_empty());
 }
 
