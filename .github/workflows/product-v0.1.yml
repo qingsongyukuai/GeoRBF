@@ -1,0 +1,60 @@
+name: Product v0.1 - equality spine
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/product-v0.1.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "src/**"
+      - "scripts/audit.py"
+  pull_request:
+    paths:
+      - ".github/workflows/product-v0.1.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "src/**"
+      - "scripts/audit.py"
+
+permissions:
+  contents: read
+
+jobs:
+  native-product:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    env:
+      EXPECTED_RUSTC: rustc 1.85.0
+      EXPECTED_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out the product crate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Verify types and compile targets
+        run: cargo check --locked --all-targets
+      - name: Run the T14 and T15 behavior seams
+        run: cargo test --locked --all-targets
+      - name: Audit dependencies, features, build scripts, native links, and licenses
+        run: python scripts/audit.py
+      - name: Emit the complete feature graph
+        run: cargo tree --locked --target all -e features
+      - name: Verify the publishable package
+        run: cargo package --locked

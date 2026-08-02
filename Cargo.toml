@@ -1,0 +1,20 @@
+[package]
+name = "georbf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Implicit geological scalar fields from geological observations"
+license = "MIT"
+repository = "https://github.com/qingsongyukuai/GeoRBF"
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/rust-toolchain.toml",
+    "/docs/implementation/16-production-equality-spine.md",
+]
+
+[dependencies]
+faer = { version = "=0.24.4", default-features = false, features = ["linalg", "std"] }

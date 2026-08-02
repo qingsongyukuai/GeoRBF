@@ -10,7 +10,7 @@ Probe: [`spikes/faer-clarabel`](../../spikes/faer-clarabel/README.md)
 
 ## Verdict
 
-**The dependency-platform spike is complete, but production admission remains gated.** [Native matrix run 30706805264](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264) proves that the pinned pure-Rust routes build and provide the required dense KKT, rank/factorization, QP, SOCP, candidate, residual, certificate, settings, and exact-one-thread evidence on all five required native targets. Independently, `faer` factor-workspace capacity remains **ambiguous** until its workspace behavior is measured against the 8 GiB plan. Under #13, that ambiguity is unproven and cannot release the product implementation gate; accepting the spike is distinct from admitting the dependencies to the product tree.
+**The dependency-platform spike is complete.** [Native matrix run 30706805264](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264) proves that the pinned pure-Rust routes build and provide the required dense KKT, rank/factorization, QP, SOCP, candidate, residual, certificate, settings, and exact-one-thread evidence on all five required native targets. This spike left `faer` factor-workspace capacity ambiguous. [Issue #16](../implementation/16-production-equality-spine.md) subsequently resolved that ambiguity with exact scratch-layout evidence and admitted only the `faer` equality route to the product tree.
 
 No product dependency has been added. The probe is a standalone, unpublished Rust crate outside the future `georbf` product tree.
 
@@ -38,7 +38,7 @@ Clarabel 0.11.1 is **unavailable** with a truly empty feature set: its published
 | Column-pivoted QR/rank evidence | proven with adapter policy | The rank-one 3×2 matrix reported one accepted diagonal under the probe threshold. `faer` supplies factors/pivots, not GeoRBF rank policy. |
 | SVD/rank evidence | proven with adapter policy | Singular values were exposed and independently classified as rank one. Threshold/gray-zone policy remains GeoRBF-owned. |
 | Cholesky/error behavior | proven | SPD input succeeded and symmetric-indefinite input returned an LLT error. Cholesky failure alone is not a diagnosis. |
-| Capacity behavior | ambiguous | Checked arithmetic rejects both a representable 32,769² `f64` plan just above 8 GiB and an overflowing plan before allocation. The probe does not exercise `faer` allocation/factor-workspace behavior, so GeoRBF must still measure and budget all factor workspaces before production admission. |
+| Capacity behavior | resolved by #16 | The spike's dense-only checks remain factual. Product issue #16 now obtains exact faer LBLT factor and solve workspace layouts, includes them in the complete checked peak, and rejects over-limit or overflowing plans before allocation/backend invocation. |
 | Convex QP | proven | Clarabel returned primal, dual, slack, `Solved`, residuals, gap, iterations, settings, and linear-solver information for the manufactured QP. |
 | SOCP/SOC block | proven | Clarabel returned the expected `[1, 1]` candidate for one three-dimensional SOC block with residual/gap evidence. |
 | Primal infeasibility | proven | Clarabel returned `PrimalInfeasible` and a dual-cone ray; the probe independently checked `Aᵀz≈0` and `−bᵀz>0`. |
@@ -92,7 +92,7 @@ python3 scripts/audit.py
 cargo tree --locked --target all -e features
 ```
 
-The workflow repeats these commands under Rust 1.85.0 on every required native runner. Run 30706805264 is the accepted native replay for commit `0b40094aec24fe6d3542d2304ad2b941389adcb5`. Production admission additionally requires measured `faer` factor-workspace capacity evidence; the successful platform matrix alone is insufficient.
+The workflow repeats these commands under Rust 1.85.0 on every required native runner. Run 30706805264 is the accepted native replay for commit `0b40094aec24fe6d3542d2304ad2b941389adcb5`. Product admission and factor-workspace evidence are recorded separately under issue #16.
 
 ## Primary sources
 
