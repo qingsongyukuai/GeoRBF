@@ -78,6 +78,7 @@ fn preflight_retains_all_evidence_and_selects_primary_diagnosis_stably() {
             "unresolved semantics outrank a Direct Input Conflict"
         );
         assert!(failure.report().attempts().is_empty());
+        assert!(failure.report().problem_size().kkt_dimension().is_some());
         assert_eq!(
             failure
                 .report()
@@ -321,4 +322,34 @@ fn exact_duplicates_consume_report_capacity_without_inflating_the_kkt() {
     );
     assert_eq!(success.report().hard_relations().len(), 10_003);
     assert!(success.report().problem_size().kkt_dimension().unwrap() < 32);
+}
+
+#[test]
+fn interpretable_pi1_mode_outranks_capacity_and_retains_both_proofs() {
+    let mut builder = problem_builder();
+    for index in 0..5_000 {
+        let x = (index % 100) as f64;
+        let y = (index / 100) as f64;
+        builder
+            .add(
+                FieldValueObservation::try_new(
+                    SourceId::new(format!("planar-value-{index:04}")),
+                    point(x, y, 0.0),
+                    x + 2.0 * y,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    let failure = builder.build().unwrap().fit().unwrap_err();
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::UnidentifiedFieldMode);
+    assert!(failure.report().capacity().is_some());
+    assert!(failure.report().interpretable_rank_deficiency().is_some());
+    assert_eq!(
+        failure.report().rank_evidence().unwrap().decision(),
+        RankDecision::RankDeficient
+    );
+    assert!(failure.report().problem_size().kkt_dimension().is_some());
+    assert!(failure.report().attempts().is_empty());
 }

@@ -464,21 +464,8 @@ impl CubicRepresentation {
             .iter()
             .map(|usage| usage.functional().clone())
             .collect::<Vec<_>>();
-        let coordinates = CubicSolveCoordinateTransform::from_functionals(&functionals)?;
-        let standard_functionals = functionals
-            .iter()
-            .map(|functional| coordinates.to_standard_functional(functional))
-            .collect::<Result<Vec<_>, _>>()?;
-        let polynomial = DenseMatrix::from_fn(
-            standard_functionals.len(),
-            POLYNOMIAL_DIMENSION,
-            |row, column| {
-                standard_functionals[row].evaluate_affine(
-                    if column == 0 { 1.0 } else { 0.0 },
-                    std::array::from_fn(|axis| if axis + 1 == column { 1.0 } else { 0.0 }),
-                )
-            },
-        );
+        let (coordinates, standard_functionals, polynomial) =
+            assemble_polynomial_pairing(&functionals)?;
         let (singular_values, polynomial_rank, polynomial_rank_evidence) =
             verify_polynomial_rank(&polynomial, &functionals, &coordinates)?;
         let kernel = assemble_kernel_pairing(&standard_functionals, &metric);
@@ -560,6 +547,51 @@ impl CubicRepresentation {
     }
 }
 
+pub(crate) fn preflight_polynomial_rank_deficiency(
+    fitting_uses: &[FunctionalUse],
+) -> Option<RepresentationFailure> {
+    if fitting_uses.is_empty() {
+        return None;
+    }
+    let functionals = fitting_uses
+        .iter()
+        .map(|usage| usage.functional().clone())
+        .collect::<Vec<_>>();
+    let (coordinates, _, polynomial) = assemble_polynomial_pairing(&functionals).ok()?;
+    match verify_polynomial_rank(&polynomial, &functionals, &coordinates) {
+        Err(failure @ RepresentationFailure::PolynomialRankDeficient { .. }) => Some(failure),
+        Ok(_) | Err(_) => None,
+    }
+}
+
+fn assemble_polynomial_pairing(
+    functionals: &[CanonicalFunctional],
+) -> Result<
+    (
+        CubicSolveCoordinateTransform,
+        Vec<CanonicalFunctional>,
+        DenseMatrix,
+    ),
+    RepresentationFailure,
+> {
+    let coordinates = CubicSolveCoordinateTransform::from_functionals(functionals)?;
+    let standard_functionals = functionals
+        .iter()
+        .map(|functional| coordinates.to_standard_functional(functional))
+        .collect::<Result<Vec<_>, _>>()?;
+    let polynomial = DenseMatrix::from_fn(
+        standard_functionals.len(),
+        POLYNOMIAL_DIMENSION,
+        |row, column| {
+            standard_functionals[row].evaluate_affine(
+                if column == 0 { 1.0 } else { 0.0 },
+                std::array::from_fn(|axis| if axis + 1 == column { 1.0 } else { 0.0 }),
+            )
+        },
+    );
+    Ok((coordinates, standard_functionals, polynomial))
+}
+
 struct HouseholderNullSpace {
     basis: Mat<f64>,
     coefficients: Mat<f64>,
@@ -621,28 +653,6 @@ fn verify_polynomial_rank(
 ) -> Result<(Vec<f64>, usize, PolynomialRankEvidence), RepresentationFailure> {
     let exact_zero_column = (0..polynomial.columns)
         .find(|column| (0..polynomial.rows).all(|row| polynomial.get(row, *column) == 0.0));
-    if let Some(column) = exact_zero_column {
-        let exact_nonzero_columns = polynomial.columns.saturating_sub(
-            (0..polynomial.columns)
-                .filter(|candidate| {
-                    (0..polynomial.rows).all(|row| polynomial.get(row, *candidate) == 0.0)
-                })
-                .count(),
-        );
-        let mut standard_mode = [0.0; POLYNOMIAL_DIMENSION];
-        standard_mode[column] = 1.0;
-        return Err(RepresentationFailure::PolynomialRankDeficient {
-            rank: exact_nonzero_columns.min(polynomial.rows),
-            mode: VerifiedCanonicalMode {
-                residual: canonical_polynomial_mode_residual(
-                    functionals,
-                    coordinates,
-                    standard_mode,
-                )?,
-                execution: AnalysisExecutionEvidence::pre_backend(),
-            },
-        });
-    }
     let matrix = polynomial.to_faer();
     let analysis = analyze_spectral_rank(matrix.as_ref()).map_err(|failure| match failure {
         SpectralAnalysisFailure::WorkspaceAllocation(failure) => {
@@ -660,40 +670,35 @@ fn verify_polynomial_rank(
             }
         }
     })?;
+    if let Some(column) = exact_zero_column {
+        let mut standard_mode = [0.0; POLYNOMIAL_DIMENSION];
+        standard_mode[column] = 1.0;
+        return polynomial_rank_failure(analysis.rank, functionals, coordinates, standard_mode);
+    }
     if polynomial.rows < POLYNOMIAL_DIMENSION {
         let standard_mode =
             smallest_right_mode(matrix.as_ref(), AlgebraicAnalysisStage::PolynomialRank)?;
-        return Err(RepresentationFailure::PolynomialRankDeficient {
-            rank: analysis.rank,
-            mode: VerifiedCanonicalMode {
-                residual: canonical_polynomial_mode_residual(
-                    functionals,
-                    coordinates,
-                    standard_mode
-                        .try_into()
-                        .expect("the Cubic polynomial pairing has exactly four columns"),
-                )?,
-                execution: AnalysisExecutionEvidence::pre_backend(),
-            },
-        });
+        return polynomial_rank_failure(
+            analysis.rank,
+            functionals,
+            coordinates,
+            standard_mode
+                .try_into()
+                .expect("the Cubic polynomial pairing has exactly four columns"),
+        );
     }
     match analysis.decision {
         SpectralRankDecision::Reject => {
             let standard_mode =
                 smallest_right_mode(matrix.as_ref(), AlgebraicAnalysisStage::PolynomialRank)?;
-            return Err(RepresentationFailure::PolynomialRankDeficient {
-                rank: analysis.rank,
-                mode: VerifiedCanonicalMode {
-                    residual: canonical_polynomial_mode_residual(
-                        functionals,
-                        coordinates,
-                        standard_mode
-                            .try_into()
-                            .expect("the Cubic polynomial pairing has exactly four columns"),
-                    )?,
-                    execution: AnalysisExecutionEvidence::pre_backend(),
-                },
-            });
+            return polynomial_rank_failure(
+                analysis.rank,
+                functionals,
+                coordinates,
+                standard_mode
+                    .try_into()
+                    .expect("the Cubic polynomial pairing has exactly four columns"),
+            );
         }
         SpectralRankDecision::GrayZone => {
             return Err(RepresentationFailure::PolynomialRankGrayZone {
@@ -719,6 +724,21 @@ fn verify_polynomial_rank(
             backend_invoked: false,
         },
     ))
+}
+
+fn polynomial_rank_failure(
+    rank: usize,
+    functionals: &[CanonicalFunctional],
+    coordinates: &CubicSolveCoordinateTransform,
+    standard_mode: [f64; POLYNOMIAL_DIMENSION],
+) -> Result<(Vec<f64>, usize, PolynomialRankEvidence), RepresentationFailure> {
+    Err(RepresentationFailure::PolynomialRankDeficient {
+        rank,
+        mode: VerifiedCanonicalMode {
+            residual: canonical_polynomial_mode_residual(functionals, coordinates, standard_mode)?,
+            execution: AnalysisExecutionEvidence::pre_backend(),
+        },
+    })
 }
 
 fn smallest_right_mode(
@@ -2650,6 +2670,35 @@ mod tests {
             }
             other => panic!("unexpected failure: {other:?}"),
         }
+    }
+
+    #[test]
+    fn exact_zero_column_reports_the_rank_of_the_remaining_pairing() {
+        let functionals = [0.0, 1.0, 2.0]
+            .into_iter()
+            .map(|coordinate| functional([coordinate, coordinate, 0.0], 1.0, [0.0; 3]))
+            .collect::<Vec<_>>();
+        let polynomial = DenseMatrix::from_fn(3, POLYNOMIAL_DIMENSION, |row, column| {
+            let coordinate = row as f64;
+            match column {
+                0 => 1.0,
+                1 | 2 => coordinate,
+                3 => 0.0,
+                _ => unreachable!(),
+            }
+        });
+        let coordinates = CubicSolveCoordinateTransform {
+            center: [0.0; 3],
+            length: 1.0,
+            degenerate_extent: false,
+        };
+
+        let failure = verify_polynomial_rank(&polynomial, &functionals, &coordinates)
+            .expect_err("the exact zero column proves a missing affine mode");
+        assert!(matches!(
+            failure,
+            RepresentationFailure::PolynomialRankDeficient { rank: 2, .. }
+        ));
     }
 
     #[test]

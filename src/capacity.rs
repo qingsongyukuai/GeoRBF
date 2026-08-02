@@ -4,7 +4,14 @@ use crate::faer_backend;
 
 pub(crate) const CAPACITY_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const REPORT_FIXED_BYTES: u64 = 4 * 1024;
-const REPORT_SCALARS_PER_KKT_DIMENSION: u64 = 8;
+const KKT_REPORT_BYTES_PER_DIMENSION: u64 = 8 * size_of::<f64>() as u64;
+// Covers the simultaneously live canonical/source lowering records and final
+// HardRelationAssessment, including their fixed Vec/Box headers and one-term
+// functional storage. Variable caller identity storage is charged separately.
+const SOURCE_RELATION_LIFECYCLE_FIXED_BYTES: u64 = 2 * 1024;
+// A source/group identity can be cloned into canonical provenance, usage-edge
+// provenance, relation/residual identifiers, conflict proof, and final report.
+const SOURCE_IDENTIFIER_LIFECYCLE_MULTIPLIER: u64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapacityComponent {
@@ -104,7 +111,8 @@ pub(crate) struct EqualityCapacityShape {
     pub(crate) primal_variables: usize,
     pub(crate) equality_constraints: usize,
     pub(crate) canonical_relations: usize,
-    pub(crate) report_relations: usize,
+    pub(crate) source_relations: usize,
+    pub(crate) source_identifier_bytes: usize,
 }
 
 pub(crate) fn plan_equality_capacity(
@@ -115,7 +123,8 @@ pub(crate) fn plan_equality_capacity(
         primal_variables,
         equality_constraints,
         canonical_relations: equality_constraints,
-        report_relations: 0,
+        source_relations: 0,
+        source_identifier_bytes: 0,
     })
 }
 
@@ -126,7 +135,8 @@ pub(crate) fn plan_equality_capacity_for(
         primal_variables,
         equality_constraints,
         canonical_relations,
-        report_relations,
+        source_relations,
+        source_identifier_bytes,
     } = shape;
     let kkt_dimension = primal_variables
         .checked_add(equality_constraints)
@@ -141,7 +151,8 @@ pub(crate) fn plan_equality_capacity_for(
     let variables = usize_as_u64(primal_variables, CapacityComponent::Canonical)?;
     let canonical_relations = usize_as_u64(canonical_relations, CapacityComponent::Canonical)?;
     let equalities = usize_as_u64(equality_constraints, CapacityComponent::EqualityDense)?;
-    let report_relations = usize_as_u64(report_relations, CapacityComponent::Report)?;
+    let source_relations = usize_as_u64(source_relations, CapacityComponent::Report)?;
+    let source_identifier_bytes = usize_as_u64(source_identifier_bytes, CapacityComponent::Report)?;
     let dimension = usize_as_u64(kkt_dimension, CapacityComponent::KktDimension)?;
     let scalar_bytes = size_of::<f64>() as u64;
     let index_bytes = size_of::<usize>() as u64;
@@ -233,18 +244,29 @@ pub(crate) fn plan_equality_capacity_for(
         checked_mul(CapacityComponent::Recovery, dimension, 3)?,
         scalar_bytes,
     )?;
-    let report_bytes = checked_add(
+    let kkt_report_bytes = checked_mul(
         CapacityComponent::Report,
-        checked_mul(
-            CapacityComponent::Report,
-            checked_mul(
-                CapacityComponent::Report,
-                checked_add(CapacityComponent::Report, dimension, report_relations)?,
-                REPORT_SCALARS_PER_KKT_DIMENSION,
-            )?,
-            scalar_bytes,
-        )?,
-        REPORT_FIXED_BYTES,
+        dimension,
+        KKT_REPORT_BYTES_PER_DIMENSION,
+    )?;
+    let source_relation_fixed_bytes = checked_mul(
+        CapacityComponent::Report,
+        source_relations,
+        SOURCE_RELATION_LIFECYCLE_FIXED_BYTES,
+    )?;
+    let source_identifier_lifecycle_bytes = checked_mul(
+        CapacityComponent::Report,
+        source_identifier_bytes,
+        SOURCE_IDENTIFIER_LIFECYCLE_MULTIPLIER,
+    )?;
+    let report_bytes = checked_sum(
+        CapacityComponent::Report,
+        &[
+            kkt_report_bytes,
+            source_relation_fixed_bytes,
+            source_identifier_lifecycle_bytes,
+            REPORT_FIXED_BYTES,
+        ],
     )?;
     let components = CapacityComponents {
         canonical_bytes,

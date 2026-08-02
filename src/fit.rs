@@ -15,6 +15,7 @@ use crate::cubic_equality::{
     RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
     RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
+    preflight_polynomial_rank_deficiency,
 };
 use crate::diagnostics::{
     AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
@@ -502,12 +503,22 @@ impl FitReport {
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
     let scalar_relation_count = scalar_relation_count(snapshot).unwrap_or(usize::MAX);
+    let source_identifier_bytes = source_identifier_bytes(snapshot).unwrap_or(usize::MAX);
     let conservative_problem_size = conservative_problem_size(
         snapshot.inner.observations.len(),
         scalar_relation_count,
         snapshot.inner.shared_level_sets.len(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
+    if let Err(evidence) =
+        plan_source_lifecycle_capacity(scalar_relation_count, source_identifier_bytes)
+    {
+        preflight_report.capacity = Some(public_capacity(&evidence));
+        return Err(FitFailure {
+            diagnosis: ProblemDiagnosis::CapacityExceeded,
+            report: Box::new(preflight_report),
+        });
+    }
     preflight_report.uninformative_shared_level_sets = snapshot
         .inner
         .shared_level_sets
@@ -563,25 +574,36 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         );
     }
     let lowering = lower_snapshot(snapshot);
+    let fitting_uses = lowering.fitting_uses();
     let exact_problem_size = ProblemSize::cubic_equality(
         snapshot.inner.observations.len(),
         scalar_relation_count,
         lowering.canonical_equalities.len(),
-        lowering.fitting_functional_count(),
+        fitting_uses.len(),
         lowering.semantic_latents.len(),
         lowering.solver_equality_count(),
     );
+    if let Some(problem_size) = exact_problem_size {
+        preflight_report.problem_size = problem_size;
+    }
     preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
     preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
-    if let Err(evidence) = plan_snapshot_capacity(&lowering, scalar_relation_count) {
+    if let Err(evidence) = plan_snapshot_capacity(
+        &lowering,
+        fitting_uses.len(),
+        scalar_relation_count,
+        source_identifier_bytes,
+    ) {
         preflight_report.capacity = Some(public_capacity(&evidence));
+        if let Some(failure) = preflight_polynomial_rank_deficiency(&fitting_uses) {
+            retain_representation_failure(
+                &mut preflight_report,
+                &failure,
+                &lowering.source_relations,
+            );
+        }
     }
     if let Some(diagnosis) = primary_preflight_diagnosis(&preflight_report) {
-        if diagnosis == ProblemDiagnosis::DirectInputConflict {
-            if let Some(problem_size) = exact_problem_size {
-                preflight_report.problem_size = problem_size;
-            }
-        }
         return Err(FitFailure {
             diagnosis,
             report: Box::new(preflight_report),
@@ -603,6 +625,9 @@ fn primary_preflight_diagnosis(report: &FitReport) -> Option<ProblemDiagnosis> {
     }
     if report.unidentified_additive_gauge.is_some() {
         return Some(ProblemDiagnosis::UnidentifiedAdditiveGauge);
+    }
+    if report.interpretable_rank_deficiency.is_some() {
+        return Some(ProblemDiagnosis::UnidentifiedFieldMode);
     }
     report
         .capacity
@@ -663,6 +688,55 @@ fn scalar_relation_count(snapshot: &ProblemSnapshot) -> Option<usize> {
         .checked_add(snapshot.inner.additive_field_gauges.len())
 }
 
+fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
+    let observation_bytes =
+        snapshot
+            .inner
+            .observations
+            .iter()
+            .try_fold(0_usize, |bytes, observation| {
+                let multiplicity = match observation {
+                    ObservationInput::FieldValue(_) | ObservationInput::TangentDirection(_) => 1,
+                    ObservationInput::Gradient(_) => 3,
+                };
+                observation
+                    .source_id()
+                    .as_str()
+                    .len()
+                    .checked_mul(multiplicity)
+                    .and_then(|source_bytes| bytes.checked_add(source_bytes))
+            })?;
+    let shared_level_bytes =
+        snapshot
+            .inner
+            .shared_level_sets
+            .iter()
+            .try_fold(0_usize, |bytes, group| {
+                group.members().iter().try_fold(bytes, |bytes, member| {
+                    bytes
+                        .checked_add(group.group_id().as_str().len())
+                        .and_then(|bytes| bytes.checked_add(member.source_id().as_str().len()))
+                })
+            })?;
+    let gauge_bytes =
+        snapshot
+            .inner
+            .additive_field_gauges
+            .iter()
+            .try_fold(0_usize, |bytes, gauge| {
+                let group_bytes = match gauge.reference() {
+                    AdditiveFieldGaugeReference::Point(_) => 0,
+                    AdditiveFieldGaugeReference::LevelSet(group_id) => group_id.as_str().len(),
+                };
+                bytes
+                    .checked_add(gauge.source_id().as_str().len())
+                    .and_then(|bytes| bytes.checked_add(group_bytes))
+            })?;
+    observation_bytes
+        .checked_add(shared_level_bytes)?
+        .checked_add(gauge_bytes)
+}
+
 fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> bool {
     snapshot.inner.additive_field_gauges.iter().any(|gauge| {
         matches!(
@@ -693,10 +767,11 @@ fn conservative_problem_size(
 
 fn plan_snapshot_capacity(
     lowering: &EqualityLowering,
+    fitting_functional_count: usize,
     scalar_relations: usize,
+    source_identifier_bytes: usize,
 ) -> Result<(), CapacityExceededEvidence> {
-    let Some(primal_variables) = lowering
-        .fitting_functional_count()
+    let Some(primal_variables) = fitting_functional_count
         .checked_add(4)
         .and_then(|value| value.checked_add(lowering.semantic_latents.len()))
     else {
@@ -715,7 +790,22 @@ fn plan_snapshot_capacity(
         primal_variables,
         equality_constraints,
         canonical_relations,
-        report_relations: scalar_relations,
+        source_relations: scalar_relations,
+        source_identifier_bytes,
+    })
+    .map(|_| ())
+}
+
+fn plan_source_lifecycle_capacity(
+    scalar_relations: usize,
+    source_identifier_bytes: usize,
+) -> Result<(), CapacityExceededEvidence> {
+    plan_equality_capacity_for(EqualityCapacityShape {
+        primal_variables: 0,
+        equality_constraints: 0,
+        canonical_relations: 0,
+        source_relations: scalar_relations,
+        source_identifier_bytes,
     })
     .map(|_| ())
 }
@@ -970,22 +1060,24 @@ impl EqualityLowering {
             .count()
     }
 
-    fn fitting_functional_count(&self) -> usize {
-        let mut functionals = Vec::<CanonicalFunctional>::new();
-        for functional in self
+    fn fitting_uses(&self) -> Vec<FunctionalUse> {
+        let mut fitting_uses = Vec::<FunctionalUse>::new();
+        for usage in self
             .canonical_equalities
             .iter()
             .filter(|equality| {
                 equality.participation() == CanonicalEqualityParticipation::SolverConstraint
             })
             .filter_map(CanonicalHardEquality::field)
-            .map(FunctionalUse::functional)
         {
-            if !functionals.iter().any(|existing| existing == functional) {
-                functionals.push(functional.clone());
+            if !fitting_uses
+                .iter()
+                .any(|existing| existing.functional() == usage.functional())
+            {
+                fitting_uses.push(usage.clone());
             }
         }
-        functionals.len()
+        fitting_uses
     }
 }
 
@@ -2419,8 +2511,13 @@ mod tests {
     #[test]
     fn snapshot_capacity_counts_source_relations_as_linear_report_storage() {
         let lowering = EqualityLowering::new();
-        assert!(plan_snapshot_capacity(&lowering, 10_000).is_ok());
-        let evidence = plan_snapshot_capacity(&lowering, usize::MAX)
+        assert!(plan_snapshot_capacity(&lowering, 0, 10_000, 0).is_ok());
+        assert!(plan_source_lifecycle_capacity(4_000_000, 0).is_ok());
+        let lifecycle_evidence = plan_source_lifecycle_capacity(4_194_304, 0)
+            .expect_err("source/report lifecycle storage is guarded before evidence cloning");
+        assert!(!lifecycle_evidence.large_allocation_attempted);
+        assert!(!lifecycle_evidence.backend_invocation_attempted);
+        let evidence = plan_snapshot_capacity(&lowering, 0, usize::MAX, 0)
             .expect_err("report storage arithmetic remains checked before allocation");
         assert!(!evidence.large_allocation_attempted);
         assert!(!evidence.backend_invocation_attempted);
