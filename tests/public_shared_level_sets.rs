@@ -107,9 +107,9 @@ fn shift_invariant_horizons_report_the_unidentified_additive_gauge_before_solvin
     assert!(failure.report().attempts().is_empty());
     assert_eq!(
         failure.report().problem_size().canonical_hard_equalities(),
-        None
+        Some(2)
     );
-    assert_eq!(failure.report().problem_size().kkt_dimension(), None);
+    assert_eq!(failure.report().problem_size().kkt_dimension(), Some(13));
 }
 
 #[test]
