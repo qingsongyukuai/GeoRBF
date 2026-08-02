@@ -539,7 +539,7 @@ fn group_and_gauge_validation_is_atomic_and_repairable() {
 }
 
 #[test]
-fn duplicate_derived_equalities_do_not_merge_semantic_latent_identity() {
+fn overlapping_member_cycles_do_not_merge_semantic_latent_identity() {
     let mut builder = problem_builder();
     for group_name in ["group-a", "group-b"] {
         let mut group = SharedLevelSetBuilder::new(GroupId::new(group_name));
@@ -555,6 +555,11 @@ fn duplicate_derived_equalities_do_not_merge_semantic_latent_identity() {
                 point(1.0, 0.0, -0.5),
             )
             .unwrap();
+        if group_name == "group-b" {
+            group
+                .add_member(SourceId::new("group-b/north"), point(0.0, 2.0, 0.5))
+                .unwrap();
+        }
         builder.add(group.build().unwrap()).unwrap();
     }
     builder
@@ -575,7 +580,7 @@ fn duplicate_derived_equalities_do_not_merge_semantic_latent_identity() {
     assert_eq!(success.report().problem_size().semantic_latents(), 2);
     assert_eq!(
         success.report().problem_size().canonical_hard_equalities(),
-        8
+        9
     );
     assert_close(
         success

@@ -777,6 +777,52 @@ struct CanonicalEqualityKey {
     latent_coefficients: Vec<(usize, u64)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum MemberConstraintNode {
+    Group(GroupId),
+    Support([u64; 3]),
+}
+
+#[derive(Debug, Default)]
+struct MemberConstraintForest {
+    node_index: BTreeMap<MemberConstraintNode, usize>,
+    parent: Vec<usize>,
+}
+
+impl MemberConstraintForest {
+    fn admits_independent_edge(&mut self, group_id: &GroupId, support: [f64; 3]) -> bool {
+        let group = self.intern(MemberConstraintNode::Group(group_id.clone()));
+        let support = self.intern(MemberConstraintNode::Support(support.map(f64::to_bits)));
+        let group_root = self.root(group);
+        let support_root = self.root(support);
+        if group_root == support_root {
+            return false;
+        }
+        self.parent[support_root] = group_root;
+        true
+    }
+
+    fn intern(&mut self, node: MemberConstraintNode) -> usize {
+        if let Some(index) = self.node_index.get(&node) {
+            return *index;
+        }
+        let index = self.parent.len();
+        self.parent.push(index);
+        self.node_index.insert(node, index);
+        index
+    }
+
+    fn root(&mut self, index: usize) -> usize {
+        let parent = self.parent[index];
+        if parent == index {
+            return index;
+        }
+        let root = self.root(parent);
+        self.parent[index] = root;
+        root
+    }
+}
+
 fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEqualityKey, f64) {
     let first_coefficient = equality
         .field()
@@ -847,7 +893,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         .enumerate()
         .map(|(index, group)| (group.group_id().clone(), index))
         .collect::<BTreeMap<_, _>>();
-    let mut first_group_by_supports = BTreeMap::<Vec<[u64; 3]>, GroupId>::new();
+    let mut member_constraints = MemberConstraintForest::default();
     for group in &snapshot.inner.shared_level_sets {
         let latent = lowering.semantic_latents.len();
         debug_assert_eq!(latent_index_by_group[group.group_id()], latent);
@@ -860,16 +906,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 .map(|member| member.source_id().clone())
                 .collect(),
         });
-        let mut support_signature = group
-            .members()
-            .iter()
-            .map(|member| member.location().components().map(f64::to_bits))
-            .collect::<Vec<_>>();
-        support_signature.sort();
-        let repeats_existing_group = first_group_by_supports
-            .insert(support_signature, group.group_id().clone())
-            .is_some();
-        for (member_index, member) in group.members().iter().enumerate() {
+        for member in group.members() {
             let role = SemanticRolePath::new("shared-level-set/member/value");
             let provenance = relation_provenance(
                 member.source_id().clone(),
@@ -894,7 +931,9 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 provenance,
                 FunctionalDimension::FieldValue,
                 0.0,
-                if !repeats_existing_group || member_index == 0 {
+                if member_constraints
+                    .admits_independent_edge(group.group_id(), member.location().components())
+                {
                     CanonicalEqualityParticipation::SolverConstraint
                 } else {
                     CanonicalEqualityParticipation::VerificationOnly

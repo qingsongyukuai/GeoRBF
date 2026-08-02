@@ -46,10 +46,11 @@ The current all-hard Cubic path derives a deterministic equality realization:
 
 No member is assigned a known value or selected as a semantic reference. Exact
 duplicate relations share a canonical row while retaining every caller-owned
-assessment. When two groups have the same complete support set, one independent
-member row connects each later latent and its remaining member equations stay
-in Canonical IR as verification-only relations; this avoids a redundant KKT row
-without merging `GroupId` identity.
+assessment. Member equations enter the KKT through a deterministic spanning
+forest of the group/point incidence graph; cycle-closing member equations stay
+in Canonical IR as verification-only relations. This avoids redundant KKT rows
+for coincident or partially overlapping groups without merging `GroupId`
+identity.
 
 If no true field-value observation exists, the first gauge in stable `SourceId`
 order supplies the one solver constraint that selects the additive constant.
