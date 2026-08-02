@@ -1168,7 +1168,7 @@ pub(crate) struct CanonicalRelationToleranceEvidence {
     pub(crate) relation_reference_scale: f64,
     pub(crate) physical_tolerance: f64,
     pub(crate) standard_tolerance: f64,
-    pub(crate) scaled_kkt_tolerance: f64,
+    pub(crate) scaled_kkt_tolerance: Option<f64>,
     pub(crate) recovered_physical_tolerance: f64,
     pub(crate) round_trip_error: f64,
 }
@@ -1762,7 +1762,7 @@ fn recover_and_verify(
                 && evidence.relation_reference_scale.is_finite()
                 && evidence.physical_tolerance.is_finite()
                 && evidence.standard_tolerance.is_finite()
-                && evidence.scaled_kkt_tolerance.is_finite()
+                && evidence.scaled_kkt_tolerance.is_none_or(f64::is_finite)
                 && evidence.recovered_physical_tolerance.is_finite()
                 && evidence.round_trip_error.is_finite()
         })
@@ -1909,10 +1909,11 @@ fn canonical_relation_tolerances(
     tolerance_plans
         .drain(..)
         .map(|plan| {
-            let (scaled_kkt_tolerance, recovered_standard_tolerance) = plan
+            let scaled_kkt_tolerance = plan.kkt_row.map(|kkt_row| scaled[kkt_row]);
+            let recovered_standard_tolerance = plan
                 .kkt_row
-                .map(|kkt_row| (scaled[kkt_row], recovered[kkt_row]))
-                .unwrap_or((plan.standard_tolerance, plan.standard_tolerance));
+                .map(|kkt_row| recovered[kkt_row])
+                .unwrap_or(plan.standard_tolerance);
             let recovered_physical_tolerance = representation
                 .coordinates
                 .to_physical_tolerance(plan.dimension, recovered_standard_tolerance);

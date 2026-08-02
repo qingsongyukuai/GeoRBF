@@ -205,7 +205,7 @@ pub struct HardRelationAssessment {
     characteristic_scale: f64,
     relation_reference_scale: f64,
     standard_tolerance: f64,
-    scaled_kkt_tolerance: f64,
+    scaled_kkt_tolerance: Option<f64>,
     recovered_physical_tolerance: f64,
     tolerance_round_trip_error: f64,
 }
@@ -266,8 +266,9 @@ impl HardRelationAssessment {
         self.standard_tolerance
     }
 
-    /// Returns the tolerance after backend KKT scaling.
-    pub fn scaled_kkt_tolerance(&self) -> f64 {
+    /// Returns the tolerance after backend KKT scaling, when this relation
+    /// participated in the solver system.
+    pub fn scaled_kkt_tolerance(&self) -> Option<f64> {
         self.scaled_kkt_tolerance
     }
 

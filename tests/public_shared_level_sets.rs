@@ -429,6 +429,20 @@ fn additional_gauges_verify_the_additive_representative_without_changing_geometr
             .count(),
         2
     );
+    let primary_gauge = compatible
+        .report()
+        .hard_relations()
+        .iter()
+        .find(|relation| relation.source_id().as_str() == "multi/gauge-a")
+        .unwrap();
+    let verification_gauge = compatible
+        .report()
+        .hard_relations()
+        .iter()
+        .find(|relation| relation.source_id().as_str() == "multi/gauge-b")
+        .unwrap();
+    assert!(primary_gauge.scaled_kkt_tolerance().is_some());
+    assert!(verification_gauge.scaled_kkt_tolerance().is_none());
 
     let failure = fit_horizon_with_point_gauges(3.0, Some(4.5))
         .expect_err("an incompatible secondary convention must reject during recovery");
