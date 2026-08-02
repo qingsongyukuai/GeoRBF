@@ -17,6 +17,8 @@ pub(crate) enum CapacityComponent {
     SvdRescueStorage,
     FaerFactorWorkspace,
     FaerSolveWorkspace,
+    FaerLltWorkspace,
+    FaerQrWorkspace,
     FaerRrqrWorkspace,
     FaerSingularValuesWorkspace,
     FaerInertiaWorkspace,
@@ -56,19 +58,21 @@ pub(crate) struct CapacityExceededEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceLayoutEvidence {
+    pub(crate) bytes: u64,
+    pub(crate) alignment: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FaerWorkspaceEvidence {
-    pub(crate) factor_bytes: u64,
-    pub(crate) factor_alignment: usize,
-    pub(crate) solve_bytes: u64,
-    pub(crate) solve_alignment: usize,
-    pub(crate) rrqr_bytes: u64,
-    pub(crate) rrqr_alignment: usize,
-    pub(crate) singular_values_bytes: u64,
-    pub(crate) singular_values_alignment: usize,
-    pub(crate) inertia_bytes: u64,
-    pub(crate) inertia_alignment: usize,
-    pub(crate) svd_rescue_bytes: u64,
-    pub(crate) svd_rescue_alignment: usize,
+    pub(crate) factor: WorkspaceLayoutEvidence,
+    pub(crate) solve: WorkspaceLayoutEvidence,
+    pub(crate) llt: WorkspaceLayoutEvidence,
+    pub(crate) qr: WorkspaceLayoutEvidence,
+    pub(crate) rrqr: WorkspaceLayoutEvidence,
+    pub(crate) singular_values: WorkspaceLayoutEvidence,
+    pub(crate) inertia: WorkspaceLayoutEvidence,
+    pub(crate) svd_rescue: WorkspaceLayoutEvidence,
     pub(crate) peak_bytes: u64,
 }
 
@@ -156,7 +160,7 @@ pub(crate) fn plan_equality_capacity(
         CapacityComponent::AnalysisAuxiliary,
         dimension,
         usize_as_u64(
-            faer_backend::rrqr_block_size(kkt_dimension),
+            faer_backend::qr_block_size(),
             CapacityComponent::AnalysisAuxiliary,
         )?,
     )?;
@@ -265,48 +269,48 @@ pub(crate) fn plan_equality_capacity(
 fn faer_workspace(dimension: usize) -> Result<FaerWorkspaceEvidence, CapacityExceededEvidence> {
     let factor = faer_backend::factor_workspace_requirement(dimension);
     let solve = faer_backend::solve_workspace_requirement(dimension);
+    let llt = faer_backend::llt_workspace_requirement(dimension);
+    let qr = faer_backend::qr_workspace_requirement(dimension);
     let rrqr = faer_backend::rrqr_workspace_requirement(dimension);
     let singular_values = faer_backend::singular_values_workspace_requirement(dimension);
     let inertia = faer_backend::inertia_workspace_requirement(dimension);
     let svd_rescue = faer_backend::svd_rescue_workspace_requirement(dimension);
-    let (factor_bytes, factor_alignment) =
-        stack_layout(factor, CapacityComponent::FaerFactorWorkspace, dimension)?;
-    let (solve_bytes, solve_alignment) =
-        stack_layout(solve, CapacityComponent::FaerSolveWorkspace, dimension)?;
-    let (rrqr_bytes, rrqr_alignment) =
-        stack_layout(rrqr, CapacityComponent::FaerRrqrWorkspace, dimension)?;
-    let (singular_values_bytes, singular_values_alignment) = stack_layout(
+    let factor = stack_layout(factor, CapacityComponent::FaerFactorWorkspace, dimension)?;
+    let solve = stack_layout(solve, CapacityComponent::FaerSolveWorkspace, dimension)?;
+    let llt = stack_layout(llt, CapacityComponent::FaerLltWorkspace, dimension)?;
+    let qr = stack_layout(qr, CapacityComponent::FaerQrWorkspace, dimension)?;
+    let rrqr = stack_layout(rrqr, CapacityComponent::FaerRrqrWorkspace, dimension)?;
+    let singular_values = stack_layout(
         singular_values,
         CapacityComponent::FaerSingularValuesWorkspace,
         dimension,
     )?;
-    let (inertia_bytes, inertia_alignment) =
-        stack_layout(inertia, CapacityComponent::FaerInertiaWorkspace, dimension)?;
-    let (svd_rescue_bytes, svd_rescue_alignment) = stack_layout(
+    let inertia = stack_layout(inertia, CapacityComponent::FaerInertiaWorkspace, dimension)?;
+    let svd_rescue = stack_layout(
         svd_rescue,
         CapacityComponent::FaerSvdRescueWorkspace,
         dimension,
     )?;
+    let peak_bytes = factor
+        .bytes
+        .max(solve.bytes)
+        .max(llt.bytes)
+        .max(qr.bytes)
+        .max(rrqr.bytes)
+        .max(singular_values.bytes)
+        .max(inertia.bytes)
+        .max(svd_rescue.bytes);
 
     Ok(FaerWorkspaceEvidence {
-        factor_bytes,
-        factor_alignment,
-        solve_bytes,
-        solve_alignment,
-        rrqr_bytes,
-        rrqr_alignment,
-        singular_values_bytes,
-        singular_values_alignment,
-        inertia_bytes,
-        inertia_alignment,
-        svd_rescue_bytes,
-        svd_rescue_alignment,
-        peak_bytes: factor_bytes
-            .max(solve_bytes)
-            .max(rrqr_bytes)
-            .max(singular_values_bytes)
-            .max(inertia_bytes)
-            .max(svd_rescue_bytes),
+        factor,
+        solve,
+        llt,
+        qr,
+        rrqr,
+        singular_values,
+        inertia,
+        svd_rescue,
+        peak_bytes,
     })
 }
 
@@ -314,7 +318,7 @@ fn stack_layout(
     requirement: faer::dyn_stack::StackReq,
     component: CapacityComponent,
     dimension: usize,
-) -> Result<(u64, usize), CapacityExceededEvidence> {
+) -> Result<WorkspaceLayoutEvidence, CapacityExceededEvidence> {
     let alignment = requirement.align_bytes();
     if alignment == 0 {
         return Err(overflow(
@@ -324,10 +328,10 @@ fn stack_layout(
             0,
         ));
     }
-    Ok((
-        usize_as_u64(requirement.size_bytes(), component)?,
+    Ok(WorkspaceLayoutEvidence {
+        bytes: usize_as_u64(requirement.size_bytes(), component)?,
         alignment,
-    ))
+    })
 }
 
 fn checked_sum(
@@ -403,9 +407,9 @@ mod tests {
         let plan = plan_equality_capacity(2, 1).expect("small equality plan should fit");
 
         assert_eq!(plan.kkt_dimension, 3);
-        assert_eq!(plan.faer_workspace.factor_bytes, 64);
-        assert_eq!(plan.faer_workspace.factor_alignment, 64);
-        assert_eq!(plan.faer_workspace.solve_bytes, 64);
+        assert_eq!(plan.faer_workspace.factor.bytes, 64);
+        assert_eq!(plan.faer_workspace.factor.alignment, 64);
+        assert_eq!(plan.faer_workspace.solve.bytes, 64);
         assert!(plan.peak_bytes <= CAPACITY_LIMIT_BYTES);
     }
 
@@ -437,9 +441,9 @@ mod tests {
         };
         assert_eq!(planned_peak_bytes, 8_590_810_592);
         assert_eq!(planned_peak_bytes - evidence.limit_bytes, 876_000);
-        assert_eq!(components.faer_workspace.factor_bytes, 5_120_960);
+        assert_eq!(components.faer_workspace.factor.bytes, 5_120_960);
         assert!(components.svd_rescue_storage_bytes > components.factor_storage_bytes);
-        assert!(components.faer_workspace.svd_rescue_bytes > 0);
+        assert!(components.faer_workspace.svd_rescue.bytes > 0);
     }
 
     #[test]

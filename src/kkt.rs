@@ -1,14 +1,16 @@
 use faer::diag::{DiagMut, DiagRef};
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::lblt::{factor, solve};
-use faer::prelude::*;
-use faer::{Conj, Mat, MatMut, MatRef, Side};
+use faer::{Conj, MatMut, MatRef};
 
 use crate::capacity::{
     CapacityExceededEvidence, EqualityCapacityPlan, FaerWorkspaceEvidence, plan_equality_capacity,
 };
 use crate::faer_backend;
-use crate::numerical::{EQUALITY_KKT_POLICY_V1, NumericalPolicyId, SpectralRankDecision};
+use crate::numerical::{
+    EQUALITY_KKT_POLICY_V1, NumericalPolicyId, SpectralAnalysisFailure, SpectralRankDecision,
+    analyze_spectral_rank,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuizRoundEvidence {
@@ -172,14 +174,38 @@ pub(crate) struct BackendFingerprint {
     pub(crate) crate_version: &'static str,
     pub(crate) features: [&'static str; 2],
     pub(crate) algorithm: &'static str,
-    pub(crate) lblt_pivoting: &'static str,
-    pub(crate) lblt_block_size: usize,
-    pub(crate) lblt_parallelism_threshold: usize,
-    pub(crate) factor_workspace_source: &'static str,
     pub(crate) target_arch: &'static str,
     pub(crate) target_os: &'static str,
     pub(crate) requested_threads: usize,
     pub(crate) actual_threads: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendAttemptSettings {
+    Lblt {
+        pivoting: &'static str,
+        block_size: usize,
+        parallelism_threshold: usize,
+        factor_workspace_source: &'static str,
+        maximum_refinement_steps: usize,
+    },
+    FullSvd {
+        settings_id: &'static str,
+        left_vectors: &'static str,
+        right_vectors: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AlgebraicAnalysisSettings {
+    pub(crate) llt_settings_id: &'static str,
+    pub(crate) householder_qr_settings_id: &'static str,
+    pub(crate) rrqr_algorithm: &'static str,
+    pub(crate) rrqr_settings_id: &'static str,
+    pub(crate) svd_algorithm: &'static str,
+    pub(crate) svd_settings_id: &'static str,
+    pub(crate) evd_algorithm: &'static str,
+    pub(crate) evd_settings_id: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,11 +272,31 @@ pub(crate) enum SolveAttemptTermination {
     NumericalError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum BackendContractViolationReason {
     NonFiniteCandidate,
-    BackwardErrorExceeded,
-    BackendNumericalError,
+    BackwardErrorExceeded { observed: f64, limit: f64 },
+    ScalingRoundTripExceeded { observed: f64, limit: f64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumericalFailureReason {
+    BackendDecompositionFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum KktAttemptFailureReason {
+    BackendContract(BackendContractViolationReason),
+    Numerical(NumericalFailureReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LinearResidualEvidence {
+    pub(crate) infinity_norm: f64,
+    pub(crate) matrix_infinity_norm: f64,
+    pub(crate) solution_infinity_norm: f64,
+    pub(crate) rhs_infinity_norm: f64,
+    pub(crate) normalized_backward_error: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,14 +311,15 @@ pub(crate) struct KktAttemptRecord {
     pub(crate) sequence: usize,
     pub(crate) kind: KktAttemptKind,
     pub(crate) backend: BackendFingerprint,
+    pub(crate) settings: BackendAttemptSettings,
     pub(crate) scaling: ScalingSummary,
     pub(crate) requested_threads: usize,
     pub(crate) actual_threads: usize,
     pub(crate) refinement_steps: usize,
     pub(crate) termination: SolveAttemptTermination,
-    pub(crate) normalized_backward_error: Option<f64>,
+    pub(crate) residual: Option<LinearResidualEvidence>,
     pub(crate) certificate_present: bool,
-    pub(crate) failure_reason: Option<BackendContractViolationReason>,
+    pub(crate) failure_reason: Option<KktAttemptFailureReason>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -285,6 +332,7 @@ pub(crate) struct KktSolveEvidence {
     pub(crate) capacity: EqualityCapacityPlan,
     pub(crate) workspace: FaerWorkspaceEvidence,
     pub(crate) backend: BackendFingerprint,
+    pub(crate) analysis_settings: AlgebraicAnalysisSettings,
     pub(crate) scaling: RuizScalingEvidence,
     pub(crate) scaling_round_trip_error: f64,
     pub(crate) rank: AlgebraicRankEvidence,
@@ -302,6 +350,21 @@ pub(crate) enum KktInputField {
     EqualityRightHandSide,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspacePhase {
+    RankAnalysis,
+    InertiaAnalysis,
+    Factor,
+    Solve,
+    SvdRescue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlgebraicAnalysisPhase {
+    RankConfirmation,
+    Inertia,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum KktFailure {
     Capacity(CapacityExceededEvidence),
@@ -315,7 +378,7 @@ pub(crate) enum KktFailure {
         index: usize,
     },
     WorkspaceAllocation {
-        phase: &'static str,
+        phase: WorkspacePhase,
         bytes: u64,
         alignment: usize,
     },
@@ -326,6 +389,9 @@ pub(crate) enum KktFailure {
     NumericalDecisionGrayZone {
         evidence: AlgebraicRankEvidence,
     },
+    AlgebraicAnalysisFailure {
+        phase: AlgebraicAnalysisPhase,
+    },
     UnexpectedInertia {
         expected: Inertia,
         observed: Inertia,
@@ -335,6 +401,11 @@ pub(crate) enum KktFailure {
         attempt_plan: KktAttemptPlan,
         attempts: Vec<KktAttemptRecord>,
         reason: BackendContractViolationReason,
+    },
+    NumericalFailure {
+        attempt_plan: KktAttemptPlan,
+        attempts: Vec<KktAttemptRecord>,
+        reason: NumericalFailureReason,
     },
 }
 
@@ -401,62 +472,76 @@ pub(crate) fn solve_equality_kkt(
     let mut attempts = Vec::with_capacity(2);
     let (first_candidate, refinement_steps) =
         solve_lblt_with_refinement(&scaled.matrix, &scaled.rhs, dimension, &capacity)?;
-    let first_error =
-        normalized_backward_error(&scaled.matrix, dimension, &first_candidate, &scaled.rhs);
-    let first_reason = candidate_rejection_reason(&first_candidate, first_error);
+    let first_residual =
+        linear_residual_evidence(&scaled.matrix, dimension, &first_candidate, &scaled.rhs);
+    let first_reason = candidate_rejection_reason(&first_candidate, first_residual);
     attempts.push(attempt_record(
         0,
         KktAttemptKind::BunchKaufmanRefinement,
         faer_backend::ALGORITHM,
         scaling_summary,
         refinement_steps,
-        first_error,
+        Some(first_residual),
         first_reason,
     ));
 
     let (scaled_solution, selected_backend, normalized_backward_error) = if first_reason.is_none() {
-        (first_candidate, attempts[0].backend.clone(), first_error)
+        (
+            first_candidate,
+            attempts[0].backend.clone(),
+            first_residual.normalized_backward_error,
+        )
     } else {
-        let rescue = solve_with_svd(&scaled.matrix, &scaled.rhs, dimension);
+        let rescue = faer_backend::solve_with_full_svd(
+            MatRef::from_column_major_slice(&scaled.matrix, dimension, dimension),
+            &scaled.rhs,
+        );
         match rescue {
             Ok(candidate) => {
-                let error =
-                    normalized_backward_error(&scaled.matrix, dimension, &candidate, &scaled.rhs);
-                let reason = candidate_rejection_reason(&candidate, error);
+                let residual =
+                    linear_residual_evidence(&scaled.matrix, dimension, &candidate, &scaled.rhs);
+                let reason = candidate_rejection_reason(&candidate, residual);
                 attempts.push(attempt_record(
                     1,
                     KktAttemptKind::SvdRescue,
-                    "SVD rescue",
+                    faer_backend::SVD_ALGORITHM,
                     scaling_summary,
                     0,
-                    error,
+                    Some(residual),
                     reason,
                 ));
                 if let Some(reason) = reason {
-                    return Err(KktFailure::BackendContractViolation {
-                        attempt_plan,
-                        attempts,
-                        reason,
+                    return Err(exhausted_attempt_failure(attempt_plan, attempts, reason));
+                }
+                (
+                    candidate,
+                    attempts[1].backend.clone(),
+                    residual.normalized_backward_error,
+                )
+            }
+            Err(failure) => {
+                if let faer_backend::DecompositionFailure::WorkspaceAllocation(failure) = failure {
+                    return Err(KktFailure::WorkspaceAllocation {
+                        phase: WorkspacePhase::SvdRescue,
+                        bytes: failure.bytes,
+                        alignment: failure.alignment,
                     });
                 }
-                (candidate, attempts[1].backend.clone(), error)
-            }
-            Err(()) => {
-                let reason = BackendContractViolationReason::BackendNumericalError;
+                let reason = NumericalFailureReason::BackendDecompositionFailure;
                 attempts.push(attempt_record(
                     1,
                     KktAttemptKind::SvdRescue,
-                    "SVD rescue",
+                    faer_backend::SVD_ALGORITHM,
                     scaling_summary,
                     0,
-                    f64::NAN,
-                    Some(reason),
+                    None,
+                    Some(KktAttemptFailureReason::Numerical(reason)),
                 ));
-                return Err(KktFailure::BackendContractViolation {
+                return Err(exhausted_attempt_failure(
                     attempt_plan,
                     attempts,
-                    reason,
-                });
+                    KktAttemptFailureReason::Numerical(reason),
+                ));
             }
         }
     };
@@ -471,7 +556,10 @@ pub(crate) fn solve_equality_kkt(
     if !scaling_round_trip_error.is_finite()
         || scaling_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
     {
-        let reason = BackendContractViolationReason::BackwardErrorExceeded;
+        let reason = BackendContractViolationReason::ScalingRoundTripExceeded {
+            observed: scaling_round_trip_error,
+            limit: EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit,
+        };
         return Err(KktFailure::BackendContractViolation {
             attempt_plan,
             attempts,
@@ -487,6 +575,7 @@ pub(crate) fn solve_equality_kkt(
         verification_scope: VerificationScope::BackendStandardForm,
         workspace: capacity.faer_workspace.clone(),
         backend: selected_backend,
+        analysis_settings: algebraic_analysis_settings(),
         scaling: scaled.evidence,
         scaling_round_trip_error,
         rank,
@@ -518,53 +607,28 @@ fn exact_rank_deficiency(index: usize, dimension: usize) -> AlgebraicRankEvidenc
 
 fn analyze_rank(matrix: &[f64], dimension: usize) -> Result<AlgebraicRankEvidence, KktFailure> {
     let matrix = MatRef::from_column_major_slice(matrix, dimension, dimension);
-    let qr = matrix.col_piv_qr();
-    let diagonal = (0..dimension)
-        .map(|index| qr.R()[(index, index)].abs())
-        .collect::<Vec<_>>();
-    let rrqr_largest = diagonal.iter().copied().fold(0.0_f64, f64::max);
-    let rrqr_smallest = diagonal.iter().copied().fold(f64::INFINITY, f64::min);
-    let rrqr_ratio = if rrqr_largest > 0.0 {
-        rrqr_smallest / rrqr_largest
-    } else {
-        0.0
-    };
-    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V1.spectral_ratio_thresholds(dimension);
-    let singular_values =
-        matrix
-            .singular_values()
-            .map_err(|_| KktFailure::NumericalDecisionGrayZone {
-                evidence: AlgebraicRankEvidence {
-                    exact_zero_index: None,
-                    rrqr_ratio,
-                    singular_values: Vec::new(),
-                    svd_ratio: f64::NAN,
-                    reject_ratio,
-                    accept_ratio,
-                    classification: RankClassification::NumericalDecisionGrayZone,
-                    backend_invoked: false,
-                },
-            })?;
-    let largest = singular_values.first().copied().unwrap_or(0.0);
-    let smallest = singular_values.last().copied().unwrap_or(0.0);
-    let svd_ratio = if largest > 0.0 {
-        smallest / largest
-    } else {
-        0.0
-    };
-    let classification = match EQUALITY_KKT_POLICY_V1.classify_spectral_ratio(dimension, svd_ratio)
-    {
+    let analysis = analyze_spectral_rank(matrix).map_err(|failure| match failure {
+        SpectralAnalysisFailure::WorkspaceAllocation(failure) => KktFailure::WorkspaceAllocation {
+            phase: WorkspacePhase::RankAnalysis,
+            bytes: failure.bytes,
+            alignment: failure.alignment,
+        },
+        SpectralAnalysisFailure::NumericalError => KktFailure::AlgebraicAnalysisFailure {
+            phase: AlgebraicAnalysisPhase::RankConfirmation,
+        },
+    })?;
+    let classification = match analysis.decision {
         SpectralRankDecision::Reject => RankClassification::RankDeficient,
         SpectralRankDecision::GrayZone => RankClassification::NumericalDecisionGrayZone,
         SpectralRankDecision::Accept => RankClassification::FullRank,
     };
     let evidence = AlgebraicRankEvidence {
         exact_zero_index: None,
-        rrqr_ratio,
-        singular_values,
-        svd_ratio,
-        reject_ratio,
-        accept_ratio,
+        rrqr_ratio: analysis.rrqr_ratio,
+        singular_values: analysis.singular_values,
+        svd_ratio: analysis.svd_ratio,
+        reject_ratio: analysis.reject_ratio,
+        accept_ratio: analysis.accept_ratio,
         classification,
         backend_invoked: false,
     };
@@ -582,14 +646,23 @@ fn analyze_inertia(
     dimension: usize,
     rank: &AlgebraicRankEvidence,
 ) -> Result<Inertia, KktFailure> {
-    let eigenvalues = MatRef::from_column_major_slice(matrix, dimension, dimension)
-        .self_adjoint_eigenvalues(Side::Lower)
-        .map_err(|_| KktFailure::NumericalDecisionGrayZone {
-            evidence: AlgebraicRankEvidence {
-                classification: RankClassification::NumericalDecisionGrayZone,
-                ..rank.clone()
-            },
-        })?;
+    let eigenvalues = faer_backend::self_adjoint_eigenvalues(MatRef::from_column_major_slice(
+        matrix, dimension, dimension,
+    ))
+    .map_err(|failure| match failure {
+        faer_backend::DecompositionFailure::WorkspaceAllocation(failure) => {
+            KktFailure::WorkspaceAllocation {
+                phase: WorkspacePhase::InertiaAnalysis,
+                bytes: failure.bytes,
+                alignment: failure.alignment,
+            }
+        }
+        faer_backend::DecompositionFailure::NumericalError => {
+            KktFailure::AlgebraicAnalysisFailure {
+                phase: AlgebraicAnalysisPhase::Inertia,
+            }
+        }
+    })?;
     let scale = eigenvalues
         .iter()
         .map(|value| value.abs())
@@ -635,9 +708,9 @@ fn solve_lblt_with_refinement(
     let factor_requirement = faer_backend::factor_workspace_requirement(dimension);
     let mut factor_memory =
         MemBuffer::try_new(factor_requirement).map_err(|_| KktFailure::WorkspaceAllocation {
-            phase: "factor",
-            bytes: capacity.faer_workspace.factor_bytes,
-            alignment: capacity.faer_workspace.factor_alignment,
+            phase: WorkspacePhase::Factor,
+            bytes: capacity.faer_workspace.factor.bytes,
+            alignment: capacity.faer_workspace.factor.alignment,
         })?;
     let (_, permutation) = factor::cholesky_in_place(
         MatMut::from_column_major_slice_mut(&mut factors, dimension, dimension),
@@ -653,9 +726,9 @@ fn solve_lblt_with_refinement(
     let solve_requirement = faer_backend::solve_workspace_requirement(dimension);
     let mut solve_memory =
         MemBuffer::try_new(solve_requirement).map_err(|_| KktFailure::WorkspaceAllocation {
-            phase: "solve",
-            bytes: capacity.faer_workspace.solve_bytes,
-            alignment: capacity.faer_workspace.solve_alignment,
+            phase: WorkspacePhase::Solve,
+            bytes: capacity.faer_workspace.solve.bytes,
+            alignment: capacity.faer_workspace.solve.alignment,
         })?;
     solve::solve_in_place_with_conj(
         MatRef::from_column_major_slice(&factors, dimension, dimension),
@@ -670,7 +743,8 @@ fn solve_lblt_with_refinement(
 
     let mut refinement_steps = 0;
     while refinement_steps < EQUALITY_KKT_POLICY_V1.kkt_max_refinement_steps {
-        let error = normalized_backward_error(matrix, dimension, &solution, rhs);
+        let error =
+            linear_residual_evidence(matrix, dimension, &solution, rhs).normalized_backward_error;
         if !error.is_finite()
             || error <= EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit
             || solution.iter().any(|value| !value.is_finite())
@@ -696,15 +770,6 @@ fn solve_lblt_with_refinement(
     Ok((solution, refinement_steps))
 }
 
-fn solve_with_svd(matrix: &[f64], rhs: &[f64], dimension: usize) -> Result<Vec<f64>, ()> {
-    let decomposition = MatRef::from_column_major_slice(matrix, dimension, dimension)
-        .svd()
-        .map_err(|_| ())?;
-    let rhs = Mat::from_fn(dimension, 1, |row, _| rhs[row]);
-    let solution = decomposition.solve(rhs);
-    Ok((0..dimension).map(|row| solution[(row, 0)]).collect())
-}
-
 fn residual(matrix: &[f64], dimension: usize, solution: &[f64], rhs: &[f64]) -> Vec<f64> {
     (0..dimension)
         .map(|row| {
@@ -718,15 +783,22 @@ fn residual(matrix: &[f64], dimension: usize, solution: &[f64], rhs: &[f64]) -> 
 
 fn candidate_rejection_reason(
     candidate: &[f64],
-    normalized_backward_error: f64,
-) -> Option<BackendContractViolationReason> {
+    residual: LinearResidualEvidence,
+) -> Option<KktAttemptFailureReason> {
     if candidate.iter().any(|value| !value.is_finite()) {
-        Some(BackendContractViolationReason::NonFiniteCandidate)
-    } else if !normalized_backward_error.is_finite()
-        || normalized_backward_error
+        Some(KktAttemptFailureReason::BackendContract(
+            BackendContractViolationReason::NonFiniteCandidate,
+        ))
+    } else if !residual.normalized_backward_error.is_finite()
+        || residual.normalized_backward_error
             > EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit
     {
-        Some(BackendContractViolationReason::BackwardErrorExceeded)
+        Some(KktAttemptFailureReason::BackendContract(
+            BackendContractViolationReason::BackwardErrorExceeded {
+                observed: residual.normalized_backward_error,
+                limit: EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit,
+            },
+        ))
     } else {
         None
     }
@@ -738,29 +810,58 @@ fn attempt_record(
     algorithm: &'static str,
     scaling: ScalingSummary,
     refinement_steps: usize,
-    normalized_backward_error: f64,
-    failure_reason: Option<BackendContractViolationReason>,
+    residual: Option<LinearResidualEvidence>,
+    failure_reason: Option<KktAttemptFailureReason>,
 ) -> KktAttemptRecord {
     KktAttemptRecord {
         sequence,
         kind,
         backend: backend_fingerprint(algorithm),
+        settings: match kind {
+            KktAttemptKind::BunchKaufmanRefinement => BackendAttemptSettings::Lblt {
+                pivoting: faer_backend::PIVOTING,
+                block_size: faer_backend::BLOCK_SIZE,
+                parallelism_threshold: faer_backend::PARALLELISM_THRESHOLD,
+                factor_workspace_source: faer_backend::FACTOR_WORKSPACE_SOURCE,
+                maximum_refinement_steps: EQUALITY_KKT_POLICY_V1.kkt_max_refinement_steps,
+            },
+            KktAttemptKind::SvdRescue => BackendAttemptSettings::FullSvd {
+                settings_id: faer_backend::SVD_SETTINGS_ID,
+                left_vectors: "full",
+                right_vectors: "full",
+            },
+        },
         scaling,
         requested_threads: faer_backend::REQUESTED_THREADS,
         actual_threads: faer_backend::parallelism().degree(),
         refinement_steps,
         termination: match failure_reason {
-            Some(BackendContractViolationReason::BackendNumericalError) => {
-                SolveAttemptTermination::NumericalError
-            }
+            Some(KktAttemptFailureReason::Numerical(_)) => SolveAttemptTermination::NumericalError,
             Some(_) => SolveAttemptTermination::RejectedCandidate,
             None => SolveAttemptTermination::AcceptedCandidate,
         },
-        normalized_backward_error: normalized_backward_error
-            .is_finite()
-            .then_some(normalized_backward_error),
+        residual,
         certificate_present: false,
         failure_reason,
+    }
+}
+
+fn exhausted_attempt_failure(
+    attempt_plan: KktAttemptPlan,
+    attempts: Vec<KktAttemptRecord>,
+    reason: KktAttemptFailureReason,
+) -> KktFailure {
+    match reason {
+        KktAttemptFailureReason::BackendContract(reason) => KktFailure::BackendContractViolation {
+            attempt_plan,
+            attempts,
+            reason,
+        },
+        KktAttemptFailureReason::Numerical(reason) => KktFailure::NumericalFailure {
+            attempt_plan,
+            attempts,
+            reason,
+        },
     }
 }
 
@@ -825,12 +926,12 @@ fn validate_slice(field: KktInputField, values: &[f64], expected: usize) -> Resu
     Ok(())
 }
 
-fn normalized_backward_error(
+fn linear_residual_evidence(
     matrix: &[f64],
     dimension: usize,
     solution: &[f64],
     rhs: &[f64],
-) -> f64 {
+) -> LinearResidualEvidence {
     let residual_norm = (0..dimension)
         .map(|row| {
             let product = (0..dimension)
@@ -852,10 +953,17 @@ fn normalized_backward_error(
         .fold(0.0_f64, f64::max);
     let rhs_norm = rhs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
     let denominator = matrix_norm * solution_norm + rhs_norm;
-    if denominator == 0.0 {
+    let normalized_backward_error = if denominator == 0.0 {
         residual_norm
     } else {
         residual_norm / denominator
+    };
+    LinearResidualEvidence {
+        infinity_norm: residual_norm,
+        matrix_infinity_norm: matrix_norm,
+        solution_infinity_norm: solution_norm,
+        rhs_infinity_norm: rhs_norm,
+        normalized_backward_error,
     }
 }
 
@@ -866,14 +974,23 @@ fn backend_fingerprint(algorithm: &'static str) -> BackendFingerprint {
         crate_version: faer_backend::CRATE_VERSION,
         features: faer_backend::FEATURES,
         algorithm,
-        lblt_pivoting: faer_backend::PIVOTING,
-        lblt_block_size: faer_backend::BLOCK_SIZE,
-        lblt_parallelism_threshold: faer_backend::PARALLELISM_THRESHOLD,
-        factor_workspace_source: faer_backend::FACTOR_WORKSPACE_SOURCE,
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
         requested_threads: faer_backend::REQUESTED_THREADS,
         actual_threads: faer_backend::parallelism().degree(),
+    }
+}
+
+fn algebraic_analysis_settings() -> AlgebraicAnalysisSettings {
+    AlgebraicAnalysisSettings {
+        llt_settings_id: faer_backend::LLT_SETTINGS_ID,
+        householder_qr_settings_id: faer_backend::HOUSEHOLDER_QR_SETTINGS_ID,
+        rrqr_algorithm: faer_backend::RRQR_ALGORITHM,
+        rrqr_settings_id: faer_backend::RRQR_SETTINGS_ID,
+        svd_algorithm: faer_backend::SVD_ALGORITHM,
+        svd_settings_id: faer_backend::SVD_SETTINGS_ID,
+        evd_algorithm: faer_backend::EVD_ALGORITHM,
+        evd_settings_id: faer_backend::EVD_SETTINGS_ID,
     }
 }
 
@@ -899,18 +1016,37 @@ mod tests {
         assert_eq!(evidence.equality_multipliers, vec![1.0]);
         assert!(evidence.normalized_backward_error <= 1.0e-11);
         assert_eq!(evidence.capacity.kkt_dimension, 3);
-        assert_eq!(evidence.workspace.factor_bytes, 64);
-        assert_eq!(evidence.workspace.solve_bytes, 64);
+        assert_eq!(evidence.workspace.factor.bytes, 64);
+        assert_eq!(evidence.workspace.solve.bytes, 64);
         assert_eq!(evidence.backend.schema_version, 1);
         assert_eq!(evidence.backend.crate_name, "faer");
         assert_eq!(evidence.backend.crate_version, "0.24.4");
         assert_eq!(evidence.backend.features, ["linalg", "std"]);
         assert_eq!(evidence.backend.algorithm, "LBLT Bunch-Kaufman");
-        assert_eq!(evidence.backend.lblt_pivoting, "PartialDiag");
-        assert_eq!(evidence.backend.lblt_block_size, 64);
-        assert_eq!(evidence.backend.lblt_parallelism_threshold, 16_384);
+        assert_eq!(
+            evidence.attempts[0].settings,
+            BackendAttemptSettings::Lblt {
+                pivoting: "PartialDiag",
+                block_size: 64,
+                parallelism_threshold: 16_384,
+                factor_workspace_source: "faer::linalg::cholesky::lblt::factor::cholesky_in_place_scratch",
+                maximum_refinement_steps: 2,
+            }
+        );
         assert_eq!(evidence.backend.requested_threads, 1);
         assert_eq!(evidence.backend.actual_threads, 1);
+        assert_eq!(
+            evidence.analysis_settings.rrqr_settings_id,
+            "georbf-faer-rrqr-v1:block-size=256,blocking=2304,parallel=49152"
+        );
+        assert_eq!(
+            evidence.analysis_settings.svd_settings_id,
+            faer_backend::SVD_SETTINGS_ID
+        );
+        assert_eq!(
+            evidence.analysis_settings.evd_settings_id,
+            faer_backend::EVD_SETTINGS_ID
+        );
         assert_eq!(evidence.numerical_policy.0, "georbf-v1");
         assert_eq!(evidence.scaling.rounds.len(), 8);
         assert_eq!(evidence.rank.classification, RankClassification::FullRank);
@@ -945,6 +1081,17 @@ mod tests {
         assert_eq!(
             evidence.attempts[0].termination,
             SolveAttemptTermination::AcceptedCandidate
+        );
+        let residual = evidence.attempts[0]
+            .residual
+            .expect("an accepted candidate records complete residual evidence");
+        assert!(residual.infinity_norm.is_finite());
+        assert!(residual.matrix_infinity_norm.is_finite());
+        assert!(residual.solution_infinity_norm.is_finite());
+        assert!(residual.rhs_infinity_norm.is_finite());
+        assert_eq!(
+            residual.normalized_backward_error,
+            evidence.normalized_backward_error
         );
         assert!(evidence.scaling_round_trip_error <= 1.0e-11);
         assert_eq!(
@@ -1025,13 +1172,83 @@ mod tests {
                 assert_eq!(attempts.len(), 2);
                 assert_eq!(attempts[0].kind, KktAttemptKind::BunchKaufmanRefinement);
                 assert_eq!(attempts[1].kind, KktAttemptKind::SvdRescue);
+                assert_eq!(
+                    attempts[1].settings,
+                    BackendAttemptSettings::FullSvd {
+                        settings_id: faer_backend::SVD_SETTINGS_ID,
+                        left_vectors: "full",
+                        right_vectors: "full",
+                    }
+                );
                 assert!(attempts[0].scaling.saturated_outside_target > 0);
                 assert!(attempts.iter().all(|attempt| {
                     attempt.termination == SolveAttemptTermination::RejectedCandidate
+                        && attempt.residual.is_some()
                         && attempt.backend.crate_version == "0.24.4"
                         && attempt.requested_threads == 1
                         && attempt.actual_threads == 1
                 }));
+            }
+            other => panic!("unexpected failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finite_backward_error_damage_exhausts_attempts_without_a_candidate() {
+        let residual = LinearResidualEvidence {
+            infinity_norm: 1.0e-6,
+            matrix_infinity_norm: 1.0,
+            solution_infinity_norm: 1.0,
+            rhs_infinity_norm: 1.0,
+            normalized_backward_error: 1.0e-6 / 3.0,
+        };
+        let reason = candidate_rejection_reason(&[1.0], residual)
+            .expect("a finite candidate above the backward-error limit is rejected");
+        let scaling = ScalingSummary {
+            method: "block-aware Ruiz max-norm diagonal congruence",
+            rounds: 8,
+            saturated_outside_target: 0,
+        };
+        let attempts = vec![
+            attempt_record(
+                0,
+                KktAttemptKind::BunchKaufmanRefinement,
+                faer_backend::ALGORITHM,
+                scaling,
+                2,
+                Some(residual),
+                Some(reason),
+            ),
+            attempt_record(
+                1,
+                KktAttemptKind::SvdRescue,
+                faer_backend::SVD_ALGORITHM,
+                scaling,
+                0,
+                Some(residual),
+                Some(reason),
+            ),
+        ];
+        let failure = exhausted_attempt_failure(KktAttemptPlan::equality_v1(), attempts, reason);
+
+        match failure {
+            KktFailure::BackendContractViolation {
+                attempts, reason, ..
+            } => {
+                assert_eq!(attempts.len(), 2);
+                assert!(attempts.iter().all(|attempt| {
+                    attempt.termination == SolveAttemptTermination::RejectedCandidate
+                        && attempt
+                            .residual
+                            .is_some_and(|evidence| evidence.normalized_backward_error.is_finite())
+                }));
+                assert_eq!(
+                    reason,
+                    BackendContractViolationReason::BackwardErrorExceeded {
+                        observed: residual.normalized_backward_error,
+                        limit: EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit,
+                    }
+                );
             }
             other => panic!("unexpected failure: {other:?}"),
         }
