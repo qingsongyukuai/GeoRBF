@@ -22,12 +22,14 @@ use crate::diagnostics::{
     RankEvidenceParts, RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts,
     ResidualDimension, ScalingFailureReason, ScalingSummary, SideConditionEvidence,
     SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
-    SolveCoordinateFailureReason,
+    SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
+    UninformativeSharedLevelSetEvidence,
 };
 use crate::functional::{
-    CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, RelationId,
+    CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, GroupId, RelationId,
     ResidualId, SemanticRolePath, SourceId, UsageProvenance,
 };
+use crate::geometry::FieldUnitLabel;
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::kkt::{
     AlgebraicAnalysisPhase as InternalBackendAnalysisPhase,
@@ -44,6 +46,7 @@ use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
 use crate::observation::ObservationInput;
 use crate::problem::{ProblemSnapshot, ThreadBudget};
+use crate::relation::{AdditiveFieldGaugeReference, SharedLevelSetInput};
 
 /// Successful fit output: one accepted model and its complete report.
 #[derive(Debug)]
@@ -116,6 +119,7 @@ impl ProblemSize {
         input_observations: usize,
         scalar_hard_relations: usize,
         canonical_hard_equalities: usize,
+        semantic_latents: usize,
     ) -> Self {
         let center_coefficients = canonical_hard_equalities;
         let primal_variables = center_coefficients + 4;
@@ -125,7 +129,7 @@ impl ProblemSize {
             scalar_hard_relations,
             canonical_hard_equalities,
             center_coefficients,
-            semantic_latents: 0,
+            semantic_latents,
             auxiliary_variables: 0,
             cone_blocks: 0,
             primal_variables,
@@ -189,6 +193,7 @@ impl ProblemSize {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HardRelationAssessment {
     source_id: SourceId,
+    group_id: Option<GroupId>,
     semantic_role: SemanticRolePath,
     dimension: ResidualDimension,
     target: f64,
@@ -207,6 +212,11 @@ impl HardRelationAssessment {
     /// Returns the caller-owned source identity.
     pub fn source_id(&self) -> &SourceId {
         &self.source_id
+    }
+
+    /// Returns the referenced semantic group, when this relation uses one.
+    pub fn group_id(&self) -> Option<&GroupId> {
+        self.group_id.as_ref()
     }
 
     /// Returns the stable semantic component path.
@@ -270,6 +280,37 @@ impl HardRelationAssessment {
     }
 }
 
+/// One recovered shared-level semantic latent in physical field units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedLevelValue {
+    group_id: GroupId,
+    value: f64,
+    field_unit: FieldUnitLabel,
+    member_source_ids: Box<[SourceId]>,
+}
+
+impl SharedLevelValue {
+    /// Returns the stable identity of the recovered semantic latent.
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+
+    /// Returns the recovered shared field value.
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// Returns the problem's caller-declared field-unit label.
+    pub fn field_unit(&self) -> &FieldUnitLabel {
+        &self.field_unit
+    }
+
+    /// Returns complete member provenance in stable SourceId order.
+    pub fn member_source_ids(&self) -> &[SourceId] {
+        &self.member_source_ids
+    }
+}
+
 /// Typed audit report shared by successful and failed fits.
 #[derive(Debug, Clone)]
 pub struct FitReport {
@@ -279,6 +320,7 @@ pub struct FitReport {
     numerical_policy: NumericalPolicyId,
     requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
+    shared_level_values: Vec<SharedLevelValue>,
     field_energy: Option<f64>,
     total_objective: Option<f64>,
     backend_fingerprint: Option<BackendFingerprint>,
@@ -292,6 +334,8 @@ pub struct FitReport {
     canonical_acceptance: Option<CanonicalAcceptanceEvidence>,
     capacity: Option<CapacityEvidence>,
     analysis_failure: Option<AnalysisFailureEvidence>,
+    unidentified_additive_gauge: Option<UnidentifiedAdditiveGaugeEvidence>,
+    uninformative_shared_level_set: Option<UninformativeSharedLevelSetEvidence>,
 }
 
 impl FitReport {
@@ -323,6 +367,11 @@ impl FitReport {
     /// Returns physical hard-relation recovery assessments in stable order.
     pub fn hard_relations(&self) -> &[HardRelationAssessment] {
         &self.hard_relations
+    }
+
+    /// Returns every recovered shared-level semantic latent in GroupId order.
+    pub fn shared_level_values(&self) -> &[SharedLevelValue] {
+        &self.shared_level_values
     }
 
     /// Returns accepted FieldEnergy, or `None` when no model was accepted.
@@ -396,15 +445,40 @@ impl FitReport {
     pub fn analysis_failure(&self) -> Option<&AnalysisFailureEvidence> {
         self.analysis_failure.as_ref()
     }
+
+    /// Returns structural evidence for a missing additive-field representative.
+    pub fn unidentified_additive_gauge(&self) -> Option<&UnidentifiedAdditiveGaugeEvidence> {
+        self.unidentified_additive_gauge.as_ref()
+    }
+
+    /// Returns structural evidence for a disconnected one-member shared level set.
+    pub fn uninformative_shared_level_set(&self) -> Option<&UninformativeSharedLevelSetEvidence> {
+        self.uninformative_shared_level_set.as_ref()
+    }
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
-    let scalar_observations = scalar_observations(&snapshot.inner.observations);
-    let lowering = lower_observations(&scalar_observations);
+    let scalar_inputs = scalar_inputs(snapshot);
+    let (level_gauges, level_gauge_conflict) = level_gauge_targets(snapshot);
+    let lowering = lower_snapshot(
+        &scalar_inputs,
+        &snapshot.inner.shared_level_sets,
+        &level_gauges,
+        &snapshot.inner.field_unit,
+    );
+    let scalar_relation_count = scalar_observations(&snapshot.inner.observations).len()
+        + snapshot
+            .inner
+            .shared_level_sets
+            .iter()
+            .map(|group| group.members().len())
+            .sum::<usize>()
+        + snapshot.inner.additive_field_gauges.len();
     let problem_size = ProblemSize::cubic_equality(
-        snapshot.inner.observations.len(),
-        lowering.source_relations.len(),
+        snapshot.inner.source_count,
+        scalar_relation_count,
         lowering.canonical_equalities.len(),
+        lowering.semantic_latents.len(),
     );
     let base_report = || FitReport {
         problem_size,
@@ -413,6 +487,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
+        shared_level_values: Vec::new(),
         field_energy: None,
         total_objective: None,
         backend_fingerprint: None,
@@ -426,12 +501,83 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         canonical_acceptance: None,
         capacity: None,
         analysis_failure: None,
+        unidentified_additive_gauge: None,
+        uninformative_shared_level_set: None,
     };
-    if let Some(conflict) = direct_input_conflict(&scalar_observations) {
+    if let Some(conflict) = level_gauge_conflict.or_else(|| lowering.direct_input_conflict.clone())
+    {
         let mut report = base_report();
         report.direct_input_conflict = Some(conflict);
         return Err(FitFailure {
             diagnosis: ProblemDiagnosis::DirectInputConflict,
+            report: Box::new(report),
+        });
+    }
+    let referenced_groups = level_gauges
+        .keys()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(group) = snapshot.inner.shared_level_sets.iter().find(|group| {
+        let distinct_locations = group
+            .members()
+            .iter()
+            .map(|member| {
+                member.location().components().map(|coordinate| {
+                    if coordinate == 0.0 {
+                        0.0_f64.to_bits()
+                    } else {
+                        coordinate.to_bits()
+                    }
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        distinct_locations < 2 && !referenced_groups.contains(group.group_id())
+    }) {
+        let mut report = base_report();
+        report.uninformative_shared_level_set = Some(UninformativeSharedLevelSetEvidence::new(
+            group.group_id().clone(),
+            group.members()[0].source_id().clone(),
+            false,
+        ));
+        return Err(FitFailure {
+            diagnosis: ProblemDiagnosis::UninformativeSharedLevelSet,
+            report: Box::new(report),
+        });
+    }
+    let has_absolute_reference = snapshot
+        .inner
+        .observations
+        .iter()
+        .any(|observation| matches!(observation, ObservationInput::FieldValue(_)))
+        || !snapshot.inner.additive_field_gauges.is_empty();
+    if !has_absolute_reference {
+        let mut source_ids = snapshot
+            .inner
+            .observations
+            .iter()
+            .map(|observation| observation.source_id().clone())
+            .chain(
+                snapshot
+                    .inner
+                    .shared_level_sets
+                    .iter()
+                    .flat_map(|group| group.members())
+                    .map(|member| member.source_id().clone()),
+            )
+            .collect::<Vec<_>>();
+        source_ids.sort();
+        let group_ids = snapshot
+            .inner
+            .shared_level_sets
+            .iter()
+            .map(|group| group.group_id().clone())
+            .collect();
+        let mut report = base_report();
+        report.unidentified_additive_gauge = Some(UnidentifiedAdditiveGaugeEvidence::new(
+            source_ids, group_ids, false,
+        ));
+        return Err(FitFailure {
+            diagnosis: ProblemDiagnosis::UnidentifiedAdditiveGauge,
             report: Box::new(report),
         });
     }
@@ -451,21 +597,32 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             });
         }
     };
+    let shared_level_values = recover_shared_level_values(&lowering.semantic_latents, &solution);
     let report = success_report(
         snapshot,
         problem_size,
         &solution,
-        &lowering.source_relations,
+        &lowering.public_source_relations,
+        &shared_level_values,
     );
-    let model = SolvedModel::new(snapshot.clone(), solution.field);
+    let model = SolvedModel::new(
+        snapshot.clone(),
+        solution.field,
+        shared_level_values
+            .iter()
+            .map(|level| (level.group_id.clone(), level.value))
+            .collect(),
+    );
     Ok(FitSuccess { model, report })
 }
 
 #[derive(Debug, Clone)]
 struct ScalarObservation {
     source_id: SourceId,
+    group_id: Option<GroupId>,
     support: [f64; 3],
     component: DirectInputComponent,
+    semantic_role: SemanticRolePath,
     target: f64,
 }
 
@@ -500,8 +657,10 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
         .flat_map(|observation| match observation {
             ObservationInput::FieldValue(observation) => vec![ScalarObservation {
                 source_id: observation.source_id().clone(),
+                group_id: None,
                 support: observation.location().components(),
                 component: DirectInputComponent::FieldValue,
+                semantic_role: SemanticRolePath::new("field-value-observation/value"),
                 target: observation.value(),
             }],
             ObservationInput::Gradient(observation) => observation
@@ -511,8 +670,12 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                 .enumerate()
                 .map(|(axis, target)| ScalarObservation {
                     source_id: observation.source_id().clone(),
+                    group_id: None,
                     support: observation.location().components(),
                     component: DirectInputComponent::Gradient(axis),
+                    semantic_role: SemanticRolePath::new(format!(
+                        "gradient-observation/component/{axis}"
+                    )),
                     target,
                 })
                 .collect(),
@@ -529,37 +692,279 @@ struct SourceHardRelation {
 #[derive(Debug, Clone)]
 struct EqualityLowering {
     source_relations: Vec<SourceHardRelation>,
+    public_source_relations: Vec<SourceHardRelation>,
     canonical_equalities: Vec<HardEquality>,
+    canonical_index_by_key: BTreeMap<FunctionalKey, (usize, f64)>,
+    direct_input_conflict: Option<DirectInputConflictEvidence>,
+    semantic_latents: Vec<CanonicalSharedLevelLatent>,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalSharedLevelLatent {
+    group_id: GroupId,
+    field_unit: FieldUnitLabel,
+    members: Vec<CanonicalSharedLevelMember>,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalSharedLevelMember {
+    source_id: SourceId,
+    support: [f64; 3],
 }
 
 fn lower_observations(observations: &[ScalarObservation]) -> EqualityLowering {
-    let mut canonical_index_by_key = BTreeMap::new();
-    let mut canonical_equalities = Vec::new();
-    let source_relations = observations
-        .iter()
-        .map(|observation| {
-            let equality = hard_equality(observation);
-            let next_index = canonical_equalities.len();
-            let canonical_index = *canonical_index_by_key
-                .entry(direct_input_key(observation.support, observation.component))
-                .or_insert_with(|| {
-                    canonical_equalities.push(equality.clone());
-                    next_index
-                });
-            SourceHardRelation {
-                equality,
-                canonical_index,
-            }
-        })
-        .collect();
-    EqualityLowering {
-        source_relations,
-        canonical_equalities,
+    let mut lowering = EqualityLowering {
+        public_source_relations: Vec::new(),
+        source_relations: Vec::new(),
+        canonical_equalities: Vec::new(),
+        canonical_index_by_key: BTreeMap::new(),
+        direct_input_conflict: None,
+        semantic_latents: Vec::new(),
+    };
+    for observation in observations {
+        lowering.push(hard_equality(observation), true);
+    }
+    lowering
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FunctionalKey {
+    dimension: u8,
+    terms: Vec<([u64; 3], u64, [u64; 3])>,
+}
+
+impl EqualityLowering {
+    fn push(&mut self, equality: HardEquality, public: bool) {
+        let (key, normalized_target) = normalized_equality_key(&equality);
+        let canonical_index =
+            if let Some((index, first_target)) = self.canonical_index_by_key.get(&key).copied() {
+                if first_target != normalized_target && self.direct_input_conflict.is_none() {
+                    let first = &self.canonical_equalities[index];
+                    self.direct_input_conflict = Some(DirectInputConflictEvidence::new(
+                        first.usage().provenance().source().clone(),
+                        equality.usage().provenance().source().clone(),
+                        equality.usage().provenance().semantic_role().clone(),
+                        first.target(),
+                        equality.target(),
+                    ));
+                }
+                index
+            } else {
+                let index = self.canonical_equalities.len();
+                self.canonical_equalities.push(equality.clone());
+                self.canonical_index_by_key
+                    .insert(key, (index, normalized_target));
+                index
+            };
+        let relation = SourceHardRelation {
+            equality,
+            canonical_index,
+        };
+        self.source_relations.push(relation.clone());
+        if public {
+            self.public_source_relations.push(relation);
+        }
     }
 }
 
+fn normalized_equality_key(equality: &HardEquality) -> (FunctionalKey, f64) {
+    let functional = equality.usage().functional();
+    let first_coefficient = functional
+        .terms()
+        .iter()
+        .flat_map(|term| {
+            std::iter::once(term.value_coefficient()).chain(term.gradient_coefficient())
+        })
+        .find(|coefficient| *coefficient != 0.0)
+        .expect("canonical functionals are nonzero");
+    let sign = if first_coefficient.is_sign_negative() {
+        -1.0
+    } else {
+        1.0
+    };
+    let dimension = match functional.dimension() {
+        FunctionalDimension::FieldValue => 0,
+        FunctionalDimension::FieldValuePerLength => 1,
+    };
+    let terms = functional
+        .terms()
+        .iter()
+        .map(|term| {
+            (
+                term.support().map(f64::to_bits),
+                signed_coefficient_bits(sign, term.value_coefficient()),
+                term.gradient_coefficient()
+                    .map(|coefficient| signed_coefficient_bits(sign, coefficient)),
+            )
+        })
+        .collect();
+    (FunctionalKey { dimension, terms }, sign * equality.target())
+}
+
+fn signed_coefficient_bits(sign: f64, coefficient: f64) -> u64 {
+    let value = sign * coefficient;
+    if value == 0.0 {
+        0.0_f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LevelGaugeTarget {
+    source_id: SourceId,
+    value: f64,
+}
+
+fn level_gauge_targets(
+    snapshot: &ProblemSnapshot,
+) -> (
+    BTreeMap<GroupId, LevelGaugeTarget>,
+    Option<DirectInputConflictEvidence>,
+) {
+    let mut targets = BTreeMap::<GroupId, LevelGaugeTarget>::new();
+    for gauge in &snapshot.inner.additive_field_gauges {
+        let AdditiveFieldGaugeReference::LevelSet(group_id) = gauge.reference() else {
+            continue;
+        };
+        if let Some(first) = targets.get(group_id).cloned() {
+            if first.value != gauge.value() {
+                return (
+                    targets,
+                    Some(DirectInputConflictEvidence::new(
+                        first.source_id.clone(),
+                        gauge.source_id().clone(),
+                        SemanticRolePath::new("additive-field-gauge/level-set"),
+                        first.value,
+                        gauge.value(),
+                    )),
+                );
+            }
+        } else {
+            targets.insert(
+                group_id.clone(),
+                LevelGaugeTarget {
+                    source_id: gauge.source_id().clone(),
+                    value: gauge.value(),
+                },
+            );
+        }
+    }
+    (targets, None)
+}
+
+fn scalar_inputs(snapshot: &ProblemSnapshot) -> Vec<ScalarObservation> {
+    let mut inputs = scalar_observations(&snapshot.inner.observations);
+    inputs.extend(
+        snapshot
+            .inner
+            .additive_field_gauges
+            .iter()
+            .filter_map(|gauge| match gauge.reference() {
+                AdditiveFieldGaugeReference::Point(point) => Some(ScalarObservation {
+                    source_id: gauge.source_id().clone(),
+                    group_id: None,
+                    support: point.components(),
+                    component: DirectInputComponent::FieldValue,
+                    semantic_role: SemanticRolePath::new("additive-field-gauge/point"),
+                    target: gauge.value(),
+                }),
+                AdditiveFieldGaugeReference::LevelSet(_) => None,
+            }),
+    );
+    inputs.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
+    inputs
+}
+
+fn lower_snapshot(
+    scalar_inputs: &[ScalarObservation],
+    groups: &[SharedLevelSetInput],
+    level_gauges: &BTreeMap<GroupId, LevelGaugeTarget>,
+    field_unit: &FieldUnitLabel,
+) -> EqualityLowering {
+    let mut lowering = lower_observations(scalar_inputs);
+    for group in groups {
+        lowering.semantic_latents.push(CanonicalSharedLevelLatent {
+            group_id: group.group_id().clone(),
+            field_unit: field_unit.clone(),
+            members: group
+                .members()
+                .iter()
+                .map(|member| CanonicalSharedLevelMember {
+                    source_id: member.source_id().clone(),
+                    support: member.location().components(),
+                })
+                .collect(),
+        });
+        if let Some(gauge) = level_gauges.get(group.group_id()) {
+            for member in group.members() {
+                let equality = hard_equality(&ScalarObservation {
+                    source_id: member.source_id().clone(),
+                    group_id: Some(group.group_id().clone()),
+                    support: member.location().components(),
+                    component: DirectInputComponent::FieldValue,
+                    semantic_role: SemanticRolePath::new("shared-level-set/member/value"),
+                    target: gauge.value,
+                });
+                lowering.push(equality, false);
+            }
+            continue;
+        }
+
+        for (index, member) in group.members()[1..].iter().enumerate() {
+            let previous_count = index + 1;
+            let mut terms = group.members()[..previous_count]
+                .iter()
+                .map(|previous| {
+                    FunctionalTerm::new(
+                        previous.location().components(),
+                        -1.0 / previous_count as f64,
+                        [0.0; 3],
+                    )
+                })
+                .collect::<Vec<_>>();
+            terms.push(FunctionalTerm::new(
+                member.location().components(),
+                1.0,
+                [0.0; 3],
+            ));
+            let Ok(functional) = CanonicalFunctional::new(FunctionalDimension::FieldValue, terms)
+            else {
+                continue;
+            };
+            let semantic_role = SemanticRolePath::new("shared-level-set/member-equality");
+            let relation_id = RelationId::new(format!(
+                "{}:{}:{}",
+                group.group_id().as_str(),
+                member.source_id().as_str(),
+                semantic_role.as_str()
+            ));
+            let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
+            let equality = HardEquality::new(
+                FunctionalUse::new(
+                    functional,
+                    UsageProvenance::new(
+                        member.source_id().clone(),
+                        Some(group.group_id().clone()),
+                        relation_id,
+                        residual_id,
+                        semantic_role,
+                    ),
+                ),
+                0.0,
+            );
+            lowering.push(equality, false);
+        }
+    }
+    lowering
+}
+
 fn hard_equality(observation: &ScalarObservation) -> HardEquality {
-    let semantic_role = observation.component.semantic_role();
+    let semantic_role = observation.semantic_role.clone();
     let functional = CanonicalFunctional::new(
         observation.dimension(),
         vec![FunctionalTerm::new(
@@ -580,7 +985,7 @@ fn hard_equality(observation: &ScalarObservation) -> HardEquality {
             functional,
             UsageProvenance::new(
                 observation.source_id.clone(),
-                None,
+                observation.group_id.clone(),
                 relation_id,
                 residual_id,
                 semantic_role,
@@ -595,20 +1000,21 @@ fn success_report(
     planned_problem_size: ProblemSize,
     solution: &CubicEqualitySolution,
     source_relations: &[SourceHardRelation],
+    shared_level_values: &[SharedLevelValue],
 ) -> FitReport {
     let problem_size = ProblemSize {
         input_observations: planned_problem_size.input_observations,
         scalar_hard_relations: planned_problem_size.scalar_hard_relations,
         canonical_hard_equalities: solution.assembly.hard_equalities,
         center_coefficients: solution.assembly.field_coefficients,
-        semantic_latents: solution.semantic_latent_count,
+        semantic_latents: planned_problem_size.semantic_latents,
         auxiliary_variables: 0,
         cone_blocks: 0,
         primal_variables: solution.assembly.primal_variables,
         equality_constraints: solution.assembly.side_conditions + solution.assembly.hard_equalities,
         kkt_dimension: solution.backend.capacity.kkt_dimension,
     };
-    let hard_relations = source_relations
+    let mut hard_relations = source_relations
         .iter()
         .map(|source_relation| {
             let usage = source_relation.equality.usage();
@@ -616,7 +1022,56 @@ fn success_report(
             let recovered_value = solution.field.evaluate_functional(usage.functional());
             hard_relation_assessment(source_relation, recovered_value, tolerance)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if !shared_level_values.is_empty() {
+        let tolerance = solution
+            .relation_tolerances
+            .iter()
+            .copied()
+            .filter(|evidence| evidence.dimension == FunctionalDimension::FieldValue)
+            .max_by(|left, right| left.physical_tolerance.total_cmp(&right.physical_tolerance))
+            .expect("a shared level set contributes a field-value equality");
+        for (group, recovered) in snapshot
+            .inner
+            .shared_level_sets
+            .iter()
+            .zip(shared_level_values)
+        {
+            for member in group.members() {
+                let field_value = solution.field.sample(member.location().components()).value;
+                hard_relations.push(hard_relation_assessment_from_parts(
+                    member.source_id().clone(),
+                    Some(group.group_id().clone()),
+                    SemanticRolePath::new("shared-level-set/member/value"),
+                    recovered.value,
+                    field_value,
+                    tolerance,
+                ));
+            }
+            hard_relations.extend(snapshot.inner.additive_field_gauges.iter().filter_map(
+                |gauge| match gauge.reference() {
+                    AdditiveFieldGaugeReference::LevelSet(group_id)
+                        if group_id == group.group_id() =>
+                    {
+                        Some(hard_relation_assessment_from_parts(
+                            gauge.source_id().clone(),
+                            Some(group.group_id().clone()),
+                            SemanticRolePath::new("additive-field-gauge/level-set"),
+                            gauge.value(),
+                            recovered.value,
+                            tolerance,
+                        ))
+                    }
+                    _ => None,
+                },
+            ));
+        }
+    }
+    hard_relations.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
     let backend_fingerprint = public_backend_fingerprint(&solution.backend.backend);
     let attempts = public_attempts(&solution.backend.attempts);
     FitReport {
@@ -626,6 +1081,7 @@ fn success_report(
         numerical_policy: solution.backend.numerical_policy,
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
+        shared_level_values: shared_level_values.to_vec(),
         field_energy: Some(solution.field_energy),
         total_objective: Some(solution.total_objective),
         backend_fingerprint: Some(backend_fingerprint),
@@ -647,6 +1103,8 @@ fn success_report(
         canonical_acceptance: Some(public_success_acceptance(solution)),
         capacity: None,
         analysis_failure: None,
+        unidentified_additive_gauge: None,
+        uninformative_shared_level_set: None,
     }
 }
 
@@ -659,6 +1117,7 @@ fn hard_relation_assessment(
     let target = source_relation.equality.target();
     HardRelationAssessment {
         source_id: usage.provenance().source().clone(),
+        group_id: usage.provenance().group().cloned(),
         semantic_role: usage.provenance().semantic_role().clone(),
         dimension: match usage.functional().dimension() {
             FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
@@ -677,72 +1136,66 @@ fn hard_relation_assessment(
     }
 }
 
-fn direct_input_conflict(
-    observations: &[ScalarObservation],
-) -> Option<DirectInputConflictEvidence> {
-    let mut first_by_key = BTreeMap::new();
-    for observation in observations {
-        if let Some(conflict) = register_direct_input(&mut first_by_key, observation) {
-            return Some(conflict);
-        }
+fn hard_relation_assessment_from_parts(
+    source_id: SourceId,
+    group_id: Option<GroupId>,
+    semantic_role: SemanticRolePath,
+    target: f64,
+    recovered_value: f64,
+    tolerance: CanonicalRelationToleranceEvidence,
+) -> HardRelationAssessment {
+    HardRelationAssessment {
+        source_id,
+        group_id,
+        semantic_role,
+        dimension: ResidualDimension::FieldValue,
+        target,
+        recovered_value,
+        residual: recovered_value - target,
+        tolerance: tolerance.physical_tolerance,
+        characteristic_scale: tolerance.characteristic_scale,
+        relation_reference_scale: target.abs(),
+        standard_tolerance: tolerance.standard_tolerance,
+        scaled_kkt_tolerance: tolerance.scaled_kkt_tolerance,
+        recovered_physical_tolerance: tolerance.recovered_physical_tolerance,
+        tolerance_round_trip_error: tolerance.round_trip_error,
     }
-    None
+}
+
+fn recover_shared_level_values(
+    latents: &[CanonicalSharedLevelLatent],
+    solution: &CubicEqualitySolution,
+) -> Vec<SharedLevelValue> {
+    latents
+        .iter()
+        .map(|latent| {
+            let values = latent
+                .members
+                .iter()
+                .map(|member| solution.field.sample(member.support).value)
+                .collect::<Vec<_>>();
+            let origin = values[0];
+            let value = origin
+                + values.iter().map(|value| *value - origin).sum::<f64>() / values.len() as f64;
+            SharedLevelValue {
+                group_id: latent.group_id.clone(),
+                value,
+                field_unit: latent.field_unit.clone(),
+                member_source_ids: latent
+                    .members
+                    .iter()
+                    .map(|member| member.source_id.clone())
+                    .collect::<Vec<_>>()
+                    .into(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DirectInputComponent {
     FieldValue,
     Gradient(usize),
-}
-
-impl DirectInputComponent {
-    fn semantic_role(self) -> SemanticRolePath {
-        match self {
-            Self::FieldValue => SemanticRolePath::new("field-value-observation/value"),
-            Self::Gradient(axis) => {
-                SemanticRolePath::new(format!("gradient-observation/component/{axis}"))
-            }
-        }
-    }
-}
-
-fn register_direct_input(
-    first_by_key: &mut BTreeMap<([u64; 3], DirectInputComponent), (SourceId, f64)>,
-    observation: &ScalarObservation,
-) -> Option<DirectInputConflictEvidence> {
-    let key = direct_input_key(observation.support, observation.component);
-    match first_by_key.entry(key) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert((observation.source_id.clone(), observation.target));
-            None
-        }
-        std::collections::btree_map::Entry::Occupied(entry) => {
-            let (first_source, first_target) = entry.get();
-            (*first_target != observation.target).then(|| {
-                DirectInputConflictEvidence::new(
-                    first_source.clone(),
-                    observation.source_id.clone(),
-                    observation.component.semantic_role(),
-                    *first_target,
-                    observation.target,
-                )
-            })
-        }
-    }
-}
-
-fn direct_input_key(
-    location: [f64; 3],
-    component: DirectInputComponent,
-) -> ([u64; 3], DirectInputComponent) {
-    let location = location.map(|coordinate| {
-        if coordinate == 0.0 {
-            0.0_f64.to_bits()
-        } else {
-            coordinate.to_bits()
-        }
-    });
-    (location, component)
 }
 
 fn failure_report(

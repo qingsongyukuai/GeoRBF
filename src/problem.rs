@@ -12,6 +12,7 @@ use crate::geometry::{FieldUnitLabel, GlobalAnisotropyMetric, InputCoordinateFra
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::numerical::NumericalPolicyId;
 use crate::observation::ObservationInput;
+use crate::relation::{AdditiveFieldGauge, AdditiveFieldGaugeReference, SharedLevelSetInput};
 
 /// Resource request for a synchronous fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +84,10 @@ pub struct ProblemBuilder {
     input_coordinate_frame: InputCoordinateFrame,
     field_unit: FieldUnitLabel,
     observations: Vec<ObservationInput>,
+    shared_level_sets: Vec<SharedLevelSetInput>,
+    additive_field_gauges: Vec<AdditiveFieldGauge>,
     source_ids: BTreeSet<SourceId>,
+    group_ids: BTreeSet<GroupId>,
     global_anisotropy_metric: Option<GlobalAnisotropyMetric>,
     fit_configuration: FitConfiguration,
 }
@@ -95,7 +99,10 @@ impl ProblemBuilder {
             input_coordinate_frame,
             field_unit,
             observations: Vec::new(),
+            shared_level_sets: Vec::new(),
+            additive_field_gauges: Vec::new(),
             source_ids: BTreeSet::new(),
+            group_ids: BTreeSet::new(),
             global_anisotropy_metric: None,
             fit_configuration: FitConfiguration::default(),
         }
@@ -126,9 +133,31 @@ impl ProblemBuilder {
     /// Validates cross-record state and creates an owning immutable snapshot.
     pub fn build(mut self) -> Result<ProblemSnapshot, BuildFailure> {
         let mut errors = Vec::new();
-        if self.observations.is_empty() {
+        if self.source_ids.is_empty() {
             errors.push(BuildError::NoObservations);
         }
+        let mut dangling_references = self
+            .additive_field_gauges
+            .iter()
+            .filter_map(|gauge| match gauge.reference() {
+                AdditiveFieldGaugeReference::Point(_) => None,
+                AdditiveFieldGaugeReference::LevelSet(group_id)
+                    if !self.group_ids.contains(group_id) =>
+                {
+                    Some((gauge.source_id().clone(), group_id.clone()))
+                }
+                AdditiveFieldGaugeReference::LevelSet(_) => None,
+            })
+            .collect::<Vec<_>>();
+        dangling_references.sort();
+        errors.extend(
+            dangling_references
+                .into_iter()
+                .map(|(source_id, group_id)| BuildError::UnknownGroupReference {
+                    source_id,
+                    group_id,
+                }),
+        );
         if let ThreadBudget::Exact(count) = self.fit_configuration.thread_budget {
             if count.get() != 1 {
                 errors.push(BuildError::UnsupportedThreadBudget {
@@ -144,10 +173,17 @@ impl ProblemBuilder {
         }
         self.observations
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.shared_level_sets
+            .sort_by(|left, right| left.group_id().cmp(right.group_id()));
+        self.additive_field_gauges
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
             input_coordinate_frame: self.input_coordinate_frame,
             field_unit: self.field_unit,
             observations: self.observations,
+            shared_level_sets: self.shared_level_sets,
+            additive_field_gauges: self.additive_field_gauges,
+            source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
             field_energy_normalization: FieldEnergyNormalization::all_hard(),
             global_anisotropy_metric: self
@@ -170,6 +206,47 @@ impl ProblemBuilder {
         }
         self.source_ids.insert(source_id);
         self.observations.push(observation);
+        Ok(())
+    }
+
+    pub(crate) fn add_shared_level_set(
+        &mut self,
+        group: SharedLevelSetInput,
+    ) -> Result<(), AddError> {
+        let group_id = group.group_id().clone();
+        if self.group_ids.contains(&group_id) {
+            return Err(AddError::DuplicateGroupId { group_id });
+        }
+        if let Some(member) = group
+            .members()
+            .iter()
+            .find(|member| self.source_ids.contains(member.source_id()))
+        {
+            return Err(AddError::DuplicateSourceId {
+                source_id: member.source_id().clone(),
+            });
+        }
+        self.group_ids.insert(group_id);
+        self.source_ids.extend(
+            group
+                .members()
+                .iter()
+                .map(|member| member.source_id().clone()),
+        );
+        self.shared_level_sets.push(group);
+        Ok(())
+    }
+
+    pub(crate) fn add_additive_field_gauge(
+        &mut self,
+        gauge: AdditiveFieldGauge,
+    ) -> Result<(), AddError> {
+        let source_id = gauge.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.additive_field_gauges.push(gauge);
         Ok(())
     }
 }
@@ -220,6 +297,29 @@ impl ProblemSnapshot {
     pub fn observation_count(&self) -> usize {
         self.inner.observations.len()
     }
+
+    /// Returns the number of general mathematical shared level sets.
+    pub fn shared_level_set_count(&self) -> usize {
+        self.inner
+            .shared_level_sets
+            .iter()
+            .filter(|group| !group.is_horizon())
+            .count()
+    }
+
+    /// Returns the number of geological horizons.
+    pub fn horizon_count(&self) -> usize {
+        self.inner
+            .shared_level_sets
+            .iter()
+            .filter(|group| group.is_horizon())
+            .count()
+    }
+
+    /// Returns the number of independently identified caller sources.
+    pub fn source_count(&self) -> usize {
+        self.inner.source_count
+    }
 }
 
 #[derive(Debug)]
@@ -227,6 +327,9 @@ pub(crate) struct ProblemData {
     pub(crate) input_coordinate_frame: InputCoordinateFrame,
     pub(crate) field_unit: FieldUnitLabel,
     pub(crate) observations: Vec<ObservationInput>,
+    pub(crate) shared_level_sets: Vec<SharedLevelSetInput>,
+    pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
+    pub(crate) source_count: usize,
     pub(crate) resolved_kernel: KernelConfig,
     pub(crate) field_energy_normalization: FieldEnergyNormalization,
     pub(crate) global_anisotropy_metric: GlobalAnisotropyMetric,
@@ -239,6 +342,8 @@ pub(crate) struct ProblemData {
 pub enum AddError {
     /// A top-level input reused an existing stable source identity.
     DuplicateSourceId { source_id: SourceId },
+    /// A complete group reused an existing stable group identity.
+    DuplicateGroupId { group_id: GroupId },
 }
 
 impl fmt::Display for AddError {
@@ -246,6 +351,9 @@ impl fmt::Display for AddError {
         match self {
             Self::DuplicateSourceId { source_id } => {
                 write!(formatter, "duplicate SourceId `{source_id}`")
+            }
+            Self::DuplicateGroupId { group_id } => {
+                write!(formatter, "duplicate GroupId `{group_id}`")
             }
         }
     }
@@ -274,13 +382,18 @@ impl fmt::Display for BuilderConfigurationError {
 impl Error for BuilderConfigurationError {}
 
 /// A deterministic cross-record build error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BuildError {
     /// The problem contains no observations.
     NoObservations,
     /// The current public Cubic Equality path is intentionally sequential.
     UnsupportedThreadBudget { requested: usize },
+    /// A relation references a GroupId absent from the completed snapshot.
+    UnknownGroupReference {
+        source_id: SourceId,
+        group_id: GroupId,
+    },
 }
 
 /// Failed snapshot construction, retaining the original builder for repair.

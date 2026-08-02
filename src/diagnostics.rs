@@ -2,7 +2,7 @@
 
 pub use crate::cubic_equality::RecoveryVerificationFailureReason as RecoveryVerificationReason;
 pub use crate::functional::SemanticRolePath;
-use crate::functional::SourceId;
+use crate::functional::{GroupId, SourceId};
 pub use crate::numerical::NumericalPolicyId;
 
 /// GeoRBF's semantic conclusion for a failed fit.
@@ -13,6 +13,10 @@ pub enum ProblemDiagnosis {
     InvalidProblem,
     /// Two locally comparable hard inputs have incompatible exact targets.
     DirectInputConflict,
+    /// Shift-invariant relations did not select an absolute field representative.
+    UnidentifiedAdditiveGauge,
+    /// A one-member shared level set did not constrain or connect its latent.
+    UninformativeSharedLevelSet,
     /// The observations did not identify every observable field mode.
     UnidentifiedFieldMode,
     /// A numerical decision fell between the versioned accept/reject bands.
@@ -25,6 +29,80 @@ pub enum ProblemDiagnosis {
     RecoveryVerificationFailure,
     /// Numerical execution failed without proving a stronger diagnosis.
     NumericalFailure,
+}
+
+/// Stable proof that every supplied relation is invariant to a global constant shift.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnidentifiedAdditiveGaugeEvidence {
+    source_ids: Box<[SourceId]>,
+    group_ids: Box<[GroupId]>,
+    backend_invoked: bool,
+}
+
+impl UnidentifiedAdditiveGaugeEvidence {
+    pub(crate) fn new(
+        source_ids: Vec<SourceId>,
+        group_ids: Vec<GroupId>,
+        backend_invoked: bool,
+    ) -> Self {
+        Self {
+            source_ids: source_ids.into(),
+            group_ids: group_ids.into(),
+            backend_invoked,
+        }
+    }
+
+    /// Returns every shift-invariant caller source in stable order.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns every affected semantic latent in stable group order.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Reports whether a backend was called before this structural conclusion.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+}
+
+/// Stable proof that one shared-level latent has no informative relation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UninformativeSharedLevelSetEvidence {
+    group_id: GroupId,
+    member_source_id: SourceId,
+    backend_invoked: bool,
+}
+
+impl UninformativeSharedLevelSetEvidence {
+    pub(crate) fn new(
+        group_id: GroupId,
+        member_source_id: SourceId,
+        backend_invoked: bool,
+    ) -> Self {
+        Self {
+            group_id,
+            member_source_id,
+            backend_invoked,
+        }
+    }
+
+    /// Returns the uninformative semantic latent's stable group identity.
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+
+    /// Returns the only member relation's caller-owned identity.
+    pub fn member_source_id(&self) -> &SourceId {
+        &self.member_source_id
+    }
+
+    /// Reports whether a backend was called before this structural conclusion.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
 }
 
 /// Stable source and target evidence for a direct hard-input contradiction.

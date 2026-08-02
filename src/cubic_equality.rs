@@ -1608,7 +1608,18 @@ fn canonical_relation_tolerances(
         targets,
         FunctionalDimension::FieldValuePerLength,
     );
-    let field_scale = (field_energy.abs() * representation.coordinates.length().powi(3)).sqrt();
+    let derivative_implied_field_scale = representation
+        .fitting_uses
+        .iter()
+        .zip(targets)
+        .filter(|(usage, _)| {
+            usage.functional().dimension() == FunctionalDimension::FieldValuePerLength
+        })
+        .map(|(_, target)| target.abs() * representation.coordinates.length())
+        .fold(0.0_f64, f64::max);
+    let field_scale = (field_energy.abs() * representation.coordinates.length().powi(3))
+        .sqrt()
+        .max(derivative_implied_field_scale);
     let mut standard_by_kkt_row = vec![0.0; backend.scaling.cumulative_exponents.len()];
     let mut tolerance_plans = representation
         .fitting_uses
