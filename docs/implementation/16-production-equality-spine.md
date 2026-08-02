@@ -19,10 +19,10 @@ resolved faer settings separately from the numerical-policy identity.
 
 The previously ambiguous factor workspace is obtained exactly from the public
 `cholesky_in_place_scratch::<usize, f64>` API with `Par::Seq` and faer's locked
-default LBLT parameters. The plan separately records the returned allocation
-size and alignment. It obtains solve scratch from the corresponding public
-`solve_in_place_scratch` API and uses the larger of the sequential workspaces
-in its conservative peak.
+version under GeoRBF's resolved `georbf-v1` LBLT parameters. The plan separately
+records the returned allocation size and alignment. It obtains solve scratch
+from the corresponding public `solve_in_place_scratch` API and uses the larger
+of the sequential workspaces in its conservative peak.
 
 For the 3×3 manufactured KKT, factor and solve scratch are each 64 bytes with
 64-byte alignment. The deterministic T14 boundary case accepts KKT dimension
