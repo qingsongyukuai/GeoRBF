@@ -20,9 +20,13 @@ include = [
     "/docs/implementation/19-public-absolute-field-tracer.md",
     "/docs/implementation/20-shared-level-set-gauge.md",
     "/docs/implementation/21-tangent-direction-observation.md",
+    "/docs/implementation/22-equality-builder-problem-snapshot-contract.md",
     "/docs/implementation/24-immutable-model-batch-query.md",
     "/validation/oracle/cubic-v1/**",
 ]
 
 [dependencies]
 faer = { version = "=0.24.4", default-features = false, features = ["linalg", "std"] }
+
+[dev-dependencies]
+proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
