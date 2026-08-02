@@ -48,6 +48,25 @@ FORBIDDEN_FEATURE_FRAGMENTS = (
     "pardiso",
     "sdp",
 )
+AUDITED_LOCKFILE_SHA256 = "5e65144f164b9a2de3de529877197fb7c3cc499ec91ba2ff64f4d4810f62361d"
+AUDITED_BUILD_SCRIPTS = {
+    "crunchy 0.2.4",
+    "libc 0.2.189",
+    "libm 0.2.16",
+    "nano-gemm-c32 0.2.1",
+    "nano-gemm-c64 0.2.1",
+    "nano-gemm-f32 0.2.1",
+    "nano-gemm-f64 0.2.1",
+    "num-traits 0.2.19",
+    "paste 1.0.15",
+    "private-gemm-x86 0.1.20",
+    "proc-macro2 1.0.107",
+    "pulp 0.22.3",
+    "quote 1.0.47",
+    "syn 1.0.109",
+    "thiserror 1.0.69",
+    "zerocopy 0.8.55",
+}
 
 
 def run(*command: str) -> str:
@@ -94,6 +113,13 @@ def main() -> int:
         for node in selected_nodes
     }
     failures: list[str] = []
+    lockfile = Path(__file__).resolve().parents[1] / "Cargo.lock"
+    lockfile_sha256 = hashlib.sha256(lockfile.read_bytes()).hexdigest()
+    if lockfile_sha256 != AUDITED_LOCKFILE_SHA256:
+        failures.append(
+            "lockfile identity is not in the audited pure-Rust envelope: "
+            f"{lockfile_sha256}"
+        )
 
     root = package_by_id[metadata["resolve"]["root"]]
     if root["name"] != "georbf":
@@ -143,6 +169,9 @@ def main() -> int:
         for package in selected_packages
         if any("custom-build" in target["kind"] for target in package["targets"])
     )
+    unaudited_build_scripts = set(build_scripts) - AUDITED_BUILD_SCRIPTS
+    for build_script in sorted(unaudited_build_scripts):
+        failures.append(f"unaudited build script selected: {build_script}")
     license_expressions = sorted(
         {
             package["license"]
@@ -157,12 +186,11 @@ def main() -> int:
             print(f"audit.failure={failure}")
         return 1
 
-    lockfile = Path(__file__).resolve().parents[1] / "Cargo.lock"
     print("audit.result=PROVEN")
     print(f"audit.rustc={rustc_version}")
     print(f"audit.target={host}")
     print(f"audit.packages={len(selected_packages)}")
-    print(f"audit.lockfile.sha256={hashlib.sha256(lockfile.read_bytes()).hexdigest()}")
+    print(f"audit.lockfile.sha256={lockfile_sha256}")
     print("audit.product.dependencies=faer")
     print(f"audit.faer.version={selected_faer[0]['version']}")
     print("audit.faer.features=linalg,std")

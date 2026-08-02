@@ -10,4 +10,8 @@
 #[allow(dead_code)]
 mod capacity;
 #[allow(dead_code)]
+mod faer_backend;
+#[allow(dead_code)]
 mod kkt;
+#[allow(dead_code)]
+mod numerical;

@@ -12,7 +12,7 @@ Probe: [`spikes/faer-clarabel`](../../spikes/faer-clarabel/README.md)
 
 **The dependency-platform spike is complete.** [Native matrix run 30706805264](https://github.com/qingsongyukuai/GeoRBF/actions/runs/30706805264) proves that the pinned pure-Rust routes build and provide the required dense KKT, rank/factorization, QP, SOCP, candidate, residual, certificate, settings, and exact-one-thread evidence on all five required native targets. This spike left `faer` factor-workspace capacity ambiguous. [Issue #16](../implementation/16-production-equality-spine.md) subsequently resolved that ambiguity with exact scratch-layout evidence and admitted only the `faer` equality route to the product tree.
 
-No product dependency has been added. The probe is a standalone, unpublished Rust crate outside the future `georbf` product tree.
+At the time of this spike, no product dependency had been added. The probe remains a standalone, unpublished Rust crate outside the `georbf` product tree; issue #16 later added only `faer` to the product manifest.
 
 ## Fixed envelope
 

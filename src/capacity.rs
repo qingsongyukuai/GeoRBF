@@ -1,7 +1,6 @@
 use std::mem::size_of;
 
-use faer::Par;
-use faer::linalg::cholesky::lblt::{factor, solve};
+use crate::faer_backend;
 
 pub(crate) const CAPACITY_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const REPORT_FIXED_BYTES: u64 = 512;
@@ -192,9 +191,8 @@ pub(crate) fn plan_equality_capacity(
 }
 
 fn faer_workspace(dimension: usize) -> Result<FaerWorkspaceEvidence, CapacityExceededEvidence> {
-    let factor =
-        factor::cholesky_in_place_scratch::<usize, f64>(dimension, Par::Seq, Default::default());
-    let solve = solve::solve_in_place_scratch::<usize, f64>(dimension, 1, Par::Seq);
+    let factor = faer_backend::factor_workspace_requirement(dimension);
+    let solve = faer_backend::solve_workspace_requirement(dimension);
     let factor_alignment = factor.align_bytes();
     let solve_alignment = solve.align_bytes();
     if factor_alignment == 0 {

@@ -1,13 +1,13 @@
 use faer::diag::{DiagMut, DiagRef};
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::lblt::{factor, solve};
-use faer::{Conj, MatMut, MatRef, Par};
+use faer::{Conj, MatMut, MatRef};
 
 use crate::capacity::{
     CapacityExceededEvidence, EqualityCapacityPlan, FaerWorkspaceEvidence, plan_equality_capacity,
 };
-
-const BACKWARD_ERROR_LIMIT: f64 = 1.0e-11;
+use crate::faer_backend;
+use crate::numerical::{EQUALITY_KKT_POLICY_V1, NumericalPolicyId};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EqualityKktSystem<'a> {
@@ -26,6 +26,9 @@ pub(crate) struct BackendFingerprint {
     pub(crate) crate_version: &'static str,
     pub(crate) features: [&'static str; 2],
     pub(crate) algorithm: &'static str,
+    pub(crate) lblt_pivoting: &'static str,
+    pub(crate) lblt_block_size: usize,
+    pub(crate) lblt_parallelism_threshold: usize,
     pub(crate) factor_workspace_source: &'static str,
     pub(crate) target_arch: &'static str,
     pub(crate) target_os: &'static str,
@@ -33,11 +36,18 @@ pub(crate) struct BackendFingerprint {
     pub(crate) actual_threads: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationScope {
+    BackendStandardForm,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct KktSolveEvidence {
     pub(crate) candidate: Vec<f64>,
     pub(crate) equality_multipliers: Vec<f64>,
     pub(crate) normalized_backward_error: f64,
+    pub(crate) numerical_policy: NumericalPolicyId,
+    pub(crate) verification_scope: VerificationScope,
     pub(crate) capacity: EqualityCapacityPlan,
     pub(crate) workspace: FaerWorkspaceEvidence,
     pub(crate) backend: BackendFingerprint,
@@ -111,8 +121,7 @@ pub(crate) fn solve_equality_kkt(
     let mut permutation = vec![0usize; dimension];
     let mut inverse_permutation = vec![0usize; dimension];
 
-    let factor_requirement =
-        factor::cholesky_in_place_scratch::<usize, f64>(dimension, Par::Seq, Default::default());
+    let factor_requirement = faer_backend::factor_workspace_requirement(dimension);
     let mut factor_memory =
         MemBuffer::try_new(factor_requirement).map_err(|_| KktFailure::WorkspaceAllocation {
             phase: "factor",
@@ -124,13 +133,13 @@ pub(crate) fn solve_equality_kkt(
         DiagMut::from_slice_mut(&mut subdiagonal),
         &mut permutation,
         &mut inverse_permutation,
-        Par::Seq,
+        faer_backend::parallelism(),
         MemStack::new(&mut factor_memory),
-        Default::default(),
+        faer_backend::lblt_params(),
     );
     drop(factor_memory);
 
-    let solve_requirement = solve::solve_in_place_scratch::<usize, f64>(dimension, 1, Par::Seq);
+    let solve_requirement = faer_backend::solve_workspace_requirement(dimension);
     let mut solve_memory =
         MemBuffer::try_new(solve_requirement).map_err(|_| KktFailure::WorkspaceAllocation {
             phase: "solve",
@@ -144,19 +153,20 @@ pub(crate) fn solve_equality_kkt(
         Conj::No,
         permutation,
         MatMut::from_column_major_slice_mut(&mut solution, dimension, 1),
-        Par::Seq,
+        faer_backend::parallelism(),
         MemStack::new(&mut solve_memory),
     );
 
     let normalized_backward_error =
         normalized_backward_error(&kkt, dimension, &solution, &original_rhs);
     if !normalized_backward_error.is_finite()
-        || normalized_backward_error > BACKWARD_ERROR_LIMIT
+        || normalized_backward_error
+            > EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit
         || solution.iter().any(|value| !value.is_finite())
     {
         return Err(KktFailure::BackendContractViolation {
             normalized_backward_error,
-            limit: BACKWARD_ERROR_LIMIT,
+            limit: EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit,
         });
     }
 
@@ -164,6 +174,8 @@ pub(crate) fn solve_equality_kkt(
         candidate: solution[..primal_variables].to_vec(),
         equality_multipliers: solution[primal_variables..].to_vec(),
         normalized_backward_error,
+        numerical_policy: EQUALITY_KKT_POLICY_V1.id,
+        verification_scope: VerificationScope::BackendStandardForm,
         workspace: capacity.faer_workspace.clone(),
         backend: backend_fingerprint(),
         capacity,
@@ -247,15 +259,18 @@ fn normalized_backward_error(
 fn backend_fingerprint() -> BackendFingerprint {
     BackendFingerprint {
         schema_version: 1,
-        crate_name: "faer",
-        crate_version: "0.24.4",
-        features: ["linalg", "std"],
-        algorithm: "LBLT Bunch-Kaufman",
-        factor_workspace_source: "faer::linalg::cholesky::lblt::factor::cholesky_in_place_scratch",
+        crate_name: faer_backend::CRATE_NAME,
+        crate_version: faer_backend::CRATE_VERSION,
+        features: faer_backend::FEATURES,
+        algorithm: faer_backend::ALGORITHM,
+        lblt_pivoting: faer_backend::PIVOTING,
+        lblt_block_size: faer_backend::BLOCK_SIZE,
+        lblt_parallelism_threshold: faer_backend::PARALLELISM_THRESHOLD,
+        factor_workspace_source: faer_backend::FACTOR_WORKSPACE_SOURCE,
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
-        requested_threads: 1,
-        actual_threads: Par::Seq.degree(),
+        requested_threads: faer_backend::REQUESTED_THREADS,
+        actual_threads: faer_backend::parallelism().degree(),
     }
 }
 
@@ -288,8 +303,16 @@ mod tests {
         assert_eq!(evidence.backend.crate_version, "0.24.4");
         assert_eq!(evidence.backend.features, ["linalg", "std"]);
         assert_eq!(evidence.backend.algorithm, "LBLT Bunch-Kaufman");
+        assert_eq!(evidence.backend.lblt_pivoting, "PartialDiag");
+        assert_eq!(evidence.backend.lblt_block_size, 64);
+        assert_eq!(evidence.backend.lblt_parallelism_threshold, 16_384);
         assert_eq!(evidence.backend.requested_threads, 1);
         assert_eq!(evidence.backend.actual_threads, 1);
+        assert_eq!(evidence.numerical_policy.0, "georbf-v1");
+        assert_eq!(
+            evidence.verification_scope,
+            VerificationScope::BackendStandardForm
+        );
     }
 
     #[test]

@@ -12,6 +12,10 @@ Requirements: PAPI-002, NUM-001, NUM-002, NUM-014, VAL-013, VAL-015
 symmetric-indefinite KKT route with only its `linalg` and `std` features. The
 crate uses faer's low-level LBLT interface so every factor and solve allocation
 is visible to GeoRBF's preflight plan. No other backend is admitted in v0.1.0.
+GeoRBF resolves and owns the `georbf-v1` policy, `PartialDiag` pivoting,
+64-column LBLT block, parallelism threshold, sequential execution, and `1e-11`
+backend-standard-form backward-error limit. BackendFingerprint records those
+resolved faer settings separately from the numerical-policy identity.
 
 The previously ambiguous factor workspace is obtained exactly from the public
 `cholesky_in_place_scratch::<usize, f64>` API with `Par::Seq` and faer's locked
@@ -38,6 +42,11 @@ sequential factor/solve scratch layouts. A peak over 8 GiB or any failed checked
 operation returns structured Capacity Exceeded evidence before assembly or a
 backend call.
 
+The Equality route creates neither CSC storage nor query scratch, so issue #16
+does not add placeholder budgets for those future capabilities. It also makes
+no reference-runner performance claim. Those parts of the broader NUM-014/T14
+seams become applicable only when their end-to-end product routes are admitted.
+
 ## Minimal consumer evidence
 
 The crate-internal consumer assembles and factors the manufactured system
@@ -48,11 +57,14 @@ The crate-internal consumer assembles and factors the manufactured system
 [1 1 0] [ 1.0]   [0]
 ```
 
-and independently computes normalized backward error, enforcing the `1e-11`
-contract. Its evidence owns the candidate, equality multiplier, capacity plan,
+and checks the candidate against the independent analytic literal shown above.
+It computes normalized backward error only as a dimensionless backend-standard-
+form contract check; it does not claim physical-unit canonical acceptance or
+produce a solved domain model. Its evidence owns the candidate, equality
+multiplier, numerical-policy identity, verification scope, capacity plan,
 factor/solve workspace, and a BackendFingerprint containing faer version,
-features, algorithm, scratch API, target, and requested/actual sequential
-thread count.
+features, resolved settings, scratch API, target, and requested/actual
+sequential thread count.
 
 ## Replay
 
@@ -64,6 +76,8 @@ cargo tree --locked --target all -e features
 cargo package --locked
 ```
 
-The product workflow repeats the Rust 1.85.0 check, behavior tests, fail-closed
-dependency/license audit, feature graph, and packaging check on all five native
-target families required by NUM-002.
+The product workflow repeats the Rust 1.85.0 check, issue #16 behavior tests,
+fail-closed dependency/license audit, feature graph, and packaging check on all
+five native target families required by NUM-002. The audit pins the reviewed
+lockfile identity, rejects any unreviewed build script, and then checks active
+packages, features, native links, and licenses on each target.
