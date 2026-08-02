@@ -41,14 +41,19 @@ physical target, recovered value, residual, tolerance, SourceId, dimension,
 and semantic role. It also records resolved kernel and normalization,
 NumericalPolicyId, FieldEnergy, total objective, backend fingerprint, and
 independent input, scalar-relation, latent, auxiliary, cone, primal, equality,
-and KKT dimensions. Every bounded attempt retains its algorithm, complete
-settings, scaling summary, refinement count, residual evidence, certificate
-presence, rejection reason, and full backend fingerprint. Backend termination
-remains distinct from the problem diagnosis. Failed backend and recovery paths
-retain the same available attempt and physical rejection evidence. Directly
-contradictory exact values or gradient components at one point are diagnosed
-before backend execution with both stable SourceIds, the semantic component,
-and incompatible targets.
+and KKT dimensions. Exact duplicate scalar facts are merged before
+representation so they cannot create artificial multiplier nullity, while an
+assessment for every original SourceId remains in the report. Every bounded
+attempt retains its algorithm, complete settings, scaling summary, refinement
+count, residual evidence, certificate presence, rejection reason, and full
+backend fingerprint. The report also retains Cubic polynomial/reduced-pairing
+condition evidence, backend rank and inertia, and the full physical canonical
+acceptance envelope. Backend termination remains distinct from the problem
+diagnosis. Failed backend and recovery paths retain the same available attempt,
+rank/inertia/capacity, per-source relation, side-condition, and physical
+rejection evidence. Directly contradictory exact values or gradient components
+at one point are diagnosed before backend execution with both stable SourceIds,
+the semantic component, and incompatible targets.
 
 Lowering derives stable internal RelationId and ResidualId values from each
 SourceId and semantic role. Equality assembly adds stable derived block, row,
@@ -60,7 +65,9 @@ fabricated because this ticket admits no conic relation.
 `SolvedModel::evaluate` returns one coherent `FieldSample` containing scalar
 value and the complete gradient in the caller's declared input frame. The
 model owns its snapshot, hides representer and polynomial coefficients, and is
-cheaply cloneable and `Send + Sync` for repeated concurrent reads.
+cheaply cloneable and `Send + Sync` for repeated concurrent reads. Its custom
+`Debug` representation is intentionally redacted so formatting cannot expose
+the hidden coefficients or polynomial.
 
 ## Validation evidence
 

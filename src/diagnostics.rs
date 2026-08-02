@@ -90,6 +90,556 @@ pub enum ResidualDimension {
     FieldValuePerLength,
 }
 
+/// Complete Cubic representation analysis retained by a successful fit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubicAnalysisEvidence {
+    fitting_functional_count: usize,
+    polynomial_dimension: usize,
+    polynomial_rank: usize,
+    polynomial_singular_values: Box<[f64]>,
+    polynomial_rrqr_ratio: f64,
+    polynomial_svd_ratio: f64,
+    polynomial_rank_reject_ratio: f64,
+    polynomial_rank_accept_ratio: f64,
+    null_space_defect: f64,
+    reduced_symmetry_defect: f64,
+    reduced_symmetry_defect_limit: f64,
+    reduced_smallest_singular_value: f64,
+    affine_reproduction_error: f64,
+    solve_coordinate_length: f64,
+    degenerate_extent: bool,
+}
+
+pub(crate) struct CubicAnalysisEvidenceParts {
+    pub(crate) fitting_functional_count: usize,
+    pub(crate) polynomial_dimension: usize,
+    pub(crate) polynomial_rank: usize,
+    pub(crate) polynomial_singular_values: Vec<f64>,
+    pub(crate) polynomial_rrqr_ratio: f64,
+    pub(crate) polynomial_svd_ratio: f64,
+    pub(crate) polynomial_rank_reject_ratio: f64,
+    pub(crate) polynomial_rank_accept_ratio: f64,
+    pub(crate) null_space_defect: f64,
+    pub(crate) reduced_symmetry_defect: f64,
+    pub(crate) reduced_symmetry_defect_limit: f64,
+    pub(crate) reduced_smallest_singular_value: f64,
+    pub(crate) affine_reproduction_error: f64,
+    pub(crate) solve_coordinate_length: f64,
+    pub(crate) degenerate_extent: bool,
+}
+
+impl CubicAnalysisEvidence {
+    pub(crate) fn new(parts: CubicAnalysisEvidenceParts) -> Self {
+        Self {
+            fitting_functional_count: parts.fitting_functional_count,
+            polynomial_dimension: parts.polynomial_dimension,
+            polynomial_rank: parts.polynomial_rank,
+            polynomial_singular_values: parts.polynomial_singular_values.into(),
+            polynomial_rrqr_ratio: parts.polynomial_rrqr_ratio,
+            polynomial_svd_ratio: parts.polynomial_svd_ratio,
+            polynomial_rank_reject_ratio: parts.polynomial_rank_reject_ratio,
+            polynomial_rank_accept_ratio: parts.polynomial_rank_accept_ratio,
+            null_space_defect: parts.null_space_defect,
+            reduced_symmetry_defect: parts.reduced_symmetry_defect,
+            reduced_symmetry_defect_limit: parts.reduced_symmetry_defect_limit,
+            reduced_smallest_singular_value: parts.reduced_smallest_singular_value,
+            affine_reproduction_error: parts.affine_reproduction_error,
+            solve_coordinate_length: parts.solve_coordinate_length,
+            degenerate_extent: parts.degenerate_extent,
+        }
+    }
+
+    /// Returns the number of unique fitting functionals in the representer span.
+    pub fn fitting_functional_count(&self) -> usize {
+        self.fitting_functional_count
+    }
+
+    /// Returns the complete Cubic polynomial-space dimension.
+    pub fn polynomial_dimension(&self) -> usize {
+        self.polynomial_dimension
+    }
+
+    /// Returns the accepted numerical rank of the polynomial pairing.
+    pub fn polynomial_rank(&self) -> usize {
+        self.polynomial_rank
+    }
+
+    /// Returns the polynomial-pairing singular values.
+    pub fn polynomial_singular_values(&self) -> &[f64] {
+        &self.polynomial_singular_values
+    }
+
+    /// Returns the polynomial RRQR rank ratio.
+    pub fn polynomial_rrqr_ratio(&self) -> f64 {
+        self.polynomial_rrqr_ratio
+    }
+
+    /// Returns the polynomial SVD rank ratio.
+    pub fn polynomial_svd_ratio(&self) -> f64 {
+        self.polynomial_svd_ratio
+    }
+
+    /// Returns the rank-rejection ratio boundary.
+    pub fn polynomial_rank_reject_ratio(&self) -> f64 {
+        self.polynomial_rank_reject_ratio
+    }
+
+    /// Returns the rank-acceptance ratio boundary.
+    pub fn polynomial_rank_accept_ratio(&self) -> f64 {
+        self.polynomial_rank_accept_ratio
+    }
+
+    /// Returns the null-space reconstruction defect.
+    pub fn null_space_defect(&self) -> f64 {
+        self.null_space_defect
+    }
+
+    /// Returns the reduced-pairing symmetry defect.
+    pub fn reduced_symmetry_defect(&self) -> f64 {
+        self.reduced_symmetry_defect
+    }
+
+    /// Returns the reduced-pairing symmetry-defect limit.
+    pub fn reduced_symmetry_defect_limit(&self) -> f64 {
+        self.reduced_symmetry_defect_limit
+    }
+
+    /// Returns the reduced pairing's smallest singular value.
+    pub fn reduced_smallest_singular_value(&self) -> f64 {
+        self.reduced_smallest_singular_value
+    }
+
+    /// Returns the complete-affine reproduction error.
+    pub fn affine_reproduction_error(&self) -> f64 {
+        self.affine_reproduction_error
+    }
+
+    /// Returns the characteristic solve-coordinate length.
+    pub fn solve_coordinate_length(&self) -> f64 {
+        self.solve_coordinate_length
+    }
+
+    /// Reports whether every support had zero geometric extent.
+    pub fn degenerate_extent(&self) -> bool {
+        self.degenerate_extent
+    }
+}
+
+/// Algebraic object whose numerical rank was assessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RankEvidenceDomain {
+    /// Complete Cubic polynomial pairing.
+    CubicPolynomialPairing,
+    /// Cubic reduced kernel pairing.
+    CubicReducedPairing,
+    /// Symmetric augmented backend KKT matrix.
+    BackendKkt,
+}
+
+/// Result of a versioned rank decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RankDecision {
+    /// The evidence lies above the acceptance boundary.
+    FullRank,
+    /// The evidence lies below the rejection boundary.
+    RankDeficient,
+    /// The evidence lies between the two decision boundaries.
+    NumericalDecisionGrayZone,
+}
+
+/// Quantified rank evidence for a representation or backend matrix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankEvidence {
+    domain: RankEvidenceDomain,
+    dimension: usize,
+    rank: Option<usize>,
+    exact_zero_index: Option<usize>,
+    rrqr_ratio: Option<f64>,
+    singular_values: Box<[f64]>,
+    svd_ratio: Option<f64>,
+    reject_ratio: Option<f64>,
+    accept_ratio: Option<f64>,
+    decision: RankDecision,
+    backend_invoked: bool,
+}
+
+pub(crate) struct RankEvidenceParts {
+    pub(crate) domain: RankEvidenceDomain,
+    pub(crate) dimension: usize,
+    pub(crate) rank: Option<usize>,
+    pub(crate) exact_zero_index: Option<usize>,
+    pub(crate) rrqr_ratio: Option<f64>,
+    pub(crate) singular_values: Vec<f64>,
+    pub(crate) svd_ratio: Option<f64>,
+    pub(crate) reject_ratio: Option<f64>,
+    pub(crate) accept_ratio: Option<f64>,
+    pub(crate) decision: RankDecision,
+    pub(crate) backend_invoked: bool,
+}
+
+impl RankEvidence {
+    pub(crate) fn new(parts: RankEvidenceParts) -> Self {
+        Self {
+            domain: parts.domain,
+            dimension: parts.dimension,
+            rank: parts.rank,
+            exact_zero_index: parts.exact_zero_index,
+            rrqr_ratio: parts.rrqr_ratio,
+            singular_values: parts.singular_values.into(),
+            svd_ratio: parts.svd_ratio,
+            reject_ratio: parts.reject_ratio,
+            accept_ratio: parts.accept_ratio,
+            decision: parts.decision,
+            backend_invoked: parts.backend_invoked,
+        }
+    }
+
+    /// Returns the object whose rank was assessed.
+    pub fn domain(&self) -> RankEvidenceDomain {
+        self.domain
+    }
+
+    /// Returns the assessed square dimension.
+    pub fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    /// Returns the estimated rank when the analysis produced one.
+    pub fn rank(&self) -> Option<usize> {
+        self.rank
+    }
+
+    /// Returns an exactly zero structural index, when found.
+    pub fn exact_zero_index(&self) -> Option<usize> {
+        self.exact_zero_index
+    }
+
+    /// Returns the RRQR decision ratio when available.
+    pub fn rrqr_ratio(&self) -> Option<f64> {
+        self.rrqr_ratio
+    }
+
+    /// Returns retained singular values in backend order.
+    pub fn singular_values(&self) -> &[f64] {
+        &self.singular_values
+    }
+
+    /// Returns the SVD decision ratio when available.
+    pub fn svd_ratio(&self) -> Option<f64> {
+        self.svd_ratio
+    }
+
+    /// Returns the rejection boundary when available.
+    pub fn reject_ratio(&self) -> Option<f64> {
+        self.reject_ratio
+    }
+
+    /// Returns the acceptance boundary when available.
+    pub fn accept_ratio(&self) -> Option<f64> {
+        self.accept_ratio
+    }
+
+    /// Returns the policy decision.
+    pub fn decision(&self) -> RankDecision {
+        self.decision
+    }
+
+    /// Reports whether the evidence proves full rank.
+    pub fn is_full_rank(&self) -> bool {
+        self.decision == RankDecision::FullRank
+    }
+
+    /// Reports whether a numerical backend had been invoked at this boundary.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+
+    /// Returns a largest-to-smallest singular-value condition estimate.
+    pub fn condition_estimate(&self) -> Option<f64> {
+        let largest = self
+            .singular_values
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .reduce(f64::max)?;
+        let smallest = self
+            .singular_values
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .reduce(f64::min)?;
+        if smallest == 0.0 {
+            return None;
+        }
+        let estimate = largest / smallest;
+        estimate.is_finite().then_some(estimate)
+    }
+}
+
+/// Positive, negative, and zero inertia counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InertiaCounts {
+    positive: usize,
+    negative: usize,
+    zero: usize,
+}
+
+impl InertiaCounts {
+    pub(crate) fn new(positive: usize, negative: usize, zero: usize) -> Self {
+        Self {
+            positive,
+            negative,
+            zero,
+        }
+    }
+
+    /// Returns the positive eigenvalue count.
+    pub fn positive(self) -> usize {
+        self.positive
+    }
+
+    /// Returns the negative eigenvalue count.
+    pub fn negative(self) -> usize {
+        self.negative
+    }
+
+    /// Returns the zero eigenvalue count.
+    pub fn zero(self) -> usize {
+        self.zero
+    }
+}
+
+/// Expected and observed inertia for the symmetric Equality KKT form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InertiaEvidence {
+    expected: InertiaCounts,
+    observed: InertiaCounts,
+    backend_invoked: bool,
+}
+
+impl InertiaEvidence {
+    pub(crate) fn new(
+        expected: InertiaCounts,
+        observed: InertiaCounts,
+        backend_invoked: bool,
+    ) -> Self {
+        Self {
+            expected,
+            observed,
+            backend_invoked,
+        }
+    }
+
+    /// Returns the convex Equality KKT inertia required by policy.
+    pub fn expected(self) -> InertiaCounts {
+        self.expected
+    }
+
+    /// Returns the independently observed inertia.
+    pub fn observed(self) -> InertiaCounts {
+        self.observed
+    }
+
+    /// Reports whether a candidate-producing backend was invoked.
+    pub fn backend_invoked(self) -> bool {
+        self.backend_invoked
+    }
+}
+
+/// Physical Cubic side-condition assessment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SideConditionEvidence {
+    components: [f64; 4],
+    tolerances: [f64; 4],
+    round_trip_error: f64,
+}
+
+impl SideConditionEvidence {
+    pub(crate) fn new(components: [f64; 4], tolerances: [f64; 4], round_trip_error: f64) -> Self {
+        Self {
+            components,
+            tolerances,
+            round_trip_error,
+        }
+    }
+
+    /// Returns constant/x/y/z side-condition components in physical coordinates.
+    pub fn components(self) -> [f64; 4] {
+        self.components
+    }
+
+    /// Returns the corresponding physical acceptance tolerances.
+    pub fn tolerances(self) -> [f64; 4] {
+        self.tolerances
+    }
+
+    /// Returns the forward/inverse side-condition round-trip error.
+    pub fn round_trip_error(self) -> f64 {
+        self.round_trip_error
+    }
+}
+
+/// Complete physical Recover-and-Verify acceptance evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanonicalAcceptanceEvidence {
+    accepted: bool,
+    recovery_finite: bool,
+    provenance_verified: bool,
+    side_condition: Option<SideConditionEvidence>,
+    field_value_hard_residual_max: Option<f64>,
+    field_value_per_length_hard_residual_max: Option<f64>,
+    polynomial_round_trip_error: Option<f64>,
+    field_coefficient_round_trip_error: Option<f64>,
+    field_energy_round_trip_error: Option<f64>,
+    tolerance_round_trip_error: Option<f64>,
+}
+
+pub(crate) struct CanonicalAcceptanceEvidenceParts {
+    pub(crate) accepted: bool,
+    pub(crate) recovery_finite: bool,
+    pub(crate) provenance_verified: bool,
+    pub(crate) side_condition: Option<SideConditionEvidence>,
+    pub(crate) hard_residual_maxima: Option<(f64, f64)>,
+    pub(crate) polynomial_round_trip_error: Option<f64>,
+    pub(crate) field_coefficient_round_trip_error: Option<f64>,
+    pub(crate) field_energy_round_trip_error: Option<f64>,
+    pub(crate) tolerance_round_trip_error: Option<f64>,
+}
+
+impl CanonicalAcceptanceEvidence {
+    pub(crate) fn new(parts: CanonicalAcceptanceEvidenceParts) -> Self {
+        Self {
+            accepted: parts.accepted,
+            recovery_finite: parts.recovery_finite,
+            provenance_verified: parts.provenance_verified,
+            side_condition: parts.side_condition,
+            field_value_hard_residual_max: parts.hard_residual_maxima.map(|maxima| maxima.0),
+            field_value_per_length_hard_residual_max: parts
+                .hard_residual_maxima
+                .map(|maxima| maxima.1),
+            polynomial_round_trip_error: parts.polynomial_round_trip_error,
+            field_coefficient_round_trip_error: parts.field_coefficient_round_trip_error,
+            field_energy_round_trip_error: parts.field_energy_round_trip_error,
+            tolerance_round_trip_error: parts.tolerance_round_trip_error,
+        }
+    }
+
+    /// Reports whether every canonical acceptance check passed.
+    pub fn accepted(&self) -> bool {
+        self.accepted
+    }
+
+    /// Reports whether every recovered physical quantity was finite.
+    pub fn recovery_finite(&self) -> bool {
+        self.recovery_finite
+    }
+
+    /// Reports whether canonical provenance survived assembly and recovery.
+    pub fn provenance_verified(&self) -> bool {
+        self.provenance_verified
+    }
+
+    /// Returns the complete Cubic side-condition assessment when reached.
+    pub fn side_condition(&self) -> Option<SideConditionEvidence> {
+        self.side_condition
+    }
+
+    /// Returns the maximum hard field-value residual when reached.
+    pub fn field_value_hard_residual_max(&self) -> Option<f64> {
+        self.field_value_hard_residual_max
+    }
+
+    /// Returns the maximum hard derivative residual when reached.
+    pub fn field_value_per_length_hard_residual_max(&self) -> Option<f64> {
+        self.field_value_per_length_hard_residual_max
+    }
+
+    /// Returns polynomial recovery round-trip error when reached.
+    pub fn polynomial_round_trip_error(&self) -> Option<f64> {
+        self.polynomial_round_trip_error
+    }
+
+    /// Returns field-coefficient recovery round-trip error when reached.
+    pub fn field_coefficient_round_trip_error(&self) -> Option<f64> {
+        self.field_coefficient_round_trip_error
+    }
+
+    /// Returns FieldEnergy recovery round-trip error when reached.
+    pub fn field_energy_round_trip_error(&self) -> Option<f64> {
+        self.field_energy_round_trip_error
+    }
+
+    /// Returns relation-tolerance recovery round-trip error when reached.
+    pub fn tolerance_round_trip_error(&self) -> Option<f64> {
+        self.tolerance_round_trip_error
+    }
+}
+
+/// Kind of checked capacity failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CapacityFailureKind {
+    /// Checked size arithmetic overflowed.
+    ArithmeticOverflow,
+    /// The planned peak exceeded the fixed capacity limit.
+    LimitExceeded,
+}
+
+/// Capacity evidence retained when allocation planning rejects a fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityEvidence {
+    kind: CapacityFailureKind,
+    limit_bytes: u64,
+    planned_peak_bytes: Option<u64>,
+    large_allocation_attempted: bool,
+    backend_invocation_attempted: bool,
+}
+
+impl CapacityEvidence {
+    pub(crate) fn new(
+        kind: CapacityFailureKind,
+        limit_bytes: u64,
+        planned_peak_bytes: Option<u64>,
+        large_allocation_attempted: bool,
+        backend_invocation_attempted: bool,
+    ) -> Self {
+        Self {
+            kind,
+            limit_bytes,
+            planned_peak_bytes,
+            large_allocation_attempted,
+            backend_invocation_attempted,
+        }
+    }
+
+    /// Returns why the checked capacity plan failed.
+    pub fn kind(self) -> CapacityFailureKind {
+        self.kind
+    }
+
+    /// Returns the fixed peak-memory limit.
+    pub fn limit_bytes(self) -> u64 {
+        self.limit_bytes
+    }
+
+    /// Returns the planned peak when it was representable.
+    pub fn planned_peak_bytes(self) -> Option<u64> {
+        self.planned_peak_bytes
+    }
+
+    /// Reports whether a large allocation had been attempted.
+    pub fn large_allocation_attempted(self) -> bool {
+        self.large_allocation_attempted
+    }
+
+    /// Reports whether a numerical backend had been invoked.
+    pub fn backend_invocation_attempted(self) -> bool {
+        self.backend_invocation_attempted
+    }
+}
+
 /// Backend termination evidence, distinct from [`ProblemDiagnosis`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -538,6 +1088,7 @@ impl SolveAttemptRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryVerificationEvidence {
     reasons: Vec<RecoveryVerificationReason>,
+    side_condition: Option<SideConditionEvidence>,
     field_value_hard_residual_max: Option<f64>,
     field_value_per_length_hard_residual_max: Option<f64>,
     polynomial_round_trip_error: Option<f64>,
@@ -547,31 +1098,42 @@ pub struct RecoveryVerificationEvidence {
     no_model_produced: bool,
 }
 
+pub(crate) struct RecoveryVerificationEvidenceParts {
+    pub(crate) reasons: Vec<RecoveryVerificationReason>,
+    pub(crate) side_condition: Option<SideConditionEvidence>,
+    pub(crate) hard_residual_maxima: Option<(f64, f64)>,
+    pub(crate) polynomial_round_trip_error: Option<f64>,
+    pub(crate) field_coefficient_round_trip_error: Option<f64>,
+    pub(crate) field_energy_round_trip_error: Option<f64>,
+    pub(crate) tolerance_round_trip_error: Option<f64>,
+    pub(crate) no_model_produced: bool,
+}
+
 impl RecoveryVerificationEvidence {
-    pub(crate) fn new(
-        reasons: Vec<RecoveryVerificationReason>,
-        hard_residual_maxima: Option<(f64, f64)>,
-        polynomial_round_trip_error: Option<f64>,
-        field_coefficient_round_trip_error: Option<f64>,
-        field_energy_round_trip_error: Option<f64>,
-        tolerance_round_trip_error: Option<f64>,
-        no_model_produced: bool,
-    ) -> Self {
+    pub(crate) fn new(parts: RecoveryVerificationEvidenceParts) -> Self {
         Self {
-            reasons,
-            field_value_hard_residual_max: hard_residual_maxima.map(|maxima| maxima.0),
-            field_value_per_length_hard_residual_max: hard_residual_maxima.map(|maxima| maxima.1),
-            polynomial_round_trip_error,
-            field_coefficient_round_trip_error,
-            field_energy_round_trip_error,
-            tolerance_round_trip_error,
-            no_model_produced,
+            reasons: parts.reasons,
+            side_condition: parts.side_condition,
+            field_value_hard_residual_max: parts.hard_residual_maxima.map(|maxima| maxima.0),
+            field_value_per_length_hard_residual_max: parts
+                .hard_residual_maxima
+                .map(|maxima| maxima.1),
+            polynomial_round_trip_error: parts.polynomial_round_trip_error,
+            field_coefficient_round_trip_error: parts.field_coefficient_round_trip_error,
+            field_energy_round_trip_error: parts.field_energy_round_trip_error,
+            tolerance_round_trip_error: parts.tolerance_round_trip_error,
+            no_model_produced: parts.no_model_produced,
         }
     }
 
     /// Returns every recovery rejection reason in deterministic order.
     pub fn reasons(&self) -> &[RecoveryVerificationReason] {
         &self.reasons
+    }
+
+    /// Returns the complete physical side-condition assessment when reached.
+    pub fn side_condition(&self) -> Option<SideConditionEvidence> {
+        self.side_condition
     }
 
     /// Returns the maximum hard field-value residual when recovery reached it.

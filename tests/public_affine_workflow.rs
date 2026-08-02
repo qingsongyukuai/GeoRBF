@@ -63,6 +63,17 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
             )
             .expect("the SourceId is unique");
     }
+    let aliased_location = point(-1.0, -1.0, -1.0);
+    builder
+        .add(
+            FieldValueObservation::try_new(
+                SourceId::new("value-alias"),
+                aliased_location,
+                affine_value(aliased_location),
+            )
+            .expect("the duplicate exact fact is finite"),
+        )
+        .expect("a distinct source may report the same exact fact");
 
     for (index, location) in [
         point(0.25, -0.5, 0.75),
@@ -120,8 +131,9 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
             && attempt.backend_fingerprint().actual_threads() == 1
     }));
     let problem_size = report.problem_size();
-    assert_eq!(problem_size.input_observations(), 8);
-    assert_eq!(problem_size.scalar_hard_relations(), 14);
+    assert_eq!(problem_size.input_observations(), 9);
+    assert_eq!(problem_size.scalar_hard_relations(), 15);
+    assert_eq!(problem_size.canonical_hard_equalities(), 14);
     assert_eq!(problem_size.center_coefficients(), 14);
     assert_eq!(problem_size.semantic_latents(), 0);
     assert_eq!(problem_size.auxiliary_variables(), 0);
@@ -150,7 +162,7 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     assert!(accepted_attempt.residual().is_some());
     assert_eq!(accepted_attempt.failure_reason(), None);
     assert_close(report.field_energy().expect("fit succeeded"), 0.0);
-    assert_eq!(report.hard_relations().len(), 14);
+    assert_eq!(report.hard_relations().len(), 15);
     assert!(report.hard_relations().iter().all(|relation| {
         relation.residual().abs() <= relation.tolerance()
             && !relation.source_id().as_str().is_empty()
@@ -169,7 +181,44 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
             "gradient-observation/component/2",
         ]
     );
+    assert_eq!(
+        report
+            .hard_relations()
+            .iter()
+            .filter(|relation| {
+                matches!(relation.source_id().as_str(), "value-0" | "value-alias")
+            })
+            .count(),
+        2
+    );
+
+    let cubic_analysis = report
+        .cubic_analysis()
+        .expect("the Cubic path retains representation rank and condition evidence");
+    assert_eq!(cubic_analysis.polynomial_dimension(), 4);
+    assert_eq!(cubic_analysis.polynomial_rank(), 4);
+    assert!(cubic_analysis.reduced_smallest_singular_value() > 0.0);
+    let backend_rank = report
+        .backend_rank()
+        .expect("the admitted KKT path retains rank evidence");
+    assert!(backend_rank.is_full_rank());
+    assert!(backend_rank.condition_estimate().is_some());
+    let inertia = report
+        .inertia()
+        .expect("the admitted KKT path retains inertia evidence");
+    assert_eq!(inertia.expected(), inertia.observed());
+    let acceptance = report
+        .canonical_acceptance()
+        .expect("success retains physical Recover-and-Verify evidence");
+    assert!(acceptance.accepted());
+    assert!(acceptance.recovery_finite());
+    assert!(acceptance.provenance_verified());
+    assert!(acceptance.side_condition().is_some());
 
     fn assert_send_sync_clone<T: Send + Sync + Clone>() {}
     assert_send_sync_clone::<georbf::SolvedModel>();
+    let model_debug = format!("{:?}", success.model());
+    assert_eq!(model_debug, "SolvedModel { .. }");
+    assert!(!model_debug.contains("coefficient"));
+    assert!(!model_debug.contains("polynomial"));
 }

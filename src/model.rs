@@ -9,9 +9,15 @@ use crate::geometry::{Point3, Vector3};
 use crate::problem::ProblemSnapshot;
 
 /// An owning, immutable, cheaply cloned solved field model.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SolvedModel {
     inner: Arc<SolvedModelData>,
+}
+
+impl fmt::Debug for SolvedModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SolvedModel { .. }")
+    }
 }
 
 impl SolvedModel {

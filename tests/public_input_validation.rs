@@ -1,4 +1,4 @@
-use georbf::diagnostics::ProblemDiagnosis;
+use georbf::diagnostics::{ProblemDiagnosis, RankDecision, RankEvidenceDomain};
 use georbf::geometry::{
     FieldUnitLabel, GeometryError, GlobalAnisotropyMetric, GlobalAnisotropyMetricError, Handedness,
     InputCoordinateFrame, LengthUnitLabel,
@@ -119,6 +119,14 @@ fn an_unidentified_field_returns_a_typed_failure_without_model_data() {
     assert_eq!(failure.report().problem_size().scalar_hard_relations(), 1);
     assert_eq!(failure.report().field_energy(), None);
     assert_eq!(failure.report().total_objective(), None);
+    let rank = failure
+        .report()
+        .rank_evidence()
+        .expect("the field-mode diagnosis retains its rank proof");
+    assert_eq!(rank.domain(), RankEvidenceDomain::CubicPolynomialPairing);
+    assert_eq!(rank.decision(), RankDecision::RankDeficient);
+    assert_eq!(rank.rank(), Some(1));
+    assert!(failure.report().backend_rank().is_none());
 }
 
 #[test]

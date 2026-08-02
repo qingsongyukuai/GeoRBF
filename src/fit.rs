@@ -4,16 +4,22 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use crate::capacity::{CapacityExceededEvidence, CapacityExceededReason};
 use crate::cubic_equality::{
-    CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, HardEquality,
+    CanonicalRelationToleranceEvidence, CpdEvidence, CubicEqualityCore, CubicEqualityFailure,
+    CubicEqualitySolution, HardEquality, PhysicalSideConditionEvidence,
     RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
     RepresentationFailure,
 };
 use crate::diagnostics::{
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
-    BackendFingerprintParts, DirectInputConflictEvidence, LinearResidualEvidence, ProblemDiagnosis,
-    RecoveryVerificationEvidence, ResidualDimension, ScalingSummary, SolveAttemptKind,
-    SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
+    BackendFingerprintParts, CanonicalAcceptanceEvidence, CanonicalAcceptanceEvidenceParts,
+    CapacityEvidence, CapacityFailureKind, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
+    DirectInputConflictEvidence, InertiaCounts, InertiaEvidence, LinearResidualEvidence,
+    ProblemDiagnosis, RankDecision, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
+    RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts, ResidualDimension,
+    ScalingSummary, SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord,
+    SolveAttemptRecordParts, SolveAttemptTermination,
 };
 use crate::functional::{
     CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, RelationId,
@@ -21,11 +27,12 @@ use crate::functional::{
 };
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::kkt::{
+    AlgebraicRankEvidence as InternalRankEvidence,
     BackendAttemptSettings as InternalAttemptSettings,
     BackendContractViolationReason as InternalBackendContractReason,
-    BackendFingerprint as InternalBackendFingerprint, KktAttemptFailureReason, KktAttemptKind,
-    KktAttemptRecord, KktFailure, NumericalFailureReason,
-    SolveAttemptTermination as InternalTermination,
+    BackendFingerprint as InternalBackendFingerprint, Inertia as InternalInertia,
+    KktAttemptFailureReason, KktAttemptKind, KktAttemptRecord, KktFailure, NumericalFailureReason,
+    RankClassification as InternalRankDecision, SolveAttemptTermination as InternalTermination,
 };
 use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
@@ -88,6 +95,7 @@ impl Error for FitFailure {}
 pub struct ProblemSize {
     input_observations: usize,
     scalar_hard_relations: usize,
+    canonical_hard_equalities: usize,
     center_coefficients: usize,
     semantic_latents: usize,
     auxiliary_variables: usize,
@@ -98,13 +106,18 @@ pub struct ProblemSize {
 }
 
 impl ProblemSize {
-    fn cubic_equality(input_observations: usize, scalar_hard_relations: usize) -> Self {
-        let center_coefficients = scalar_hard_relations;
+    fn cubic_equality(
+        input_observations: usize,
+        scalar_hard_relations: usize,
+        canonical_hard_equalities: usize,
+    ) -> Self {
+        let center_coefficients = canonical_hard_equalities;
         let primal_variables = center_coefficients + 4;
-        let equality_constraints = scalar_hard_relations + 4;
+        let equality_constraints = canonical_hard_equalities + 4;
         Self {
             input_observations,
             scalar_hard_relations,
+            canonical_hard_equalities,
             center_coefficients,
             semantic_latents: 0,
             auxiliary_variables: 0,
@@ -120,9 +133,14 @@ impl ProblemSize {
         self.input_observations
     }
 
-    /// Returns the number of scalar hard equality components after lowering.
+    /// Returns scalar hard components across every caller-owned source.
     pub fn scalar_hard_relations(self) -> usize {
         self.scalar_hard_relations
+    }
+
+    /// Returns the exact hard equalities retained after duplicate merging.
+    pub fn canonical_hard_equalities(self) -> usize {
+        self.canonical_hard_equalities
     }
 
     /// Returns the representer-center coefficient count.
@@ -171,6 +189,12 @@ pub struct HardRelationAssessment {
     recovered_value: f64,
     residual: f64,
     tolerance: f64,
+    characteristic_scale: f64,
+    relation_reference_scale: f64,
+    standard_tolerance: f64,
+    scaled_kkt_tolerance: f64,
+    recovered_physical_tolerance: f64,
+    tolerance_round_trip_error: f64,
 }
 
 impl HardRelationAssessment {
@@ -208,6 +232,36 @@ impl HardRelationAssessment {
     pub fn tolerance(&self) -> f64 {
         self.tolerance
     }
+
+    /// Returns the gauge-invariant characteristic scale used by policy.
+    pub fn characteristic_scale(&self) -> f64 {
+        self.characteristic_scale
+    }
+
+    /// Returns the relation-local physical reference scale.
+    pub fn relation_reference_scale(&self) -> f64 {
+        self.relation_reference_scale
+    }
+
+    /// Returns the tolerance in normalized representation coordinates.
+    pub fn standard_tolerance(&self) -> f64 {
+        self.standard_tolerance
+    }
+
+    /// Returns the tolerance after backend KKT scaling.
+    pub fn scaled_kkt_tolerance(&self) -> f64 {
+        self.scaled_kkt_tolerance
+    }
+
+    /// Returns the independently recovered physical tolerance.
+    pub fn recovered_physical_tolerance(&self) -> f64 {
+        self.recovered_physical_tolerance
+    }
+
+    /// Returns the tolerance forward/inverse round-trip error.
+    pub fn tolerance_round_trip_error(&self) -> f64 {
+        self.tolerance_round_trip_error
+    }
 }
 
 /// Typed audit report shared by successful and failed fits.
@@ -226,6 +280,11 @@ pub struct FitReport {
     recovery_verification: Option<RecoveryVerificationEvidence>,
     direct_input_conflict: Option<DirectInputConflictEvidence>,
     execution_failure: Option<AttemptFailureEvidence>,
+    cubic_analysis: Option<CubicAnalysisEvidence>,
+    backend_rank: Option<RankEvidence>,
+    inertia: Option<InertiaEvidence>,
+    canonical_acceptance: Option<CanonicalAcceptanceEvidence>,
+    capacity: Option<CapacityEvidence>,
 }
 
 impl FitReport {
@@ -293,12 +352,48 @@ impl FitReport {
     pub fn execution_failure(&self) -> Option<AttemptFailureEvidence> {
         self.execution_failure
     }
+
+    /// Returns complete Cubic representation analysis when construction succeeded.
+    pub fn cubic_analysis(&self) -> Option<&CubicAnalysisEvidence> {
+        self.cubic_analysis.as_ref()
+    }
+
+    /// Returns representation or backend rank evidence at the terminal boundary.
+    pub fn rank_evidence(&self) -> Option<&RankEvidence> {
+        self.backend_rank.as_ref()
+    }
+
+    /// Returns backend KKT rank evidence when that analysis was reached.
+    pub fn backend_rank(&self) -> Option<&RankEvidence> {
+        self.backend_rank
+            .as_ref()
+            .filter(|evidence| evidence.domain() == RankEvidenceDomain::BackendKkt)
+    }
+
+    /// Returns expected and observed Equality KKT inertia when available.
+    pub fn inertia(&self) -> Option<InertiaEvidence> {
+        self.inertia
+    }
+
+    /// Returns physical Recover-and-Verify acceptance evidence when reached.
+    pub fn canonical_acceptance(&self) -> Option<&CanonicalAcceptanceEvidence> {
+        self.canonical_acceptance.as_ref()
+    }
+
+    /// Returns checked capacity evidence when planning rejected the fit.
+    pub fn capacity(&self) -> Option<CapacityEvidence> {
+        self.capacity
+    }
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
-    let equalities = lower_observations(&snapshot.inner.observations);
-    let problem_size =
-        ProblemSize::cubic_equality(snapshot.inner.observations.len(), equalities.len());
+    let scalar_observations = scalar_observations(&snapshot.inner.observations);
+    let lowering = lower_observations(&scalar_observations);
+    let problem_size = ProblemSize::cubic_equality(
+        snapshot.inner.observations.len(),
+        lowering.source_relations.len(),
+        lowering.canonical_equalities.len(),
+    );
     let base_report = || FitReport {
         problem_size,
         resolved_kernel: snapshot.inner.resolved_kernel.clone(),
@@ -313,8 +408,13 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         recovery_verification: None,
         direct_input_conflict: None,
         execution_failure: None,
+        cubic_analysis: None,
+        backend_rank: None,
+        inertia: None,
+        canonical_acceptance: None,
+        capacity: None,
     };
-    if let Some(conflict) = direct_input_conflict(&snapshot.inner.observations) {
+    if let Some(conflict) = direct_input_conflict(&scalar_observations) {
         let mut report = base_report();
         report.direct_input_conflict = Some(conflict);
         return Err(FitFailure {
@@ -323,91 +423,157 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         });
     }
     let solution = match CubicEqualityCore::solve(
-        equalities,
+        lowering.canonical_equalities.clone(),
         snapshot.inner.global_anisotropy_metric.as_cubic_metric(),
     ) {
         Ok(solution) => solution,
         Err(failure) => {
             return Err(FitFailure {
                 diagnosis: diagnose(&failure),
-                report: Box::new(failure_report(base_report(), &failure)),
+                report: Box::new(failure_report(
+                    base_report(),
+                    &failure,
+                    &lowering.source_relations,
+                )),
             });
         }
     };
-    let report = success_report(snapshot, problem_size, &solution);
+    let report = success_report(
+        snapshot,
+        problem_size,
+        &solution,
+        &lowering.source_relations,
+    );
     let model = SolvedModel::new(snapshot.clone(), solution.field);
     Ok(FitSuccess { model, report })
 }
 
-fn lower_observations(observations: &[ObservationInput]) -> Vec<HardEquality> {
+#[derive(Debug, Clone)]
+struct ScalarObservation {
+    source_id: SourceId,
+    support: [f64; 3],
+    component: DirectInputComponent,
+    target: f64,
+}
+
+impl ScalarObservation {
+    fn dimension(&self) -> FunctionalDimension {
+        match self.component {
+            DirectInputComponent::FieldValue => FunctionalDimension::FieldValue,
+            DirectInputComponent::Gradient(_) => FunctionalDimension::FieldValuePerLength,
+        }
+    }
+
+    fn value_coefficient(&self) -> f64 {
+        match self.component {
+            DirectInputComponent::FieldValue => 1.0,
+            DirectInputComponent::Gradient(_) => 0.0,
+        }
+    }
+
+    fn gradient_coefficient(&self) -> [f64; 3] {
+        match self.component {
+            DirectInputComponent::FieldValue => [0.0; 3],
+            DirectInputComponent::Gradient(axis) => {
+                std::array::from_fn(|component| if component == axis { 1.0 } else { 0.0 })
+            }
+        }
+    }
+}
+
+fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservation> {
     observations
         .iter()
         .flat_map(|observation| match observation {
-            ObservationInput::FieldValue(observation) => vec![hard_equality(
-                observation.source_id(),
-                observation.location().components(),
-                FunctionalDimension::FieldValue,
-                1.0,
-                [0.0; 3],
-                observation.value(),
-                "field-value-observation/value".into(),
-            )],
-            ObservationInput::Gradient(observation) => {
-                let target = observation.gradient().components();
-                (0..3)
-                    .map(|axis| {
-                        hard_equality(
-                            observation.source_id(),
-                            observation.location().components(),
-                            FunctionalDimension::FieldValuePerLength,
-                            0.0,
-                            std::array::from_fn(
-                                |component| {
-                                    if component == axis { 1.0 } else { 0.0 }
-                                },
-                            ),
-                            target[axis],
-                            format!("gradient-observation/component/{axis}"),
-                        )
-                    })
-                    .collect()
-            }
+            ObservationInput::FieldValue(observation) => vec![ScalarObservation {
+                source_id: observation.source_id().clone(),
+                support: observation.location().components(),
+                component: DirectInputComponent::FieldValue,
+                target: observation.value(),
+            }],
+            ObservationInput::Gradient(observation) => observation
+                .gradient()
+                .components()
+                .into_iter()
+                .enumerate()
+                .map(|(axis, target)| ScalarObservation {
+                    source_id: observation.source_id().clone(),
+                    support: observation.location().components(),
+                    component: DirectInputComponent::Gradient(axis),
+                    target,
+                })
+                .collect(),
         })
         .collect()
 }
 
-fn hard_equality(
-    source_id: &SourceId,
-    support: [f64; 3],
-    dimension: FunctionalDimension,
-    value_coefficient: f64,
-    gradient_coefficient: [f64; 3],
-    target: f64,
-    semantic_role: String,
-) -> HardEquality {
+#[derive(Debug, Clone)]
+struct SourceHardRelation {
+    equality: HardEquality,
+    canonical_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EqualityLowering {
+    source_relations: Vec<SourceHardRelation>,
+    canonical_equalities: Vec<HardEquality>,
+}
+
+fn lower_observations(observations: &[ScalarObservation]) -> EqualityLowering {
+    let mut canonical_index_by_key = BTreeMap::new();
+    let mut canonical_equalities = Vec::new();
+    let source_relations = observations
+        .iter()
+        .map(|observation| {
+            let equality = hard_equality(observation);
+            let next_index = canonical_equalities.len();
+            let canonical_index = *canonical_index_by_key
+                .entry(direct_input_key(observation.support, observation.component))
+                .or_insert_with(|| {
+                    canonical_equalities.push(equality.clone());
+                    next_index
+                });
+            SourceHardRelation {
+                equality,
+                canonical_index,
+            }
+        })
+        .collect();
+    EqualityLowering {
+        source_relations,
+        canonical_equalities,
+    }
+}
+
+fn hard_equality(observation: &ScalarObservation) -> HardEquality {
+    let semantic_role = observation.component.semantic_role();
     let functional = CanonicalFunctional::new(
-        dimension,
+        observation.dimension(),
         vec![FunctionalTerm::new(
-            support,
-            value_coefficient,
-            gradient_coefficient,
+            observation.support,
+            observation.value_coefficient(),
+            observation.gradient_coefficient(),
         )],
     )
     .expect("checked public observations lower to a finite nonzero functional");
-    let relation_id = RelationId::new(format!("{}:{semantic_role}", source_id.as_str()));
+    let relation_id = RelationId::new(format!(
+        "{}:{}",
+        observation.source_id.as_str(),
+        semantic_role.as_str()
+    ));
     let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
     HardEquality::new(
         FunctionalUse::new(
             functional,
             UsageProvenance::new(
-                source_id.clone(),
+                observation.source_id.clone(),
                 None,
                 relation_id,
                 residual_id,
-                SemanticRolePath::new(semantic_role),
+                semantic_role,
             ),
         ),
-        target,
+        observation.target,
     )
 }
 
@@ -415,10 +581,12 @@ fn success_report(
     snapshot: &ProblemSnapshot,
     planned_problem_size: ProblemSize,
     solution: &CubicEqualitySolution,
+    source_relations: &[SourceHardRelation],
 ) -> FitReport {
     let problem_size = ProblemSize {
         input_observations: planned_problem_size.input_observations,
-        scalar_hard_relations: solution.assembly.hard_equalities,
+        scalar_hard_relations: planned_problem_size.scalar_hard_relations,
+        canonical_hard_equalities: solution.assembly.hard_equalities,
         center_coefficients: solution.assembly.field_coefficients,
         semantic_latents: solution.semantic_latent_count,
         auxiliary_variables: 0,
@@ -427,21 +595,13 @@ fn success_report(
         equality_constraints: solution.assembly.side_conditions + solution.assembly.hard_equalities,
         kkt_dimension: solution.backend.capacity.kkt_dimension,
     };
-    let hard_relations = solution
-        .hard_equalities
+    let hard_relations = source_relations
         .iter()
-        .zip(&solution.relation_tolerances)
-        .map(|(relation, tolerance)| HardRelationAssessment {
-            source_id: relation.usage.provenance().source().clone(),
-            semantic_role: relation.usage.provenance().semantic_role().clone(),
-            dimension: match relation.usage.functional().dimension() {
-                FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
-                FunctionalDimension::FieldValuePerLength => ResidualDimension::FieldValuePerLength,
-            },
-            target: relation.target,
-            recovered_value: relation.value,
-            residual: relation.residual,
-            tolerance: tolerance.physical_tolerance,
+        .map(|source_relation| {
+            let usage = source_relation.equality.usage();
+            let tolerance = solution.relation_tolerances[source_relation.canonical_index];
+            let recovered_value = solution.field.evaluate_functional(usage.functional());
+            hard_relation_assessment(source_relation, recovered_value, tolerance)
         })
         .collect();
     let backend_fingerprint = public_backend_fingerprint(&solution.backend.backend);
@@ -460,37 +620,56 @@ fn success_report(
         recovery_verification: None,
         direct_input_conflict: None,
         execution_failure: None,
+        cubic_analysis: Some(public_cubic_analysis(&solution.representation)),
+        backend_rank: Some(public_rank_evidence(
+            RankEvidenceDomain::BackendKkt,
+            solution.backend.capacity.kkt_dimension,
+            &solution.backend.rank,
+        )),
+        inertia: Some(public_inertia(
+            solution.backend.expected_inertia,
+            solution.backend.observed_inertia,
+            true,
+        )),
+        canonical_acceptance: Some(public_success_acceptance(solution)),
+        capacity: None,
     }
 }
 
-fn direct_input_conflict(observations: &[ObservationInput]) -> Option<DirectInputConflictEvidence> {
+fn hard_relation_assessment(
+    source_relation: &SourceHardRelation,
+    recovered_value: f64,
+    tolerance: CanonicalRelationToleranceEvidence,
+) -> HardRelationAssessment {
+    let usage = source_relation.equality.usage();
+    let target = source_relation.equality.target();
+    HardRelationAssessment {
+        source_id: usage.provenance().source().clone(),
+        semantic_role: usage.provenance().semantic_role().clone(),
+        dimension: match usage.functional().dimension() {
+            FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
+            FunctionalDimension::FieldValuePerLength => ResidualDimension::FieldValuePerLength,
+        },
+        target,
+        recovered_value,
+        residual: recovered_value - target,
+        tolerance: tolerance.physical_tolerance,
+        characteristic_scale: tolerance.characteristic_scale,
+        relation_reference_scale: tolerance.relation_reference_scale,
+        standard_tolerance: tolerance.standard_tolerance,
+        scaled_kkt_tolerance: tolerance.scaled_kkt_tolerance,
+        recovered_physical_tolerance: tolerance.recovered_physical_tolerance,
+        tolerance_round_trip_error: tolerance.round_trip_error,
+    }
+}
+
+fn direct_input_conflict(
+    observations: &[ScalarObservation],
+) -> Option<DirectInputConflictEvidence> {
     let mut first_by_key = BTreeMap::new();
     for observation in observations {
-        match observation {
-            ObservationInput::FieldValue(observation) => {
-                if let Some(conflict) = register_direct_input(
-                    &mut first_by_key,
-                    observation.location().components(),
-                    DirectInputComponent::FieldValue,
-                    observation.source_id(),
-                    observation.value(),
-                ) {
-                    return Some(conflict);
-                }
-            }
-            ObservationInput::Gradient(observation) => {
-                for (axis, target) in observation.gradient().components().into_iter().enumerate() {
-                    if let Some(conflict) = register_direct_input(
-                        &mut first_by_key,
-                        observation.location().components(),
-                        DirectInputComponent::Gradient(axis),
-                        observation.source_id(),
-                        target,
-                    ) {
-                        return Some(conflict);
-                    }
-                }
-            }
+        if let Some(conflict) = register_direct_input(&mut first_by_key, observation) {
+            return Some(conflict);
         }
     }
     None
@@ -515,11 +694,33 @@ impl DirectInputComponent {
 
 fn register_direct_input(
     first_by_key: &mut BTreeMap<([u64; 3], DirectInputComponent), (SourceId, f64)>,
+    observation: &ScalarObservation,
+) -> Option<DirectInputConflictEvidence> {
+    let key = direct_input_key(observation.support, observation.component);
+    match first_by_key.entry(key) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert((observation.source_id.clone(), observation.target));
+            None
+        }
+        std::collections::btree_map::Entry::Occupied(entry) => {
+            let (first_source, first_target) = entry.get();
+            (*first_target != observation.target).then(|| {
+                DirectInputConflictEvidence::new(
+                    first_source.clone(),
+                    observation.source_id.clone(),
+                    observation.component.semantic_role(),
+                    *first_target,
+                    observation.target,
+                )
+            })
+        }
+    }
+}
+
+fn direct_input_key(
     location: [f64; 3],
     component: DirectInputComponent,
-    source: &SourceId,
-    target: f64,
-) -> Option<DirectInputConflictEvidence> {
+) -> ([u64; 3], DirectInputComponent) {
     let location = location.map(|coordinate| {
         if coordinate == 0.0 {
             0.0_f64.to_bits()
@@ -527,46 +728,245 @@ fn register_direct_input(
             coordinate.to_bits()
         }
     });
-    match first_by_key.entry((location, component)) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert((source.clone(), target));
-            None
-        }
-        std::collections::btree_map::Entry::Occupied(entry) => {
-            let (first_source, first_target) = entry.get();
-            (*first_target != target).then(|| {
-                DirectInputConflictEvidence::new(
-                    first_source.clone(),
-                    source.clone(),
-                    component.semantic_role(),
-                    *first_target,
-                    target,
-                )
-            })
-        }
-    }
+    (location, component)
 }
 
-fn failure_report(mut report: FitReport, failure: &CubicEqualityFailure) -> FitReport {
+fn failure_report(
+    mut report: FitReport,
+    failure: &CubicEqualityFailure,
+    source_relations: &[SourceHardRelation],
+) -> FitReport {
     match failure {
-        CubicEqualityFailure::Backend(failure) => {
-            report.attempts = public_attempts(kkt_failure_attempts(failure));
-            report.execution_failure = public_kkt_failure(failure);
+        CubicEqualityFailure::Backend {
+            failure,
+            representation,
+        } => {
+            report.cubic_analysis = Some(public_cubic_analysis(representation));
+            retain_kkt_failure(&mut report, failure);
         }
         CubicEqualityFailure::Representation(failure) => {
-            if let RepresentationFailure::AffineReproductionBackend(failure) = failure.as_ref() {
-                report.attempts = public_attempts(kkt_failure_attempts(failure));
-                report.execution_failure = public_kkt_failure(failure);
-            }
+            retain_representation_failure(&mut report, failure);
         }
-        CubicEqualityFailure::RecoveryVerification { evidence, backend } => {
+        CubicEqualityFailure::RecoveryVerification {
+            evidence,
+            representation,
+            backend,
+        } => {
+            report.cubic_analysis = Some(public_cubic_analysis(representation));
             report.backend_fingerprint = Some(public_backend_fingerprint(&backend.backend));
             report.attempts = public_attempts(&backend.attempts);
+            report.backend_rank = Some(public_rank_evidence(
+                RankEvidenceDomain::BackendKkt,
+                backend.capacity.kkt_dimension,
+                &backend.rank,
+            ));
+            report.inertia = Some(public_inertia(
+                backend.expected_inertia,
+                backend.observed_inertia,
+                true,
+            ));
+            report.canonical_acceptance = public_failure_acceptance(evidence);
+            report.hard_relations = public_failed_hard_relations(evidence, source_relations);
             report.recovery_verification = Some(public_recovery_evidence(evidence));
         }
         CubicEqualityFailure::EmptyEqualitySet | CubicEqualityFailure::NonFiniteTarget { .. } => {}
     }
     report
+}
+
+fn retain_representation_failure(report: &mut FitReport, failure: &RepresentationFailure) {
+    let reduced_dimension = report
+        .problem_size
+        .canonical_hard_equalities
+        .saturating_sub(4);
+    match failure {
+        RepresentationFailure::Capacity(evidence) => {
+            report.capacity = Some(public_capacity(evidence));
+        }
+        RepresentationFailure::PolynomialRankDeficient { rank, .. } => {
+            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
+                domain: RankEvidenceDomain::CubicPolynomialPairing,
+                dimension: 4,
+                rank: Some(*rank),
+                exact_zero_index: None,
+                rrqr_ratio: None,
+                singular_values: Vec::new(),
+                svd_ratio: None,
+                reject_ratio: None,
+                accept_ratio: None,
+                decision: RankDecision::RankDeficient,
+                backend_invoked: false,
+            }));
+        }
+        RepresentationFailure::PolynomialRankGrayZone { evidence } => {
+            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
+                domain: RankEvidenceDomain::CubicPolynomialPairing,
+                dimension: 4,
+                rank: None,
+                exact_zero_index: None,
+                rrqr_ratio: Some(evidence.rrqr_ratio),
+                singular_values: Vec::new(),
+                svd_ratio: Some(evidence.svd_ratio),
+                reject_ratio: Some(evidence.reject_ratio),
+                accept_ratio: Some(evidence.accept_ratio),
+                decision: RankDecision::NumericalDecisionGrayZone,
+                backend_invoked: evidence.backend_invoked,
+            }));
+        }
+        RepresentationFailure::ReducedPairingGrayZone { solver_invoked, .. } => {
+            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
+                domain: RankEvidenceDomain::CubicReducedPairing,
+                dimension: reduced_dimension,
+                rank: None,
+                exact_zero_index: None,
+                rrqr_ratio: None,
+                singular_values: Vec::new(),
+                svd_ratio: None,
+                reject_ratio: None,
+                accept_ratio: None,
+                decision: RankDecision::NumericalDecisionGrayZone,
+                backend_invoked: *solver_invoked,
+            }));
+        }
+        RepresentationFailure::ReducedPairingNotPositive {
+            classification,
+            rank,
+            solver_invoked,
+            ..
+        } => {
+            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
+                domain: RankEvidenceDomain::CubicReducedPairing,
+                dimension: reduced_dimension,
+                rank: Some(*rank),
+                exact_zero_index: None,
+                rrqr_ratio: None,
+                singular_values: Vec::new(),
+                svd_ratio: None,
+                reject_ratio: None,
+                accept_ratio: None,
+                decision: match classification {
+                    ReducedPairingFailureClassification::RankDeficient => {
+                        RankDecision::RankDeficient
+                    }
+                    ReducedPairingFailureClassification::NegativeCurvature => {
+                        RankDecision::FullRank
+                    }
+                },
+                backend_invoked: *solver_invoked,
+            }));
+        }
+        RepresentationFailure::AffineReproductionBackend(failure) => {
+            retain_kkt_failure(report, failure);
+        }
+        _ => {}
+    }
+}
+
+fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
+    report.attempts = public_attempts(kkt_failure_attempts(failure));
+    report.execution_failure = public_kkt_failure(failure);
+    match failure {
+        KktFailure::Capacity(evidence) => {
+            report.capacity = Some(public_capacity(evidence));
+        }
+        KktFailure::RankDeficient { evidence }
+        | KktFailure::NumericalDecisionGrayZone { evidence } => {
+            report.backend_rank = Some(public_rank_evidence(
+                RankEvidenceDomain::BackendKkt,
+                report.problem_size.kkt_dimension,
+                evidence,
+            ));
+        }
+        KktFailure::UnexpectedInertia {
+            expected,
+            observed,
+            backend_invoked,
+        } => {
+            report.inertia = Some(public_inertia(*expected, *observed, *backend_invoked));
+        }
+        KktFailure::BackendContractViolation {
+            analysis: Some(analysis),
+            ..
+        }
+        | KktFailure::NumericalFailure {
+            analysis: Some(analysis),
+            ..
+        } => {
+            report.backend_rank = Some(public_rank_evidence(
+                RankEvidenceDomain::BackendKkt,
+                report.problem_size.kkt_dimension,
+                &analysis.rank,
+            ));
+            report.inertia = Some(public_inertia(
+                analysis.expected_inertia,
+                analysis.observed_inertia,
+                true,
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn public_capacity(evidence: &CapacityExceededEvidence) -> CapacityEvidence {
+    let (kind, planned_peak_bytes) = match &evidence.reason {
+        CapacityExceededReason::ArithmeticOverflow { .. } => {
+            (CapacityFailureKind::ArithmeticOverflow, None)
+        }
+        CapacityExceededReason::LimitExceeded {
+            planned_peak_bytes, ..
+        } => (
+            CapacityFailureKind::LimitExceeded,
+            Some(*planned_peak_bytes),
+        ),
+    };
+    CapacityEvidence::new(
+        kind,
+        evidence.limit_bytes,
+        planned_peak_bytes,
+        evidence.large_allocation_attempted,
+        evidence.backend_invocation_attempted,
+    )
+}
+
+fn public_failed_hard_relations(
+    evidence: &RecoveryVerificationFailureEvidence,
+    source_relations: &[SourceHardRelation],
+) -> Vec<HardRelationAssessment> {
+    let (Some(recovered), Some(tolerances)) =
+        (&evidence.hard_equalities, &evidence.relation_tolerances)
+    else {
+        return Vec::new();
+    };
+    source_relations
+        .iter()
+        .map(|source_relation| {
+            hard_relation_assessment(
+                source_relation,
+                recovered[source_relation.canonical_index].value,
+                tolerances[source_relation.canonical_index],
+            )
+        })
+        .collect()
+}
+
+fn public_failure_acceptance(
+    evidence: &RecoveryVerificationFailureEvidence,
+) -> Option<CanonicalAcceptanceEvidence> {
+    Some(CanonicalAcceptanceEvidence::new(
+        CanonicalAcceptanceEvidenceParts {
+            accepted: false,
+            recovery_finite: evidence.recovery_finite?,
+            provenance_verified: evidence.provenance_verified?,
+            side_condition: evidence.side_condition.map(public_side_condition),
+            hard_residual_maxima: evidence
+                .hard_equality_violations
+                .map(|envelope| (envelope.field_value, envelope.field_value_per_length)),
+            polynomial_round_trip_error: evidence.polynomial_round_trip_error,
+            field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
+            field_energy_round_trip_error: evidence.field_energy_round_trip_error,
+            tolerance_round_trip_error: evidence.tolerance_round_trip_error,
+        },
+    ))
 }
 
 fn kkt_failure_attempts(failure: &KktFailure) -> &[KktAttemptRecord] {
@@ -713,20 +1113,103 @@ fn public_backend_contract_failure(
     }
 }
 
+fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
+    CubicAnalysisEvidence::new(CubicAnalysisEvidenceParts {
+        fitting_functional_count: evidence.fitting_functional_count,
+        polynomial_dimension: evidence.polynomial_dimension,
+        polynomial_rank: evidence.polynomial_rank,
+        polynomial_singular_values: evidence.singular_values.clone(),
+        polynomial_rrqr_ratio: evidence.polynomial_rrqr_ratio,
+        polynomial_svd_ratio: evidence.polynomial_svd_ratio,
+        polynomial_rank_reject_ratio: evidence.polynomial_rank_reject_ratio,
+        polynomial_rank_accept_ratio: evidence.polynomial_rank_accept_ratio,
+        null_space_defect: evidence.null_space_defect,
+        reduced_symmetry_defect: evidence.reduced_symmetry_defect,
+        reduced_symmetry_defect_limit: evidence.symmetry_defect_limit,
+        reduced_smallest_singular_value: evidence.reduced_smallest_singular_value,
+        affine_reproduction_error: evidence.affine_reproduction_error,
+        solve_coordinate_length: evidence.solve_coordinate_length,
+        degenerate_extent: evidence.degenerate_extent,
+    })
+}
+
+fn public_rank_evidence(
+    domain: RankEvidenceDomain,
+    dimension: usize,
+    evidence: &InternalRankEvidence,
+) -> RankEvidence {
+    let decision = match evidence.classification {
+        InternalRankDecision::FullRank => RankDecision::FullRank,
+        InternalRankDecision::RankDeficient => RankDecision::RankDeficient,
+        InternalRankDecision::NumericalDecisionGrayZone => RankDecision::NumericalDecisionGrayZone,
+    };
+    RankEvidence::new(RankEvidenceParts {
+        domain,
+        dimension,
+        rank: (decision == RankDecision::FullRank).then_some(dimension),
+        exact_zero_index: evidence.exact_zero_index,
+        rrqr_ratio: Some(evidence.rrqr_ratio),
+        singular_values: evidence.singular_values.clone(),
+        svd_ratio: Some(evidence.svd_ratio),
+        reject_ratio: Some(evidence.reject_ratio),
+        accept_ratio: Some(evidence.accept_ratio),
+        decision,
+        backend_invoked: evidence.backend_invoked,
+    })
+}
+
+fn public_inertia(
+    expected: InternalInertia,
+    observed: InternalInertia,
+    backend_invoked: bool,
+) -> InertiaEvidence {
+    InertiaEvidence::new(
+        InertiaCounts::new(expected.positive, expected.negative, expected.zero),
+        InertiaCounts::new(observed.positive, observed.negative, observed.zero),
+        backend_invoked,
+    )
+}
+
+fn public_side_condition(evidence: PhysicalSideConditionEvidence) -> SideConditionEvidence {
+    SideConditionEvidence::new(
+        evidence.components,
+        evidence.physical_tolerances,
+        evidence.round_trip_error,
+    )
+}
+
+fn public_success_acceptance(solution: &CubicEqualitySolution) -> CanonicalAcceptanceEvidence {
+    CanonicalAcceptanceEvidence::new(CanonicalAcceptanceEvidenceParts {
+        accepted: true,
+        recovery_finite: solution.recovery_finite,
+        provenance_verified: solution.provenance_verified,
+        side_condition: Some(public_side_condition(solution.side_condition)),
+        hard_residual_maxima: Some((
+            solution.hard_equality_violations.field_value,
+            solution.hard_equality_violations.field_value_per_length,
+        )),
+        polynomial_round_trip_error: Some(solution.polynomial_round_trip_error),
+        field_coefficient_round_trip_error: Some(solution.field_coefficient_round_trip_error),
+        field_energy_round_trip_error: Some(solution.field_energy_round_trip_error),
+        tolerance_round_trip_error: Some(solution.tolerance_round_trip_error),
+    })
+}
+
 fn public_recovery_evidence(
     evidence: &RecoveryVerificationFailureEvidence,
 ) -> RecoveryVerificationEvidence {
-    RecoveryVerificationEvidence::new(
-        evidence.reasons.clone(),
-        evidence
+    RecoveryVerificationEvidence::new(RecoveryVerificationEvidenceParts {
+        reasons: evidence.reasons.clone(),
+        side_condition: evidence.side_condition.map(public_side_condition),
+        hard_residual_maxima: evidence
             .hard_equality_violations
             .map(|envelope| (envelope.field_value, envelope.field_value_per_length)),
-        evidence.polynomial_round_trip_error,
-        evidence.field_coefficient_round_trip_error,
-        evidence.field_energy_round_trip_error,
-        evidence.tolerance_round_trip_error,
-        evidence.no_model_produced,
-    )
+        polynomial_round_trip_error: evidence.polynomial_round_trip_error,
+        field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
+        field_energy_round_trip_error: evidence.field_energy_round_trip_error,
+        tolerance_round_trip_error: evidence.tolerance_round_trip_error,
+        no_model_produced: evidence.no_model_produced,
+    })
 }
 
 fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
@@ -735,7 +1218,7 @@ fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
             ProblemDiagnosis::InvalidProblem
         }
         CubicEqualityFailure::Representation(failure) => diagnose_representation(failure),
-        CubicEqualityFailure::Backend(failure) => diagnose_kkt(failure),
+        CubicEqualityFailure::Backend { failure, .. } => diagnose_kkt(failure),
         CubicEqualityFailure::RecoveryVerification { .. } => {
             ProblemDiagnosis::RecoveryVerificationFailure
         }
@@ -774,5 +1257,43 @@ fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
         KktFailure::NumericalDecisionGrayZone { .. } => ProblemDiagnosis::NumericalDecisionGrayZone,
         KktFailure::BackendContractViolation { .. } => ProblemDiagnosis::BackendContractViolation,
         _ => ProblemDiagnosis::NumericalFailure,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cubic_equality::RecoveryVerificationFailureReason;
+
+    #[test]
+    fn recovery_mapping_retains_quantified_side_condition_evidence() {
+        let evidence = RecoveryVerificationFailureEvidence {
+            reasons: vec![RecoveryVerificationFailureReason::SideConditionViolation],
+            side_condition: Some(PhysicalSideConditionEvidence {
+                components: [1.0, 2.0, 3.0, 4.0],
+                physical_tolerances: [0.1, 0.2, 0.3, 0.4],
+                standard_components: [5.0, 6.0, 7.0, 8.0],
+                recovered_standard_components: [5.0, 6.0, 7.0, 8.0],
+                round_trip_error: 9.0e-12,
+            }),
+            hard_equalities: None,
+            relation_tolerances: None,
+            hard_equality_violations: None,
+            polynomial_round_trip_error: None,
+            field_coefficient_round_trip_error: None,
+            field_energy_round_trip_error: None,
+            tolerance_round_trip_error: None,
+            recovery_finite: Some(true),
+            provenance_verified: Some(true),
+            no_model_produced: true,
+        };
+
+        let public = public_recovery_evidence(&evidence);
+        let side = public
+            .side_condition()
+            .expect("the complete physical side-condition evidence survives mapping");
+        assert_eq!(side.components(), [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(side.tolerances(), [0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(side.round_trip_error(), 9.0e-12);
     }
 }

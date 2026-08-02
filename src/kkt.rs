@@ -342,6 +342,13 @@ pub(crate) struct KktSolveEvidence {
     pub(crate) attempt_plan: KktAttemptPlan,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompletedKktAnalysis {
+    pub(crate) rank: AlgebraicRankEvidence,
+    pub(crate) expected_inertia: Inertia,
+    pub(crate) observed_inertia: Inertia,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KktInputField {
     Hessian,
@@ -401,11 +408,13 @@ pub(crate) enum KktFailure {
         attempt_plan: KktAttemptPlan,
         attempts: Vec<KktAttemptRecord>,
         reason: BackendContractViolationReason,
+        analysis: Option<Box<CompletedKktAnalysis>>,
     },
     NumericalFailure {
         attempt_plan: KktAttemptPlan,
         attempts: Vec<KktAttemptRecord>,
         reason: NumericalFailureReason,
+        analysis: Option<Box<CompletedKktAnalysis>>,
     },
 }
 
@@ -463,6 +472,11 @@ pub(crate) fn solve_equality_kkt(
             backend_invoked: false,
         });
     }
+    let completed_analysis = CompletedKktAnalysis {
+        rank: rank.clone(),
+        expected_inertia,
+        observed_inertia,
+    };
 
     let scaling_summary = ScalingSummary {
         method: "block-aware Ruiz max-norm diagonal congruence",
@@ -511,7 +525,12 @@ pub(crate) fn solve_equality_kkt(
                     reason,
                 ));
                 if let Some(reason) = reason {
-                    return Err(exhausted_attempt_failure(attempt_plan, attempts, reason));
+                    return Err(exhausted_attempt_failure(
+                        attempt_plan,
+                        attempts,
+                        reason,
+                        Some(&completed_analysis),
+                    ));
                 }
                 (
                     candidate,
@@ -541,6 +560,7 @@ pub(crate) fn solve_equality_kkt(
                     attempt_plan,
                     attempts,
                     KktAttemptFailureReason::Numerical(reason),
+                    Some(&completed_analysis),
                 ));
             }
         }
@@ -564,6 +584,7 @@ pub(crate) fn solve_equality_kkt(
             attempt_plan,
             attempts,
             reason,
+            analysis: Some(Box::new(completed_analysis)),
         });
     }
 
@@ -850,17 +871,20 @@ fn exhausted_attempt_failure(
     attempt_plan: KktAttemptPlan,
     attempts: Vec<KktAttemptRecord>,
     reason: KktAttemptFailureReason,
+    analysis: Option<&CompletedKktAnalysis>,
 ) -> KktFailure {
     match reason {
         KktAttemptFailureReason::BackendContract(reason) => KktFailure::BackendContractViolation {
             attempt_plan,
             attempts,
             reason,
+            analysis: analysis.cloned().map(Box::new),
         },
         KktAttemptFailureReason::Numerical(reason) => KktFailure::NumericalFailure {
             attempt_plan,
             attempts,
             reason,
+            analysis: analysis.cloned().map(Box::new),
         },
     }
 }
@@ -1166,6 +1190,7 @@ mod tests {
                 attempt_plan,
                 attempts,
                 reason,
+                ..
             } => {
                 assert_eq!(reason, BackendContractViolationReason::NonFiniteCandidate);
                 assert_eq!(attempt_plan.numerical_policy.as_str(), "georbf-v1");
@@ -1229,7 +1254,8 @@ mod tests {
                 Some(reason),
             ),
         ];
-        let failure = exhausted_attempt_failure(KktAttemptPlan::equality_v1(), attempts, reason);
+        let failure =
+            exhausted_attempt_failure(KktAttemptPlan::equality_v1(), attempts, reason, None);
 
         match failure {
             KktFailure::BackendContractViolation {

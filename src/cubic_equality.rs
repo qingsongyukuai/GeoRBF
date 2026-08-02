@@ -869,6 +869,14 @@ impl HardEquality {
     pub(crate) fn new(functional: FunctionalUse, target: f64) -> Self {
         Self { functional, target }
     }
+
+    pub(crate) fn usage(&self) -> &FunctionalUse {
+        &self.functional
+    }
+
+    pub(crate) fn target(&self) -> f64 {
+        self.target
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -945,7 +953,7 @@ impl RecoveredCubicField {
         FieldSample { value, gradient }
     }
 
-    fn evaluate_functional(&self, functional: &CanonicalFunctional) -> f64 {
+    pub(crate) fn evaluate_functional(&self, functional: &CanonicalFunctional) -> f64 {
         functional
             .terms()
             .iter()
@@ -1104,11 +1112,15 @@ pub enum RecoveryVerificationFailureReason {
 pub(crate) struct RecoveryVerificationFailureEvidence {
     pub(crate) reasons: Vec<RecoveryVerificationFailureReason>,
     pub(crate) side_condition: Option<PhysicalSideConditionEvidence>,
+    pub(crate) hard_equalities: Option<Vec<RecoveredHardEquality>>,
+    pub(crate) relation_tolerances: Option<Vec<CanonicalRelationToleranceEvidence>>,
     pub(crate) hard_equality_violations: Option<FunctionalViolationEnvelope>,
     pub(crate) polynomial_round_trip_error: Option<f64>,
     pub(crate) field_coefficient_round_trip_error: Option<f64>,
     pub(crate) field_energy_round_trip_error: Option<f64>,
     pub(crate) tolerance_round_trip_error: Option<f64>,
+    pub(crate) recovery_finite: Option<bool>,
+    pub(crate) provenance_verified: Option<bool>,
     pub(crate) no_model_produced: bool,
 }
 
@@ -1117,11 +1129,15 @@ impl RecoveryVerificationFailureEvidence {
         Self {
             reasons: vec![reason],
             side_condition: None,
+            hard_equalities: None,
+            relation_tolerances: None,
             hard_equality_violations: None,
             polynomial_round_trip_error: None,
             field_coefficient_round_trip_error: None,
             field_energy_round_trip_error: None,
             tolerance_round_trip_error: None,
+            recovery_finite: None,
+            provenance_verified: None,
             no_model_produced: true,
         }
     }
@@ -1134,9 +1150,13 @@ pub(crate) enum CubicEqualityFailure {
         equality: usize,
     },
     Representation(Box<RepresentationFailure>),
-    Backend(Box<KktFailure>),
+    Backend {
+        failure: Box<KktFailure>,
+        representation: Box<CpdEvidence>,
+    },
     RecoveryVerification {
         evidence: Box<RecoveryVerificationFailureEvidence>,
+        representation: Box<CpdEvidence>,
         backend: Box<KktSolveEvidence>,
     },
 }
@@ -1253,7 +1273,10 @@ fn solve_standard_form(
         stationarity_rhs: &stationarity_rhs,
         equality_rhs: &equality_rhs,
     })
-    .map_err(|failure| CubicEqualityFailure::Backend(Box::new(failure)))?;
+    .map_err(|failure| CubicEqualityFailure::Backend {
+        failure: Box::new(failure),
+        representation: Box::new(representation.evidence.clone()),
+    })?;
     Ok((
         EqualityAssemblyEvidence {
             primal_variables,
@@ -1341,6 +1364,7 @@ fn recover_and_verify(
             evidence: Box::new(RecoveryVerificationFailureEvidence::early(
                 RecoveryVerificationFailureReason::InvalidRecoveryMap,
             )),
+            representation: Box::new(representation.evidence.clone()),
             backend: Box::new(backend),
         });
     }
@@ -1351,6 +1375,7 @@ fn recover_and_verify(
             evidence: Box::new(RecoveryVerificationFailureEvidence::early(
                 RecoveryVerificationFailureReason::ProvenanceMismatch,
             )),
+            representation: Box::new(representation.evidence.clone()),
             backend: Box::new(backend),
         });
     }
@@ -1529,13 +1554,18 @@ fn recover_and_verify(
             evidence: Box::new(RecoveryVerificationFailureEvidence {
                 reasons,
                 side_condition: Some(side_condition),
+                hard_equalities: Some(hard_equalities),
+                relation_tolerances: Some(relation_tolerances),
                 hard_equality_violations: Some(hard_equality_violations),
                 polynomial_round_trip_error: Some(polynomial_round_trip_error),
                 field_coefficient_round_trip_error: Some(field_coefficient_round_trip_error),
                 field_energy_round_trip_error: Some(field_energy_round_trip_error),
                 tolerance_round_trip_error: Some(tolerance_round_trip_error),
+                recovery_finite: Some(recovery_finite),
+                provenance_verified: Some(provenance_verified),
                 no_model_produced: true,
             }),
+            representation: Box::new(representation.evidence.clone()),
             backend: Box::new(backend),
         });
     }
@@ -2329,7 +2359,9 @@ mod tests {
             .expect_err("an invalid inverse coordinate map must fail during recovery");
 
         match failure {
-            CubicEqualityFailure::RecoveryVerification { evidence, backend } => {
+            CubicEqualityFailure::RecoveryVerification {
+                evidence, backend, ..
+            } => {
                 assert_eq!(
                     evidence.reasons,
                     vec![RecoveryVerificationFailureReason::InvalidRecoveryMap]
