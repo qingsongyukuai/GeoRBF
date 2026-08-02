@@ -51,7 +51,9 @@ gauge enter the KKT through a deterministic spanning forest of the
 group/point/absolute-reference incidence graph; cycle-closing equations stay in
 Canonical IR as verification-only relations. This avoids redundant KKT rows
 for coincident, partially overlapping, or absolutely observed groups without
-merging `GroupId` identity.
+merging `GroupId` identity. The forest also carries exact value offsets, so a
+cycle that proves incompatible absolute targets becomes `DirectInputConflict`
+before backend invocation instead of a numerical or recovery failure.
 
 If no true field-value observation exists, the first gauge in stable `SourceId`
 order supplies the one solver constraint that selects the additive constant.
@@ -99,6 +101,9 @@ Capacity preflight counts every scalar source relation and semantic latent
 before Canonical IR allocation. Its conservative dense plan assumes no
 duplicate or verification-only row can be removed, so canonical and report
 storage remain bounded even when the eventual independent KKT is smaller.
+Reports produced before lowering expose these derived canonical and KKT sizes
+as unavailable rather than presenting the conservative capacity bound as an
+exact solver dimension.
 
 The manufactured affine case also closes a tolerance-policy edge: because an
 affine field has zero Cubic seminorm, NUM-009's characteristic field scale now

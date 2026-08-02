@@ -133,14 +133,14 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     let problem_size = report.problem_size();
     assert_eq!(problem_size.input_observations(), 9);
     assert_eq!(problem_size.scalar_hard_relations(), 15);
-    assert_eq!(problem_size.canonical_hard_equalities(), 14);
-    assert_eq!(problem_size.center_coefficients(), 14);
+    assert_eq!(problem_size.canonical_hard_equalities(), Some(14));
+    assert_eq!(problem_size.center_coefficients(), Some(14));
     assert_eq!(problem_size.semantic_latents(), 0);
     assert_eq!(problem_size.auxiliary_variables(), 0);
     assert_eq!(problem_size.cone_blocks(), 0);
-    assert_eq!(problem_size.primal_variables(), 18);
-    assert_eq!(problem_size.equality_constraints(), 18);
-    assert_eq!(problem_size.kkt_dimension(), 36);
+    assert_eq!(problem_size.primal_variables(), Some(18));
+    assert_eq!(problem_size.equality_constraints(), Some(18));
+    assert_eq!(problem_size.kkt_dimension(), Some(36));
     let accepted_attempt = report
         .attempts()
         .last()

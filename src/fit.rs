@@ -105,14 +105,14 @@ impl Error for FitFailure {}
 pub struct ProblemSize {
     input_observations: usize,
     scalar_hard_relations: usize,
-    canonical_hard_equalities: usize,
-    center_coefficients: usize,
+    canonical_hard_equalities: Option<usize>,
+    center_coefficients: Option<usize>,
     semantic_latents: usize,
     auxiliary_variables: usize,
     cone_blocks: usize,
-    primal_variables: usize,
-    equality_constraints: usize,
-    kkt_dimension: usize,
+    primal_variables: Option<usize>,
+    equality_constraints: Option<usize>,
+    kkt_dimension: Option<usize>,
 }
 
 impl ProblemSize {
@@ -132,14 +132,14 @@ impl ProblemSize {
         Some(Self {
             input_observations,
             scalar_hard_relations,
-            canonical_hard_equalities,
-            center_coefficients,
+            canonical_hard_equalities: Some(canonical_hard_equalities),
+            center_coefficients: Some(center_coefficients),
             semantic_latents,
             auxiliary_variables: 0,
             cone_blocks: 0,
-            primal_variables,
-            equality_constraints,
-            kkt_dimension,
+            primal_variables: Some(primal_variables),
+            equality_constraints: Some(equality_constraints),
+            kkt_dimension: Some(kkt_dimension),
         })
     }
 
@@ -153,13 +153,15 @@ impl ProblemSize {
         self.scalar_hard_relations
     }
 
-    /// Returns the exact hard equalities retained after duplicate merging.
-    pub fn canonical_hard_equalities(self) -> usize {
+    /// Returns the exact hard equalities retained after duplicate merging, or
+    /// `None` when fit stopped before canonical lowering.
+    pub fn canonical_hard_equalities(self) -> Option<usize> {
         self.canonical_hard_equalities
     }
 
-    /// Returns the representer-center coefficient count.
-    pub fn center_coefficients(self) -> usize {
+    /// Returns the representer-center coefficient count, or `None` before
+    /// representation planning.
+    pub fn center_coefficients(self) -> Option<usize> {
         self.center_coefficients
     }
 
@@ -178,18 +180,21 @@ impl ProblemSize {
         self.cone_blocks
     }
 
-    /// Returns the backend-standard-form primal dimension.
-    pub fn primal_variables(self) -> usize {
+    /// Returns the backend-standard-form primal dimension, or `None` when no
+    /// exact standard form was planned.
+    pub fn primal_variables(self) -> Option<usize> {
         self.primal_variables
     }
 
-    /// Returns the backend-standard-form equality dimension.
-    pub fn equality_constraints(self) -> usize {
+    /// Returns the backend-standard-form equality dimension, or `None` when no
+    /// exact standard form was planned.
+    pub fn equality_constraints(self) -> Option<usize> {
         self.equality_constraints
     }
 
-    /// Returns the actual symmetric augmented KKT dimension.
-    pub fn kkt_dimension(self) -> usize {
+    /// Returns the actual symmetric augmented KKT dimension, or `None` when no
+    /// exact KKT was planned.
+    pub fn kkt_dimension(self) -> Option<usize> {
         self.kkt_dimension
     }
 }
@@ -618,24 +623,17 @@ fn conservative_problem_size(
     scalar_relations: usize,
     semantic_latents: usize,
 ) -> ProblemSize {
-    let primal_variables = scalar_relations
-        .checked_add(4)
-        .and_then(|value| value.checked_add(semantic_latents))
-        .unwrap_or(usize::MAX);
-    let equality_constraints = scalar_relations.checked_add(4).unwrap_or(usize::MAX);
     ProblemSize {
         input_observations,
         scalar_hard_relations: scalar_relations,
-        canonical_hard_equalities: scalar_relations,
-        center_coefficients: scalar_relations,
+        canonical_hard_equalities: None,
+        center_coefficients: None,
         semantic_latents,
         auxiliary_variables: 0,
         cone_blocks: 0,
-        primal_variables,
-        equality_constraints,
-        kkt_dimension: primal_variables
-            .checked_add(equality_constraints)
-            .unwrap_or(usize::MAX),
+        primal_variables: None,
+        equality_constraints: None,
+        kkt_dimension: None,
     }
 }
 
@@ -834,6 +832,31 @@ impl EqualityLowering {
         });
     }
 
+    fn record_graph_conflict(
+        &mut self,
+        outcome: &CanonicalValueEdgeOutcome,
+        source_id: &SourceId,
+        semantic_role: &SemanticRolePath,
+        declared_difference: f64,
+    ) {
+        let CanonicalValueEdgeOutcome::Conflict {
+            existing_source,
+            implied,
+        } = outcome
+        else {
+            return;
+        };
+        if self.direct_input_conflict.is_none() {
+            self.direct_input_conflict = Some(DirectInputConflictEvidence::new(
+                existing_source.clone(),
+                source_id.clone(),
+                semantic_role.clone(),
+                *implied,
+                declared_difference,
+            ));
+        }
+    }
+
     fn solver_equality_count(&self) -> usize {
         self.canonical_equalities
             .iter()
@@ -880,40 +903,85 @@ enum CanonicalValueNode {
 struct CanonicalValueConstraintForest {
     node_index: BTreeMap<CanonicalValueNode, usize>,
     parent: Vec<usize>,
+    value_minus_parent: Vec<f64>,
+    anchor_source: Vec<Option<SourceId>>,
 }
 
 impl CanonicalValueConstraintForest {
-    fn admits_independent_edge(&mut self, group_id: &GroupId, support: [f64; 3]) -> bool {
-        self.admits_edge(
+    fn add_member_equality(
+        &mut self,
+        group_id: &GroupId,
+        support: [f64; 3],
+    ) -> CanonicalValueEdgeOutcome {
+        self.add_edge(
             CanonicalValueNode::Group(group_id.clone()),
             CanonicalValueNode::Support(canonical_support_bits(support)),
+            0.0,
+            None,
         )
     }
 
-    fn admits_absolute_support(&mut self, support: [f64; 3]) -> bool {
-        self.admits_edge(
+    fn add_absolute_support(
+        &mut self,
+        support: [f64; 3],
+        value: f64,
+        source_id: &SourceId,
+    ) -> CanonicalValueEdgeOutcome {
+        self.add_edge(
             CanonicalValueNode::AbsoluteReference,
             CanonicalValueNode::Support(canonical_support_bits(support)),
+            value,
+            Some(source_id),
         )
     }
 
-    fn admits_absolute_group(&mut self, group_id: &GroupId) -> bool {
-        self.admits_edge(
+    fn add_absolute_group(
+        &mut self,
+        group_id: &GroupId,
+        value: f64,
+        source_id: &SourceId,
+    ) -> CanonicalValueEdgeOutcome {
+        self.add_edge(
             CanonicalValueNode::AbsoluteReference,
             CanonicalValueNode::Group(group_id.clone()),
+            value,
+            Some(source_id),
         )
     }
 
-    fn admits_edge(&mut self, left: CanonicalValueNode, right: CanonicalValueNode) -> bool {
+    fn add_edge(
+        &mut self,
+        left: CanonicalValueNode,
+        right: CanonicalValueNode,
+        right_minus_left: f64,
+        source_id: Option<&SourceId>,
+    ) -> CanonicalValueEdgeOutcome {
         let left = self.intern(left);
         let right = self.intern(right);
-        let left_root = self.root(left);
-        let right_root = self.root(right);
+        let (left_root, left_minus_root) = self.root_and_offset(left);
+        let (right_root, right_minus_root) = self.root_and_offset(right);
         if left_root == right_root {
-            return false;
+            let implied = right_minus_root - left_minus_root;
+            return if implied == right_minus_left {
+                CanonicalValueEdgeOutcome::Redundant
+            } else {
+                CanonicalValueEdgeOutcome::Conflict {
+                    existing_source: self.anchor_source[left_root]
+                        .clone()
+                        .or_else(|| source_id.cloned())
+                        .expect("an inconsistent absolute-value cycle retains a source"),
+                    implied,
+                }
+            };
         }
         self.parent[right_root] = left_root;
-        true
+        self.value_minus_parent[right_root] = right_minus_left + left_minus_root - right_minus_root;
+        let anchor = self.anchor_source[left_root]
+            .clone()
+            .or_else(|| self.anchor_source[right_root].clone())
+            .or_else(|| source_id.cloned());
+        self.anchor_source[left_root] = anchor;
+        CanonicalValueEdgeOutcome::Independent
     }
 
     fn intern(&mut self, node: CanonicalValueNode) -> usize {
@@ -922,19 +990,33 @@ impl CanonicalValueConstraintForest {
         }
         let index = self.parent.len();
         self.parent.push(index);
+        self.value_minus_parent.push(0.0);
+        self.anchor_source.push(None);
         self.node_index.insert(node, index);
         index
     }
 
-    fn root(&mut self, index: usize) -> usize {
+    fn root_and_offset(&mut self, index: usize) -> (usize, f64) {
         let parent = self.parent[index];
         if parent == index {
-            return index;
+            return (index, 0.0);
         }
-        let root = self.root(parent);
+        let local_offset = self.value_minus_parent[index];
+        let (root, parent_offset) = self.root_and_offset(parent);
         self.parent[index] = root;
-        root
+        self.value_minus_parent[index] = local_offset + parent_offset;
+        (root, self.value_minus_parent[index])
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CanonicalValueEdgeOutcome {
+    Independent,
+    Redundant,
+    Conflict {
+        existing_source: SourceId,
+        implied: f64,
+    },
 }
 
 fn canonical_support_bits(support: [f64; 3]) -> [u64; 3] {
@@ -1005,8 +1087,24 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
     let mut value_constraints = CanonicalValueConstraintForest::default();
     for observation in scalar_observations(&snapshot.inner.observations) {
-        let participation = if observation.component == DirectInputComponent::FieldValue
-            && !value_constraints.admits_absolute_support(observation.support)
+        let edge = (observation.component == DirectInputComponent::FieldValue).then(|| {
+            value_constraints.add_absolute_support(
+                observation.support,
+                observation.target,
+                &observation.source_id,
+            )
+        });
+        if let Some(edge) = &edge {
+            lowering.record_graph_conflict(
+                edge,
+                &observation.source_id,
+                &observation.semantic_role,
+                observation.target,
+            );
+        }
+        let participation = if edge
+            .as_ref()
+            .is_some_and(|edge| !matches!(edge, CanonicalValueEdgeOutcome::Independent))
         {
             CanonicalEqualityParticipation::VerificationOnly
         } else {
@@ -1036,6 +1134,9 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         });
         for member in group.members() {
             let role = SemanticRolePath::new("shared-level-set/member/value");
+            let edge = value_constraints
+                .add_member_equality(group.group_id(), member.location().components());
+            lowering.record_graph_conflict(&edge, member.source_id(), &role, 0.0);
             let provenance = relation_provenance(
                 member.source_id().clone(),
                 Some(group.group_id().clone()),
@@ -1059,9 +1160,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 provenance,
                 FunctionalDimension::FieldValue,
                 0.0,
-                if value_constraints
-                    .admits_independent_edge(group.group_id(), member.location().components())
-                {
+                if matches!(edge, CanonicalValueEdgeOutcome::Independent) {
                     CanonicalEqualityParticipation::SolverConstraint
                 } else {
                     CanonicalEqualityParticipation::VerificationOnly
@@ -1087,13 +1186,20 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         };
         match gauge.reference() {
             AdditiveFieldGaugeReference::Point(point) => {
+                let role = SemanticRolePath::new("additive-field-gauge/point");
+                let edge = value_constraints.add_absolute_support(
+                    point.components(),
+                    gauge.value(),
+                    gauge.source_id(),
+                );
+                lowering.record_graph_conflict(&edge, gauge.source_id(), &role, gauge.value());
                 let participation = if participation
                     == CanonicalEqualityParticipation::SolverConstraint
-                    && !value_constraints.admits_absolute_support(point.components())
+                    && matches!(edge, CanonicalValueEdgeOutcome::Independent)
                 {
-                    CanonicalEqualityParticipation::VerificationOnly
+                    CanonicalEqualityParticipation::SolverConstraint
                 } else {
-                    participation
+                    CanonicalEqualityParticipation::VerificationOnly
                 };
                 lowering.push_source(field_equality(
                     &ScalarObservation {
@@ -1101,22 +1207,28 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                         group_id: None,
                         support: point.components(),
                         component: DirectInputComponent::FieldValue,
-                        semantic_role: SemanticRolePath::new("additive-field-gauge/point"),
+                        semantic_role: role,
                         target: gauge.value(),
                     },
                     participation,
                 ));
             }
             AdditiveFieldGaugeReference::LevelSet(group_id) => {
+                let role = SemanticRolePath::new("additive-field-gauge/level-set");
+                let edge = value_constraints.add_absolute_group(
+                    group_id,
+                    gauge.value(),
+                    gauge.source_id(),
+                );
+                lowering.record_graph_conflict(&edge, gauge.source_id(), &role, gauge.value());
                 let participation = if participation
                     == CanonicalEqualityParticipation::SolverConstraint
-                    && !value_constraints.admits_absolute_group(group_id)
+                    && matches!(edge, CanonicalValueEdgeOutcome::Independent)
                 {
-                    CanonicalEqualityParticipation::VerificationOnly
+                    CanonicalEqualityParticipation::SolverConstraint
                 } else {
-                    participation
+                    CanonicalEqualityParticipation::VerificationOnly
                 };
-                let role = SemanticRolePath::new("additive-field-gauge/level-set");
                 let provenance =
                     relation_provenance(gauge.source_id().clone(), Some(group_id.clone()), role);
                 lowering.push_source(CanonicalHardEquality::new(
@@ -1193,14 +1305,16 @@ fn success_report(
     let problem_size = ProblemSize {
         input_observations: planned_problem_size.input_observations,
         scalar_hard_relations: planned_problem_size.scalar_hard_relations,
-        canonical_hard_equalities: solution.assembly.canonical_hard_equalities,
-        center_coefficients: solution.assembly.field_coefficients,
+        canonical_hard_equalities: Some(solution.assembly.canonical_hard_equalities),
+        center_coefficients: Some(solution.assembly.field_coefficients),
         semantic_latents: solution.assembly.semantic_latents,
         auxiliary_variables: 0,
         cone_blocks: 0,
-        primal_variables: solution.assembly.primal_variables,
-        equality_constraints: solution.assembly.side_conditions + solution.assembly.hard_equalities,
-        kkt_dimension: solution.backend.capacity.kkt_dimension,
+        primal_variables: Some(solution.assembly.primal_variables),
+        equality_constraints: Some(
+            solution.assembly.side_conditions + solution.assembly.hard_equalities,
+        ),
+        kkt_dimension: Some(solution.backend.capacity.kkt_dimension),
     };
     let mut hard_relations = source_relations
         .iter()
@@ -1332,6 +1446,7 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
     let reduced_dimension = report
         .problem_size
         .canonical_hard_equalities
+        .expect("representation evidence implies canonical lowering completed")
         .saturating_sub(4);
     match failure {
         RepresentationFailure::EmptyRepresenterSpan => {
@@ -1519,7 +1634,10 @@ fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
         | KktFailure::NumericalDecisionGrayZone { evidence } => {
             report.backend_rank = Some(public_rank_evidence(
                 RankEvidenceDomain::BackendKkt,
-                report.problem_size.kkt_dimension,
+                report
+                    .problem_size
+                    .kkt_dimension
+                    .expect("backend evidence implies an exact KKT dimension"),
                 evidence,
             ));
         }
@@ -1546,7 +1664,10 @@ fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
         } => {
             report.backend_rank = Some(public_rank_evidence(
                 RankEvidenceDomain::BackendKkt,
-                report.problem_size.kkt_dimension,
+                report
+                    .problem_size
+                    .kkt_dimension
+                    .expect("backend evidence implies an exact KKT dimension"),
                 &analysis.rank,
             ));
             report.inertia = Some(public_inertia(

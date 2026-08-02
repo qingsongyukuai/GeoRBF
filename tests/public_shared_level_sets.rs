@@ -105,6 +105,11 @@ fn shift_invariant_horizons_report_the_unidentified_additive_gauge_before_solvin
     );
     assert!(!evidence.backend_invoked());
     assert!(failure.report().attempts().is_empty());
+    assert_eq!(
+        failure.report().problem_size().canonical_hard_equalities(),
+        None
+    );
+    assert_eq!(failure.report().problem_size().kkt_dimension(), None);
 }
 
 #[test]
@@ -510,9 +515,44 @@ fn absolute_observations_close_group_cycles_without_redundant_kkt_rows() {
     assert_eq!(success.report().problem_size().input_observations(), 3);
     assert_eq!(
         success.report().problem_size().canonical_hard_equalities(),
-        7
+        Some(7)
     );
-    assert_eq!(success.report().problem_size().equality_constraints(), 10);
+    assert_eq!(
+        success.report().problem_size().equality_constraints(),
+        Some(10)
+    );
+
+    let mut conflicting_horizon = HorizonBuilder::new(group_id);
+    conflicting_horizon
+        .add_member(SourceId::new("conflict/member-left"), left)
+        .unwrap();
+    conflicting_horizon
+        .add_member(SourceId::new("conflict/member-right"), right)
+        .unwrap();
+    let mut conflicting = problem_builder();
+    conflicting
+        .add(conflicting_horizon.build().unwrap())
+        .unwrap();
+    conflicting
+        .add(
+            FieldValueObservation::try_new(SourceId::new("conflict/value-left"), left, 3.0)
+                .unwrap(),
+        )
+        .unwrap();
+    conflicting
+        .add(
+            FieldValueObservation::try_new(SourceId::new("conflict/value-right"), right, 4.0)
+                .unwrap(),
+        )
+        .unwrap();
+    let failure = conflicting
+        .build()
+        .unwrap()
+        .fit()
+        .expect_err("a graph-provable shared-level contradiction must fail pre-backend");
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    assert!(failure.report().direct_input_conflict().is_some());
+    assert!(failure.report().attempts().is_empty());
 }
 
 #[test]
@@ -650,7 +690,7 @@ fn overlapping_member_cycles_do_not_merge_semantic_latent_identity() {
     assert_eq!(success.report().problem_size().semantic_latents(), 2);
     assert_eq!(
         success.report().problem_size().canonical_hard_equalities(),
-        9
+        Some(9)
     );
     assert_close(
         success
