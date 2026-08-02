@@ -2518,6 +2518,21 @@ mod tests {
         };
 
         assert_eq!(diagnose_kkt(&failure), ProblemDiagnosis::NumericalFailure);
+        inject_kkt_failure_once(failure);
+        let fit_failure = injectable_snapshot()
+            .fit()
+            .expect_err("an uninterpreted KKT rank loss must not publish a model");
+        assert_eq!(fit_failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+        assert_eq!(
+            fit_failure.report().rank_evidence().unwrap().domain(),
+            RankEvidenceDomain::BackendKkt
+        );
+        assert!(
+            fit_failure
+                .report()
+                .interpretable_rank_deficiency()
+                .is_none()
+        );
 
         let reduced_failure = RepresentationFailure::ReducedPairingNotPositive {
             classification: ReducedPairingFailureClassification::RankDeficient,
