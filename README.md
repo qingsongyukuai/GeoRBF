@@ -8,10 +8,12 @@ an input coordinate frame and units; add hard absolute field-value and complete
 gradient observations, unoriented tangent directions, or atomically built
 shared level sets and geological horizons; choose an explicit additive field
 gauge where the relations are translation-invariant; build an immutable
-snapshot; and query field value, gradient, and recovered shared values from an
-immutable model. A tangent direction constrains only `t^T grad(f) = 0`: it
-allows zero gradient and carries neither the magnitude of a complete gradient
-observation nor the polarity and nonzero-slope semantics of a normal direction.
+snapshot; and query field value and complete gradient through single points or
+ordered, atomic logical batches from an immutable model. Recovered shared values
+remain addressable by `GroupId`. A tangent direction constrains only
+`t^T grad(f) = 0`: it allows zero gradient and carries neither the magnitude of
+a complete gradient observation nor the polarity and nonzero-slope semantics of
+a normal direction.
 
 ```rust,no_run
 use georbf::geometry::{
@@ -60,6 +62,11 @@ let snapshot = problem.build()?;
 let fit = snapshot.fit()?;
 let sample = fit.model().evaluate(Point3::try_new(0.2, -0.3, 0.4)?)?;
 assert_eq!(sample.gradient().components().len(), 3);
+let samples = fit.model().evaluate_batch(&[
+    Point3::try_new(0.2, -0.3, 0.4)?,
+    Point3::try_new(-0.5, 0.25, 0.75)?,
+])?;
+assert_eq!(samples.len(), 2);
 # Ok(())
 # }
 ```
@@ -81,4 +88,5 @@ Implementation evidence is recorded for
 [#18](docs/implementation/18-cubic-equality-numerical-policy.md), and the public
 tracers in [#19](docs/implementation/19-public-absolute-field-tracer.md) and
 [#20](docs/implementation/20-shared-level-set-gauge.md), plus
-[#21](docs/implementation/21-tangent-direction-observation.md).
+[#21](docs/implementation/21-tangent-direction-observation.md) and the immutable
+query model in [#24](docs/implementation/24-immutable-model-batch-query.md).

@@ -20,6 +20,7 @@ include = [
     "/docs/implementation/19-public-absolute-field-tracer.md",
     "/docs/implementation/20-shared-level-set-gauge.md",
     "/docs/implementation/21-tangent-direction-observation.md",
+    "/docs/implementation/24-immutable-model-batch-query.md",
     "/validation/oracle/cubic-v1/**",
 ]
 
