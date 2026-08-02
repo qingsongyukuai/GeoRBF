@@ -267,8 +267,7 @@ impl KktAttemptPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SolveAttemptTermination {
-    AcceptedCandidate,
-    RejectedCandidate,
+    CandidateProduced,
     NumericalError,
 }
 
@@ -858,8 +857,9 @@ fn attempt_record(
         refinement_steps,
         termination: match failure_reason {
             Some(KktAttemptFailureReason::Numerical(_)) => SolveAttemptTermination::NumericalError,
-            Some(_) => SolveAttemptTermination::RejectedCandidate,
-            None => SolveAttemptTermination::AcceptedCandidate,
+            Some(KktAttemptFailureReason::BackendContract(_)) | None => {
+                SolveAttemptTermination::CandidateProduced
+            }
         },
         residual,
         certificate_present: false,
@@ -1104,7 +1104,7 @@ mod tests {
         );
         assert_eq!(
             evidence.attempts[0].termination,
-            SolveAttemptTermination::AcceptedCandidate
+            SolveAttemptTermination::CandidateProduced
         );
         let residual = evidence.attempts[0]
             .residual
@@ -1207,7 +1207,7 @@ mod tests {
                 );
                 assert!(attempts[0].scaling.saturated_outside_target > 0);
                 assert!(attempts.iter().all(|attempt| {
-                    attempt.termination == SolveAttemptTermination::RejectedCandidate
+                    attempt.termination == SolveAttemptTermination::CandidateProduced
                         && attempt.residual.is_some()
                         && attempt.backend.crate_version == "0.24.4"
                         && attempt.requested_threads == 1
@@ -1263,7 +1263,7 @@ mod tests {
             } => {
                 assert_eq!(attempts.len(), 2);
                 assert!(attempts.iter().all(|attempt| {
-                    attempt.termination == SolveAttemptTermination::RejectedCandidate
+                    attempt.termination == SolveAttemptTermination::CandidateProduced
                         && attempt
                             .residual
                             .is_some_and(|evidence| evidence.normalized_backward_error.is_finite())

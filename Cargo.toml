@@ -21,6 +21,7 @@ include = [
     "/docs/implementation/20-shared-level-set-gauge.md",
     "/docs/implementation/21-tangent-direction-observation.md",
     "/docs/implementation/22-equality-builder-problem-snapshot-contract.md",
+    "/docs/implementation/23-equality-structured-diagnostics-fit-report.md",
     "/docs/implementation/24-immutable-model-batch-query.md",
     "/validation/oracle/cubic-v1/**",
 ]

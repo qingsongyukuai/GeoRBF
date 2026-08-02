@@ -151,7 +151,7 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     );
     assert_eq!(
         accepted_attempt.termination(),
-        SolveAttemptTermination::AcceptedCandidate
+        SolveAttemptTermination::CandidateProduced
     );
     assert_eq!(accepted_attempt.settings().kind(), accepted_attempt.kind());
     assert_eq!(

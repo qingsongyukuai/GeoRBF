@@ -19,11 +19,13 @@ use crate::diagnostics::{
     BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
     CanonicalAcceptanceEvidenceParts, CapacityEvidence, CapacityFailureKind, CubicAnalysisEvidence,
     CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts, InertiaEvidence,
-    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankEvidence, RankEvidenceDomain,
-    RankEvidenceParts, RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts,
-    RelationGraphConflictEvidence, ResidualDimension, ScalingFailureReason, ScalingSummary,
-    SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts,
-    SolveAttemptTermination, SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
+    InterpretableRankDeficiencyEvidence, InterpretableRankDeficiencyEvidenceParts,
+    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
+    RankEvidenceDomain, RankEvidenceParts, RecoveryVerificationEvidence,
+    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
+    ScalingFailureReason, ScalingSummary, SideConditionEvidence, SolveAttemptKind,
+    SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
+    SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence,
 };
 use crate::functional::{
@@ -337,17 +339,18 @@ pub struct FitReport {
     backend_fingerprint: Option<BackendFingerprint>,
     attempts: Vec<SolveAttemptRecord>,
     recovery_verification: Option<RecoveryVerificationEvidence>,
-    direct_input_conflict: Option<DirectInputConflictEvidence>,
-    relation_graph_conflict: Option<RelationGraphConflictEvidence>,
+    direct_input_conflicts: Vec<DirectInputConflictEvidence>,
+    relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
     execution_failure: Option<AttemptFailureEvidence>,
     cubic_analysis: Option<CubicAnalysisEvidence>,
     backend_rank: Option<RankEvidence>,
+    interpretable_rank_deficiency: Option<InterpretableRankDeficiencyEvidence>,
     inertia: Option<InertiaEvidence>,
     canonical_acceptance: Option<CanonicalAcceptanceEvidence>,
     capacity: Option<CapacityEvidence>,
     analysis_failure: Option<AnalysisFailureEvidence>,
     unidentified_additive_gauge: Option<UnidentifiedAdditiveGaugeEvidence>,
-    uninformative_shared_level_set: Option<UninformativeSharedLevelSetEvidence>,
+    uninformative_shared_level_sets: Vec<UninformativeSharedLevelSetEvidence>,
 }
 
 impl FitReport {
@@ -413,12 +416,22 @@ impl FitReport {
 
     /// Returns stable source evidence for a direct hard-input conflict.
     pub fn direct_input_conflict(&self) -> Option<&DirectInputConflictEvidence> {
-        self.direct_input_conflict.as_ref()
+        self.direct_input_conflicts.first()
+    }
+
+    /// Returns every direct hard-input conflict in stable semantic/source order.
+    pub fn direct_input_conflicts(&self) -> &[DirectInputConflictEvidence] {
+        &self.direct_input_conflicts
     }
 
     /// Returns complete path provenance for a hard relation-graph conflict.
     pub fn relation_graph_conflict(&self) -> Option<&RelationGraphConflictEvidence> {
-        self.relation_graph_conflict.as_ref()
+        self.relation_graph_conflicts.first()
+    }
+
+    /// Returns every hard relation-graph conflict in stable semantic/source order.
+    pub fn relation_graph_conflicts(&self) -> &[RelationGraphConflictEvidence] {
+        &self.relation_graph_conflicts
     }
 
     /// Returns the terminal backend-contract or numerical failure evidence.
@@ -441,6 +454,11 @@ impl FitReport {
         self.backend_rank
             .as_ref()
             .filter(|evidence| evidence.domain() == RankEvidenceDomain::BackendKkt)
+    }
+
+    /// Returns canonical mode evidence when a rank loss has semantic meaning.
+    pub fn interpretable_rank_deficiency(&self) -> Option<&InterpretableRankDeficiencyEvidence> {
+        self.interpretable_rank_deficiency.as_ref()
     }
 
     /// Returns expected and observed Equality KKT inertia when available.
@@ -470,7 +488,12 @@ impl FitReport {
 
     /// Returns structural evidence for a disconnected one-member shared level set.
     pub fn uninformative_shared_level_set(&self) -> Option<&UninformativeSharedLevelSetEvidence> {
-        self.uninformative_shared_level_set.as_ref()
+        self.uninformative_shared_level_sets.first()
+    }
+
+    /// Returns every disconnected one-member shared level set in stable group order.
+    pub fn uninformative_shared_level_sets(&self) -> &[UninformativeSharedLevelSetEvidence] {
+        &self.uninformative_shared_level_sets
     }
 }
 
@@ -481,20 +504,29 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         scalar_relation_count,
         snapshot.inner.shared_level_sets.len(),
     );
-    if let Some(group) = snapshot.inner.shared_level_sets.iter().find(|group| {
-        group.members().len() == 1 && !snapshot_references_group(snapshot, group.group_id())
-    }) {
-        let mut report = empty_report(snapshot, conservative_problem_size);
-        report.uninformative_shared_level_set = Some(UninformativeSharedLevelSetEvidence::new(
-            group.group_id().clone(),
-            group.members()[0].source_id().clone(),
-            false,
-        ));
-        return Err(FitFailure {
-            diagnosis: ProblemDiagnosis::UninformativeSharedLevelSet,
-            report: Box::new(report),
+    let mut preflight_report = empty_report(snapshot, conservative_problem_size);
+    preflight_report.uninformative_shared_level_sets = snapshot
+        .inner
+        .shared_level_sets
+        .iter()
+        .filter(|group| {
+            group.members().len() == 1 && !snapshot_references_group(snapshot, group.group_id())
+        })
+        .map(|group| {
+            UninformativeSharedLevelSetEvidence::new(
+                group.group_id().clone(),
+                group.members()[0].source_id().clone(),
+                false,
+            )
+        })
+        .collect();
+    preflight_report
+        .uninformative_shared_level_sets
+        .sort_by(|left, right| {
+            left.group_id()
+                .cmp(right.group_id())
+                .then_with(|| left.member_source_id().cmp(right.member_source_id()))
         });
-    }
     let has_absolute_reference = snapshot
         .inner
         .observations
@@ -523,24 +555,19 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             .iter()
             .map(|group| group.group_id().clone())
             .collect();
-        let mut report = empty_report(snapshot, conservative_problem_size);
-        report.unidentified_additive_gauge = Some(UnidentifiedAdditiveGaugeEvidence::new(
-            source_ids, group_ids, false,
-        ));
-        return Err(FitFailure {
-            diagnosis: ProblemDiagnosis::UnidentifiedAdditiveGauge,
-            report: Box::new(report),
-        });
+        preflight_report.unidentified_additive_gauge = Some(
+            UnidentifiedAdditiveGaugeEvidence::new(source_ids, group_ids, false),
+        );
     }
     if let Err(evidence) = plan_snapshot_capacity(
         scalar_relation_count,
         snapshot.inner.shared_level_sets.len(),
     ) {
-        let mut report = empty_report(snapshot, conservative_problem_size);
-        report.capacity = Some(public_capacity(&evidence));
+        preflight_report.capacity = Some(public_capacity(&evidence));
         return Err(FitFailure {
-            diagnosis: ProblemDiagnosis::CapacityExceeded,
-            report: Box::new(report),
+            diagnosis: primary_preflight_diagnosis(&preflight_report)
+                .expect("capacity evidence always supplies a preflight diagnosis"),
+            report: Box::new(preflight_report),
         });
     }
     let lowering = lower_snapshot(snapshot);
@@ -553,17 +580,36 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         lowering.solver_equality_count(),
     )
     .expect("the conservative snapshot capacity plan proved exact dimensions representable");
-    let base_report = || empty_report(snapshot, problem_size);
-    if lowering.direct_input_conflict.is_some() || lowering.relation_graph_conflict.is_some() {
-        let mut report = base_report();
-        report.direct_input_conflict = lowering.direct_input_conflict.clone();
-        report.relation_graph_conflict = lowering.relation_graph_conflict.clone();
+    preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
+    preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
+    if let Some(diagnosis) = primary_preflight_diagnosis(&preflight_report) {
+        if diagnosis == ProblemDiagnosis::DirectInputConflict {
+            preflight_report.problem_size = problem_size;
+        }
         return Err(FitFailure {
-            diagnosis: ProblemDiagnosis::DirectInputConflict,
-            report: Box::new(report),
+            diagnosis,
+            report: Box::new(preflight_report),
         });
     }
+    preflight_report.problem_size = problem_size;
+    let base_report = || preflight_report.clone();
     fit_snapshot_after_preflight(snapshot, lowering, problem_size, base_report)
+}
+
+fn primary_preflight_diagnosis(report: &FitReport) -> Option<ProblemDiagnosis> {
+    if !report.uninformative_shared_level_sets.is_empty() {
+        return Some(ProblemDiagnosis::UninformativeSharedLevelSet);
+    }
+    if !report.direct_input_conflicts.is_empty() || !report.relation_graph_conflicts.is_empty() {
+        return Some(ProblemDiagnosis::DirectInputConflict);
+    }
+    if report.unidentified_additive_gauge.is_some() {
+        return Some(ProblemDiagnosis::UnidentifiedAdditiveGauge);
+    }
+    report
+        .capacity
+        .is_some()
+        .then_some(ProblemDiagnosis::CapacityExceeded)
 }
 
 fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitReport {
@@ -580,17 +626,18 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         backend_fingerprint: None,
         attempts: Vec::new(),
         recovery_verification: None,
-        direct_input_conflict: None,
-        relation_graph_conflict: None,
+        direct_input_conflicts: Vec::new(),
+        relation_graph_conflicts: Vec::new(),
         execution_failure: None,
         cubic_analysis: None,
         backend_rank: None,
+        interpretable_rank_deficiency: None,
         inertia: None,
         canonical_acceptance: None,
         capacity: None,
         analysis_failure: None,
         unidentified_additive_gauge: None,
-        uninformative_shared_level_set: None,
+        uninformative_shared_level_sets: Vec::new(),
     }
 }
 
@@ -819,8 +866,8 @@ struct EqualityLowering {
     source_relations: Vec<SourceHardRelation>,
     canonical_equalities: Vec<CanonicalHardEquality>,
     canonical_index_by_key: BTreeMap<CanonicalEqualityKey, (usize, f64)>,
-    direct_input_conflict: Option<DirectInputConflictEvidence>,
-    relation_graph_conflict: Option<RelationGraphConflictEvidence>,
+    direct_input_conflicts: Vec<DirectInputConflictEvidence>,
+    relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
     semantic_latents: Vec<SemanticLatentDefinition>,
 }
 
@@ -830,8 +877,8 @@ impl EqualityLowering {
             source_relations: Vec::new(),
             canonical_equalities: Vec::new(),
             canonical_index_by_key: BTreeMap::new(),
-            direct_input_conflict: None,
-            relation_graph_conflict: None,
+            direct_input_conflicts: Vec::new(),
+            relation_graph_conflicts: Vec::new(),
             semantic_latents: Vec::new(),
         }
     }
@@ -840,15 +887,22 @@ impl EqualityLowering {
         let (key, normalized_target) = normalized_equality_key(&equality);
         let canonical_index =
             if let Some((index, first_target)) = self.canonical_index_by_key.get(&key).copied() {
-                if first_target != normalized_target && self.direct_input_conflict.is_none() {
+                if first_target != normalized_target {
                     let first = &self.canonical_equalities[index];
-                    self.direct_input_conflict = Some(DirectInputConflictEvidence::new(
-                        first.provenance().source().clone(),
-                        equality.provenance().source().clone(),
-                        equality.provenance().semantic_role().clone(),
-                        first.target(),
-                        equality.target(),
-                    ));
+                    self.direct_input_conflicts
+                        .push(DirectInputConflictEvidence::new(
+                            first.provenance().source().clone(),
+                            equality.provenance().source().clone(),
+                            equality.provenance().semantic_role().clone(),
+                            first.target(),
+                            equality.target(),
+                        ));
+                    self.direct_input_conflicts.sort_by(|left, right| {
+                        left.semantic_role()
+                            .cmp(right.semantic_role())
+                            .then_with(|| left.first_source().cmp(right.first_source()))
+                            .then_with(|| left.second_source().cmp(right.second_source()))
+                    });
                 }
                 if equality.participation() == CanonicalEqualityParticipation::SolverConstraint {
                     self.canonical_equalities[index].promote_to_solver_constraint();
@@ -881,8 +935,8 @@ impl EqualityLowering {
         else {
             return;
         };
-        if self.relation_graph_conflict.is_none() {
-            self.relation_graph_conflict = Some(RelationGraphConflictEvidence::new(
+        self.relation_graph_conflicts
+            .push(RelationGraphConflictEvidence::new(
                 proof_source_ids.clone(),
                 proof_group_ids.clone(),
                 semantic_role.clone(),
@@ -891,7 +945,11 @@ impl EqualityLowering {
                 second_absolute.source_id.clone(),
                 second_absolute.target,
             ));
-        }
+        self.relation_graph_conflicts.sort_by(|left, right| {
+            left.semantic_role()
+                .cmp(right.semantic_role())
+                .then_with(|| left.source_ids().cmp(right.source_ids()))
+        });
     }
 
     fn solver_equality_count(&self) -> usize {
@@ -1517,8 +1575,8 @@ fn success_report(
         backend_fingerprint: Some(backend_fingerprint),
         attempts,
         recovery_verification: None,
-        direct_input_conflict: None,
-        relation_graph_conflict: None,
+        direct_input_conflicts: Vec::new(),
+        relation_graph_conflicts: Vec::new(),
         execution_failure: None,
         cubic_analysis: Some(public_cubic_analysis(&solution.representation)),
         backend_rank: Some(public_rank_evidence(
@@ -1526,6 +1584,7 @@ fn success_report(
             solution.backend.capacity.kkt_dimension,
             &solution.backend.rank,
         )),
+        interpretable_rank_deficiency: None,
         inertia: Some(public_inertia(
             solution.backend.expected_inertia,
             solution.backend.observed_inertia,
@@ -1535,7 +1594,7 @@ fn success_report(
         capacity: None,
         analysis_failure: None,
         unidentified_additive_gauge: None,
-        uninformative_shared_level_set: None,
+        uninformative_shared_level_sets: Vec::new(),
     }
 }
 
@@ -1581,7 +1640,7 @@ fn failure_report(
             retain_kkt_failure(&mut report, failure);
         }
         CubicEqualityFailure::Representation(failure) => {
-            retain_representation_failure(&mut report, failure);
+            retain_representation_failure(&mut report, failure, source_relations);
         }
         CubicEqualityFailure::RecoveryVerification {
             evidence,
@@ -1610,7 +1669,11 @@ fn failure_report(
     report
 }
 
-fn retain_representation_failure(report: &mut FitReport, failure: &RepresentationFailure) {
+fn retain_representation_failure(
+    report: &mut FitReport,
+    failure: &RepresentationFailure,
+    source_relations: &[SourceHardRelation],
+) {
     let reduced_dimension = report
         .problem_size
         .canonical_hard_equalities
@@ -1633,7 +1696,12 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
                     backend_invoked: *solver_invoked,
                 });
         }
-        RepresentationFailure::PolynomialRankDeficient { rank, .. } => {
+        RepresentationFailure::PolynomialRankDeficient {
+            rank,
+            canonical_mode_residual,
+            solver_invoked,
+            hidden_regularization_applied,
+        } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
                 domain: RankEvidenceDomain::CubicPolynomialPairing,
                 dimension: 4,
@@ -1645,8 +1713,16 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
                 reject_ratio: None,
                 accept_ratio: None,
                 decision: RankDecision::RankDeficient,
-                backend_invoked: false,
+                backend_invoked: *solver_invoked,
             }));
+            report.interpretable_rank_deficiency = Some(public_interpretable_rank_deficiency(
+                RankDeficiencyConcept::CubicPi1FieldMode,
+                RankEvidenceDomain::CubicPolynomialPairing,
+                source_relations,
+                *canonical_mode_residual,
+                *solver_invoked,
+                *hidden_regularization_applied,
+            ));
         }
         RepresentationFailure::PolynomialRankGrayZone { evidence } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
@@ -1682,6 +1758,8 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
             classification,
             rank,
             solver_invoked,
+            hidden_regularization_applied,
+            canonical_mode_residual,
             ..
         } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
@@ -1704,6 +1782,19 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
                 },
                 backend_invoked: *solver_invoked,
             }));
+            if *classification == ReducedPairingFailureClassification::RankDeficient {
+                if let Some(canonical_mode_residual) = canonical_mode_residual {
+                    report.interpretable_rank_deficiency =
+                        Some(public_interpretable_rank_deficiency(
+                            RankDeficiencyConcept::CubicQuotientFieldMode,
+                            RankEvidenceDomain::CubicReducedPairing,
+                            source_relations,
+                            *canonical_mode_residual,
+                            *solver_invoked,
+                            *hidden_regularization_applied,
+                        ));
+                }
+            }
         }
         RepresentationFailure::AlgebraicAnalysisFailure {
             stage,
@@ -1755,6 +1846,41 @@ fn retain_representation_failure(report: &mut FitReport, failure: &Representatio
             });
         }
     }
+}
+
+fn public_interpretable_rank_deficiency(
+    concept: RankDeficiencyConcept,
+    domain: RankEvidenceDomain,
+    source_relations: &[SourceHardRelation],
+    canonical_mode_residual: f64,
+    backend_invoked: bool,
+    hidden_regularization_applied: bool,
+) -> InterpretableRankDeficiencyEvidence {
+    let mut provenance = source_relations
+        .iter()
+        .filter(|relation| relation.equality.field().is_some())
+        .map(|relation| {
+            (
+                relation.equality.provenance().semantic_role().clone(),
+                relation.equality.provenance().source().clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    provenance.sort();
+    provenance.dedup();
+    InterpretableRankDeficiencyEvidence::new(InterpretableRankDeficiencyEvidenceParts {
+        concept,
+        domain,
+        source_ids: provenance
+            .iter()
+            .map(|(_, source)| source.clone())
+            .collect(),
+        semantic_roles: provenance.into_iter().map(|(role, _)| role).collect(),
+        canonical_mode_residual,
+        canonical_mode_verified: true,
+        backend_invoked,
+        hidden_regularization_applied,
+    })
 }
 
 fn retain_kkt_failure(report: &mut FitReport, failure: &KktFailure) {
@@ -2019,11 +2145,8 @@ fn public_attempts(attempts: &[KktAttemptRecord]) -> Vec<SolveAttemptRecord> {
                     KktAttemptKind::SvdRescue => SolveAttemptKind::FullSvdRescue,
                 },
                 termination: match attempt.termination {
-                    InternalTermination::AcceptedCandidate => {
-                        SolveAttemptTermination::AcceptedCandidate
-                    }
-                    InternalTermination::RejectedCandidate => {
-                        SolveAttemptTermination::RejectedCandidate
+                    InternalTermination::CandidateProduced => {
+                        SolveAttemptTermination::CandidateProduced
                     }
                     InternalTermination::NumericalError => SolveAttemptTermination::NumericalError,
                 },
@@ -2247,16 +2370,21 @@ fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis 
         | RepresentationFailure::ReducedPairingGrayZone { .. } => {
             ProblemDiagnosis::NumericalDecisionGrayZone
         }
-        RepresentationFailure::ReducedPairingNotPositive { classification, .. } => {
-            match classification {
-                ReducedPairingFailureClassification::RankDeficient => {
-                    ProblemDiagnosis::UnidentifiedFieldMode
-                }
-                ReducedPairingFailureClassification::NegativeCurvature => {
-                    ProblemDiagnosis::NumericalFailure
-                }
+        RepresentationFailure::ReducedPairingNotPositive {
+            classification,
+            canonical_mode_residual,
+            ..
+        } => match classification {
+            ReducedPairingFailureClassification::RankDeficient
+                if canonical_mode_residual.is_some() =>
+            {
+                ProblemDiagnosis::UnidentifiedFieldMode
             }
-        }
+            ReducedPairingFailureClassification::RankDeficient
+            | ReducedPairingFailureClassification::NegativeCurvature => {
+                ProblemDiagnosis::NumericalFailure
+            }
+        },
         RepresentationFailure::AffineReproductionBackend(failure) => diagnose_kkt(failure),
         _ => ProblemDiagnosis::NumericalFailure,
     }
@@ -2265,7 +2393,7 @@ fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis 
 fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
     match failure {
         KktFailure::Capacity(_) => ProblemDiagnosis::CapacityExceeded,
-        KktFailure::RankDeficient { .. } => ProblemDiagnosis::UnidentifiedFieldMode,
+        KktFailure::RankDeficient { .. } => ProblemDiagnosis::NumericalFailure,
         KktFailure::NumericalDecisionGrayZone { .. } => ProblemDiagnosis::NumericalDecisionGrayZone,
         KktFailure::BackendContractViolation { .. } => ProblemDiagnosis::BackendContractViolation,
         _ => ProblemDiagnosis::NumericalFailure,
@@ -2276,6 +2404,7 @@ fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
 mod tests {
     use super::*;
     use crate::cubic_equality::RecoveryVerificationFailureReason;
+    use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
 
     #[test]
     fn snapshot_capacity_preflight_covers_all_source_relations_before_lowering() {
@@ -2325,5 +2454,49 @@ mod tests {
         assert_eq!(side.components(), [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(side.tolerances(), [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(side.round_trip_error(), 9.0e-12);
+    }
+
+    #[test]
+    fn backend_candidate_rejection_is_not_a_problem_diagnosis_from_termination() {
+        let failure = solve_equality_kkt(&EqualityKktSystem {
+            primal_variables: 1,
+            equality_constraints: 0,
+            hessian: &[1.0e-320],
+            equality_jacobian: &[],
+            stationarity_rhs: &[1.0],
+            equality_rhs: &[],
+        })
+        .expect_err("non-finite backend candidates must exhaust the bounded plan");
+
+        assert_eq!(
+            diagnose_kkt(&failure),
+            ProblemDiagnosis::BackendContractViolation
+        );
+        let attempts = public_attempts(kkt_failure_attempts(&failure));
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts.iter().all(|attempt| {
+            attempt.termination() == SolveAttemptTermination::CandidateProduced
+                && attempt.failure_reason().is_some_and(|evidence| {
+                    evidence.category() == AttemptFailureCategory::NonFiniteCandidate
+                })
+        }));
+    }
+
+    #[test]
+    fn uninterpreted_backend_rank_loss_remains_a_numerical_failure() {
+        let failure = KktFailure::RankDeficient {
+            evidence: InternalRankEvidence {
+                exact_zero_index: Some(0),
+                rrqr_ratio: 0.0,
+                singular_values: Vec::new(),
+                svd_ratio: 0.0,
+                reject_ratio: 1.0e-14,
+                accept_ratio: 1.0e-12,
+                classification: InternalRankDecision::RankDeficient,
+                backend_invoked: false,
+            },
+        };
+
+        assert_eq!(diagnose_kkt(&failure), ProblemDiagnosis::NumericalFailure);
     }
 }

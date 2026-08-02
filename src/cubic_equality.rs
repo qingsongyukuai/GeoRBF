@@ -352,6 +352,7 @@ pub(crate) enum RepresentationFailure {
     },
     PolynomialRankDeficient {
         rank: usize,
+        canonical_mode_residual: f64,
         solver_invoked: bool,
         hidden_regularization_applied: bool,
     },
@@ -385,6 +386,7 @@ pub(crate) enum RepresentationFailure {
         classification: ReducedPairingFailureClassification,
         rank: usize,
         negative_pivots: usize,
+        canonical_mode_residual: Option<f64>,
         solver_invoked: bool,
         hidden_regularization_applied: bool,
     },
@@ -462,7 +464,7 @@ impl CubicRepresentation {
             },
         );
         let (singular_values, polynomial_rank, polynomial_rank_evidence) =
-            verify_polynomial_rank(&polynomial)?;
+            verify_polynomial_rank(&polynomial, &functionals, &coordinates)?;
         let kernel = assemble_kernel_pairing(&standard_functionals, &metric);
         let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank)?;
         let (mut reduced, null_space_defect) =
@@ -484,7 +486,8 @@ impl CubicRepresentation {
             });
         }
         symmetrize(&mut reduced);
-        let reduced_smallest_singular_value = verify_reduced_pairing(&reduced)?;
+        let reduced_smallest_singular_value =
+            verify_reduced_pairing(&reduced, &polynomial, &null_space)?;
         let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial)?;
         if affine_reproduction_error > EQUALITY_KKT_POLICY_V1.affine_reproduction_limit {
             return Err(RepresentationFailure::AffineReproductionContract {
@@ -598,13 +601,28 @@ impl HouseholderNullSpace {
 
 fn verify_polynomial_rank(
     polynomial: &DenseMatrix,
+    functionals: &[CanonicalFunctional],
+    coordinates: &CubicSolveCoordinateTransform,
 ) -> Result<(Vec<f64>, usize, PolynomialRankEvidence), RepresentationFailure> {
-    let exact_nonzero_columns = (0..polynomial.columns)
-        .filter(|column| (0..polynomial.rows).any(|row| polynomial.get(row, *column) != 0.0))
-        .count();
-    if exact_nonzero_columns != POLYNOMIAL_DIMENSION {
+    let exact_zero_column = (0..polynomial.columns)
+        .find(|column| (0..polynomial.rows).all(|row| polynomial.get(row, *column) == 0.0));
+    if let Some(column) = exact_zero_column {
+        let exact_nonzero_columns = polynomial.columns.saturating_sub(
+            (0..polynomial.columns)
+                .filter(|candidate| {
+                    (0..polynomial.rows).all(|row| polynomial.get(row, *candidate) == 0.0)
+                })
+                .count(),
+        );
+        let mut standard_mode = [0.0; POLYNOMIAL_DIMENSION];
+        standard_mode[column] = 1.0;
         return Err(RepresentationFailure::PolynomialRankDeficient {
-            rank: exact_nonzero_columns,
+            rank: exact_nonzero_columns.min(polynomial.rows),
+            canonical_mode_residual: canonical_polynomial_mode_residual(
+                functionals,
+                coordinates,
+                standard_mode,
+            )?,
             solver_invoked: false,
             hidden_regularization_applied: false,
         });
@@ -626,10 +644,35 @@ fn verify_polynomial_rank(
             }
         }
     })?;
+    if polynomial.rows < POLYNOMIAL_DIMENSION {
+        let standard_mode =
+            smallest_right_mode(matrix.as_ref(), AlgebraicAnalysisStage::PolynomialRank)?;
+        return Err(RepresentationFailure::PolynomialRankDeficient {
+            rank: analysis.rank,
+            canonical_mode_residual: canonical_polynomial_mode_residual(
+                functionals,
+                coordinates,
+                standard_mode
+                    .try_into()
+                    .expect("the Cubic polynomial pairing has exactly four columns"),
+            )?,
+            solver_invoked: false,
+            hidden_regularization_applied: false,
+        });
+    }
     match analysis.decision {
         SpectralRankDecision::Reject => {
+            let standard_mode =
+                smallest_right_mode(matrix.as_ref(), AlgebraicAnalysisStage::PolynomialRank)?;
             return Err(RepresentationFailure::PolynomialRankDeficient {
                 rank: analysis.rank,
+                canonical_mode_residual: canonical_polynomial_mode_residual(
+                    functionals,
+                    coordinates,
+                    standard_mode
+                        .try_into()
+                        .expect("the Cubic polynomial pairing has exactly four columns"),
+                )?,
                 solver_invoked: false,
                 hidden_regularization_applied: false,
             });
@@ -658,6 +701,101 @@ fn verify_polynomial_rank(
             backend_invoked: false,
         },
     ))
+}
+
+fn smallest_right_mode(
+    matrix: faer::MatRef<'_, f64>,
+    stage: AlgebraicAnalysisStage,
+) -> Result<Vec<f64>, RepresentationFailure> {
+    faer_backend::smallest_right_singular_vector(matrix).map_err(|failure| match failure {
+        faer_backend::DecompositionFailure::WorkspaceAllocation(failure) => {
+            RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
+                stage,
+                bytes: failure.bytes,
+                alignment: failure.alignment,
+                solver_invoked: false,
+            }
+        }
+        faer_backend::DecompositionFailure::NumericalError => {
+            RepresentationFailure::AlgebraicAnalysisFailure {
+                stage,
+                solver_invoked: false,
+            }
+        }
+    })
+}
+
+fn canonical_polynomial_mode_residual(
+    functionals: &[CanonicalFunctional],
+    coordinates: &CubicSolveCoordinateTransform,
+    mut standard_mode: [f64; POLYNOMIAL_DIMENSION],
+) -> Result<f64, RepresentationFailure> {
+    let scale = standard_mode
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    if !scale.is_finite() || scale == 0.0 {
+        return Err(RepresentationFailure::AlgebraicAnalysisFailure {
+            stage: AlgebraicAnalysisStage::PolynomialRank,
+            solver_invoked: false,
+        });
+    }
+    for coefficient in &mut standard_mode {
+        *coefficient /= scale;
+    }
+    let physical_mode = coordinates.to_physical(standard_mode);
+    let recovered_standard_mode = coordinates.to_standard(physical_mode);
+    let round_trip_error = relative_slice_error(&standard_mode, &recovered_standard_mode);
+    let functional_residual = functionals
+        .iter()
+        .map(|functional| {
+            let standard = coordinates
+                .to_standard_functional(functional)
+                .expect("an analyzed canonical functional has a finite standard form");
+            let response = functional
+                .evaluate_affine(
+                    physical_mode[0],
+                    [physical_mode[1], physical_mode[2], physical_mode[3]],
+                )
+                .abs();
+            let response_scale = standard
+                .terms()
+                .iter()
+                .map(|term| {
+                    let support = term.support();
+                    (term.value_coefficient()
+                        * (standard_mode[0]
+                            + standard_mode[1] * support[0]
+                            + standard_mode[2] * support[1]
+                            + standard_mode[3] * support[2]))
+                        .abs()
+                        + term
+                            .gradient_coefficient()
+                            .into_iter()
+                            .zip(standard_mode[1..].iter().copied())
+                            .map(|(left, right)| (left * right).abs())
+                            .sum::<f64>()
+                })
+                .sum::<f64>()
+                .max(1.0);
+            response / response_scale
+        })
+        .fold(0.0_f64, f64::max);
+    let residual = functional_residual.max(round_trip_error);
+    if !residual.is_finite() {
+        return Err(RepresentationFailure::AlgebraicAnalysisFailure {
+            stage: AlgebraicAnalysisStage::PolynomialRank,
+            solver_invoked: false,
+        });
+    }
+    if residual > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+        return Err(RepresentationFailure::AlgebraicAnalysisFailure {
+            stage: AlgebraicAnalysisStage::PolynomialRank,
+            solver_invoked: false,
+        });
+    }
+    Ok(residual)
 }
 
 fn assemble_kernel_pairing(
@@ -727,7 +865,11 @@ fn symmetrize(matrix: &mut DenseMatrix) {
     }
 }
 
-fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, RepresentationFailure> {
+fn verify_reduced_pairing(
+    matrix: &DenseMatrix,
+    polynomial: &DenseMatrix,
+    null_space: &HouseholderNullSpace,
+) -> Result<f64, RepresentationFailure> {
     if matrix.rows == 0 {
         return Ok(f64::INFINITY);
     }
@@ -784,15 +926,78 @@ fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, RepresentationFai
             }
         })?;
     match spectrum.decision {
-        SpectralRankDecision::Reject => Err(RepresentationFailure::ReducedPairingNotPositive {
-            classification: ReducedPairingFailureClassification::RankDeficient,
-            rank: spectrum.rank,
-            negative_pivots: failed_cholesky_inertia
-                .map(|inertia| inertia.negative)
-                .unwrap_or(0),
-            solver_invoked: false,
-            hidden_regularization_applied: false,
-        }),
+        SpectralRankDecision::Reject => {
+            let reduced_mode = smallest_right_mode(
+                faer_matrix.as_ref(),
+                AlgebraicAnalysisStage::ReducedSpectrum,
+            )?;
+            let expanded_mode = null_space.expand(&reduced_mode)?;
+            let reduced_scale = matrix
+                .values()
+                .iter()
+                .copied()
+                .map(f64::abs)
+                .fold(0.0_f64, f64::max)
+                .max(1.0)
+                * reduced_mode
+                    .iter()
+                    .copied()
+                    .map(f64::abs)
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0)
+                * matrix.columns.max(1) as f64;
+            let reduced_residual = (0..matrix.rows)
+                .map(|row| {
+                    (0..matrix.columns)
+                        .map(|column| matrix.get(row, column) * reduced_mode[column])
+                        .sum::<f64>()
+                        .abs()
+                })
+                .fold(0.0_f64, f64::max)
+                / reduced_scale;
+            let side_scale = polynomial
+                .values()
+                .iter()
+                .copied()
+                .map(f64::abs)
+                .fold(0.0_f64, f64::max)
+                .max(1.0)
+                * expanded_mode
+                    .iter()
+                    .copied()
+                    .map(f64::abs)
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0)
+                * polynomial.rows.max(1) as f64;
+            let side_residual = (0..polynomial.columns)
+                .map(|column| {
+                    (0..polynomial.rows)
+                        .map(|row| polynomial.get(row, column) * expanded_mode[row])
+                        .sum::<f64>()
+                        .abs()
+                })
+                .fold(0.0_f64, f64::max)
+                / side_scale;
+            let canonical_mode_residual = reduced_residual.max(side_residual);
+            if !canonical_mode_residual.is_finite()
+                || canonical_mode_residual > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+            {
+                return Err(RepresentationFailure::AlgebraicAnalysisFailure {
+                    stage: AlgebraicAnalysisStage::ReducedSpectrum,
+                    solver_invoked: false,
+                });
+            }
+            Err(RepresentationFailure::ReducedPairingNotPositive {
+                classification: ReducedPairingFailureClassification::RankDeficient,
+                rank: spectrum.rank,
+                negative_pivots: failed_cholesky_inertia
+                    .map(|inertia| inertia.negative)
+                    .unwrap_or(0),
+                canonical_mode_residual: Some(canonical_mode_residual),
+                solver_invoked: false,
+                hidden_regularization_applied: false,
+            })
+        }
         SpectralRankDecision::GrayZone => Err(RepresentationFailure::ReducedPairingGrayZone {
             solver_invoked: false,
             hidden_regularization_applied: false,
@@ -804,6 +1009,7 @@ fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, RepresentationFai
                         classification: ReducedPairingFailureClassification::NegativeCurvature,
                         rank: spectrum.rank,
                         negative_pivots: inertia.negative,
+                        canonical_mode_residual: None,
                         solver_invoked: false,
                         hidden_regularization_applied: false,
                     });
@@ -2434,6 +2640,7 @@ mod tests {
             failure,
             RepresentationFailure::PolynomialRankDeficient {
                 rank: 3,
+                canonical_mode_residual: 0.0,
                 solver_invoked: false,
                 hidden_regularization_applied: false,
             }
@@ -2451,7 +2658,12 @@ mod tests {
             }
         });
 
-        let failure = verify_polynomial_rank(&polynomial)
+        let coordinates = CubicSolveCoordinateTransform {
+            center: [0.0; 3],
+            length: 1.0,
+            degenerate_extent: false,
+        };
+        let failure = verify_polynomial_rank(&polynomial, &[], &coordinates)
             .expect_err("a ratio between the reject and accept bands is not guessed");
         match failure {
             RepresentationFailure::PolynomialRankGrayZone { evidence } => {
@@ -2467,6 +2679,8 @@ mod tests {
 
     #[test]
     fn reduced_spd_fallback_distinguishes_negative_rank_and_gray_evidence() {
+        let polynomial = DenseMatrix::from_fn(2, POLYNOMIAL_DIMENSION, |_, _| 0.0);
+        let null_space = HouseholderNullSpace::new(&polynomial, 0).unwrap();
         let negative = DenseMatrix::from_fn(2, 2, |row, column| {
             if row == column {
                 if row == 0 { 1.0 } else { -1.0 }
@@ -2474,7 +2688,7 @@ mod tests {
                 0.0
             }
         });
-        match verify_reduced_pairing(&negative)
+        match verify_reduced_pairing(&negative, &polynomial, &null_space)
             .expect_err("negative curvature must fail after the Cholesky-first path")
         {
             RepresentationFailure::ReducedPairingNotPositive {
@@ -2495,7 +2709,7 @@ mod tests {
 
         let two_by_two_pivot =
             DenseMatrix::from_fn(2, 2, |row, column| if row != column { 1.0 } else { 0.0 });
-        match verify_reduced_pairing(&two_by_two_pivot)
+        match verify_reduced_pairing(&two_by_two_pivot, &polynomial, &null_space)
             .expect_err("an indefinite two-by-two pivot must retain its inertia")
         {
             RepresentationFailure::ReducedPairingNotPositive {
@@ -2514,7 +2728,7 @@ mod tests {
 
         let rank_deficient =
             DenseMatrix::from_fn(2, 2, |row, column| (row == column && row == 0) as u8 as f64);
-        match verify_reduced_pairing(&rank_deficient)
+        match verify_reduced_pairing(&rank_deficient, &polynomial, &null_space)
             .expect_err("a zero reduced mode must be rank deficient")
         {
             RepresentationFailure::ReducedPairingNotPositive {
@@ -2539,7 +2753,7 @@ mod tests {
             }
         });
         assert_eq!(
-            verify_reduced_pairing(&gray)
+            verify_reduced_pairing(&gray, &polynomial, &null_space)
                 .expect_err("a reduced mode inside the spectral band remains undecided"),
             RepresentationFailure::ReducedPairingGrayZone {
                 solver_invoked: false,
@@ -2748,7 +2962,7 @@ mod tests {
                 assert!(evidence.no_model_produced);
                 assert!(!backend.attempts.is_empty());
                 assert!(backend.attempts.iter().any(|attempt| {
-                    attempt.termination == crate::kkt::SolveAttemptTermination::AcceptedCandidate
+                    attempt.termination == crate::kkt::SolveAttemptTermination::CandidateProduced
                 }));
             }
             other => panic!("unexpected failure: {other:?}"),

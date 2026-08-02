@@ -391,6 +391,95 @@ pub enum RankEvidenceDomain {
     BackendKkt,
 }
 
+/// Canonical field concept recovered from a numerical rank deficiency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RankDeficiencyConcept {
+    /// A mode in Cubic's complete affine polynomial space was not identified.
+    CubicPi1FieldMode,
+    /// A mode in the Cubic quotient-space functional span was not identified.
+    CubicQuotientFieldMode,
+}
+
+/// Proof that a rank loss was interpreted in canonical field semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterpretableRankDeficiencyEvidence {
+    concept: RankDeficiencyConcept,
+    domain: RankEvidenceDomain,
+    source_ids: Box<[SourceId]>,
+    semantic_roles: Box<[SemanticRolePath]>,
+    canonical_mode_residual: f64,
+    canonical_mode_verified: bool,
+    backend_invoked: bool,
+    hidden_regularization_applied: bool,
+}
+
+pub(crate) struct InterpretableRankDeficiencyEvidenceParts {
+    pub(crate) concept: RankDeficiencyConcept,
+    pub(crate) domain: RankEvidenceDomain,
+    pub(crate) source_ids: Vec<SourceId>,
+    pub(crate) semantic_roles: Vec<SemanticRolePath>,
+    pub(crate) canonical_mode_residual: f64,
+    pub(crate) canonical_mode_verified: bool,
+    pub(crate) backend_invoked: bool,
+    pub(crate) hidden_regularization_applied: bool,
+}
+
+impl InterpretableRankDeficiencyEvidence {
+    pub(crate) fn new(parts: InterpretableRankDeficiencyEvidenceParts) -> Self {
+        Self {
+            concept: parts.concept,
+            domain: parts.domain,
+            source_ids: parts.source_ids.into(),
+            semantic_roles: parts.semantic_roles.into(),
+            canonical_mode_residual: parts.canonical_mode_residual,
+            canonical_mode_verified: parts.canonical_mode_verified,
+            backend_invoked: parts.backend_invoked,
+            hidden_regularization_applied: parts.hidden_regularization_applied,
+        }
+    }
+
+    /// Returns the canonical field concept recovered from the rank evidence.
+    pub fn concept(&self) -> RankDeficiencyConcept {
+        self.concept
+    }
+
+    /// Returns the algebraic object whose null mode was interpreted.
+    pub fn domain(&self) -> RankEvidenceDomain {
+        self.domain
+    }
+
+    /// Returns every caller source participating in the interpreted mode.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns the corresponding canonical semantic roles.
+    pub fn semantic_roles(&self) -> &[SemanticRolePath] {
+        &self.semantic_roles
+    }
+
+    /// Returns the independently recomputed canonical null-mode residual.
+    pub fn canonical_mode_residual(&self) -> f64 {
+        self.canonical_mode_residual
+    }
+
+    /// Reports whether the null mode was mapped and checked in canonical semantics.
+    pub fn canonical_mode_verified(&self) -> bool {
+        self.canonical_mode_verified
+    }
+
+    /// Reports whether a candidate-producing backend was invoked first.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+
+    /// Reports whether any forbidden repair was used to alter the conclusion.
+    pub fn hidden_regularization_applied(&self) -> bool {
+        self.hidden_regularization_applied
+    }
+}
+
 /// Result of a versioned rank decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -924,10 +1013,20 @@ pub enum AnalysisFailureEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SolveAttemptTermination {
-    /// A candidate passed the backend-standard-form contract.
-    AcceptedCandidate,
-    /// A candidate was rejected by that contract.
-    RejectedCandidate,
+    /// The backend produced a nominal-accuracy candidate.
+    CandidateProduced,
+    /// The backend produced a reduced-accuracy candidate.
+    ReducedAccuracyCandidateProduced,
+    /// The backend produced evidence suggesting primal infeasibility.
+    PrimalInfeasibilityCandidate,
+    /// The backend produced evidence suggesting dual infeasibility.
+    DualInfeasibilityCandidate,
+    /// The configured iteration or resource limit was reached.
+    LimitReached,
+    /// The backend stopped after insufficient progress.
+    InsufficientProgress,
+    /// A configured callback requested termination.
+    CallbackTermination,
     /// The backend attempt stopped on a numerical error.
     NumericalError,
 }

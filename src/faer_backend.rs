@@ -370,6 +370,40 @@ pub(crate) fn singular_values(matrix: MatRef<'_, f64>) -> Result<Vec<f64>, Decom
     Ok(values)
 }
 
+pub(crate) fn smallest_right_singular_vector(
+    matrix: MatRef<'_, f64>,
+) -> Result<Vec<f64>, DecompositionFailure> {
+    let (nrows, ncols) = matrix.shape();
+    let mut values = vec![0.0; nrows.min(ncols)];
+    let mut right = Mat::<f64>::zeros(ncols, ncols);
+    let requirement = svd::svd_scratch::<f64>(
+        nrows,
+        ncols,
+        ComputeSvdVectors::No,
+        ComputeSvdVectors::Full,
+        parallelism(),
+        svd_params(),
+    );
+    let mut memory = allocate(requirement).map_err(DecompositionFailure::WorkspaceAllocation)?;
+    svd::svd(
+        matrix,
+        DiagMut::from_slice_mut(&mut values),
+        None,
+        Some(right.as_mut()),
+        parallelism(),
+        MemStack::new(&mut memory),
+        svd_params(),
+    )
+    .map_err(|_| DecompositionFailure::NumericalError)?;
+    if (0..ncols).any(|row| (0..ncols).any(|column| !right[(row, column)].is_finite())) {
+        return Err(DecompositionFailure::NumericalError);
+    }
+    let column = ncols
+        .checked_sub(1)
+        .ok_or(DecompositionFailure::NumericalError)?;
+    Ok((0..ncols).map(|row| right[(row, column)]).collect())
+}
+
 pub(crate) fn self_adjoint_eigenvalues(
     matrix: MatRef<'_, f64>,
 ) -> Result<Vec<f64>, DecompositionFailure> {
