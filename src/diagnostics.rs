@@ -2,7 +2,7 @@
 
 pub use crate::cubic_equality::RecoveryVerificationFailureReason as RecoveryVerificationReason;
 pub use crate::functional::SemanticRolePath;
-use crate::functional::SourceId;
+use crate::functional::{GroupId, SourceId};
 pub use crate::numerical::NumericalPolicyId;
 
 /// GeoRBF's semantic conclusion for a failed fit.
@@ -13,6 +13,10 @@ pub enum ProblemDiagnosis {
     InvalidProblem,
     /// Two locally comparable hard inputs have incompatible exact targets.
     DirectInputConflict,
+    /// Shift-invariant relations did not select an absolute field representative.
+    UnidentifiedAdditiveGauge,
+    /// A one-member shared level set did not constrain or connect its latent.
+    UninformativeSharedLevelSet,
     /// The observations did not identify every observable field mode.
     UnidentifiedFieldMode,
     /// A numerical decision fell between the versioned accept/reject bands.
@@ -25,6 +29,80 @@ pub enum ProblemDiagnosis {
     RecoveryVerificationFailure,
     /// Numerical execution failed without proving a stronger diagnosis.
     NumericalFailure,
+}
+
+/// Stable proof that every supplied relation is invariant to a global constant shift.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnidentifiedAdditiveGaugeEvidence {
+    source_ids: Box<[SourceId]>,
+    group_ids: Box<[GroupId]>,
+    backend_invoked: bool,
+}
+
+impl UnidentifiedAdditiveGaugeEvidence {
+    pub(crate) fn new(
+        source_ids: Vec<SourceId>,
+        group_ids: Vec<GroupId>,
+        backend_invoked: bool,
+    ) -> Self {
+        Self {
+            source_ids: source_ids.into(),
+            group_ids: group_ids.into(),
+            backend_invoked,
+        }
+    }
+
+    /// Returns every shift-invariant caller source in stable order.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns every affected semantic latent in stable group order.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Reports whether a backend was called before this structural conclusion.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+}
+
+/// Stable proof that one shared-level latent has no informative relation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UninformativeSharedLevelSetEvidence {
+    group_id: GroupId,
+    member_source_id: SourceId,
+    backend_invoked: bool,
+}
+
+impl UninformativeSharedLevelSetEvidence {
+    pub(crate) fn new(
+        group_id: GroupId,
+        member_source_id: SourceId,
+        backend_invoked: bool,
+    ) -> Self {
+        Self {
+            group_id,
+            member_source_id,
+            backend_invoked,
+        }
+    }
+
+    /// Returns the uninformative semantic latent's stable group identity.
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+
+    /// Returns the only member relation's caller-owned identity.
+    pub fn member_source_id(&self) -> &SourceId {
+        &self.member_source_id
+    }
+
+    /// Reports whether a backend was called before this structural conclusion.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
 }
 
 /// Stable source and target evidence for a direct hard-input contradiction.
@@ -77,6 +155,82 @@ impl DirectInputConflictEvidence {
     /// Returns the incompatible exact hard target.
     pub fn second_target(&self) -> f64 {
         self.second_target
+    }
+}
+
+/// Complete provenance for a contradiction proved by a hard-relation graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelationGraphConflictEvidence {
+    source_ids: Box<[SourceId]>,
+    group_ids: Box<[GroupId]>,
+    semantic_role: SemanticRolePath,
+    first_absolute_source: SourceId,
+    first_absolute_target: f64,
+    second_absolute_source: SourceId,
+    second_absolute_target: f64,
+    backend_invoked: bool,
+}
+
+impl RelationGraphConflictEvidence {
+    pub(crate) fn new(
+        source_ids: Vec<SourceId>,
+        group_ids: Vec<GroupId>,
+        semantic_role: SemanticRolePath,
+        first_absolute_source: SourceId,
+        first_absolute_target: f64,
+        second_absolute_source: SourceId,
+        second_absolute_target: f64,
+    ) -> Self {
+        Self {
+            source_ids: source_ids.into(),
+            group_ids: group_ids.into(),
+            semantic_role,
+            first_absolute_source,
+            first_absolute_target,
+            second_absolute_source,
+            second_absolute_target,
+            backend_invoked: false,
+        }
+    }
+
+    /// Returns every caller-owned source on the contradictory graph cycle.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns every referenced semantic group on the contradictory cycle.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Returns the semantic role of the relation that closed the cycle.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the source of the first incompatible absolute target.
+    pub fn first_absolute_source(&self) -> &SourceId {
+        &self.first_absolute_source
+    }
+
+    /// Returns the first incompatible absolute target without derived arithmetic.
+    pub fn first_absolute_target(&self) -> f64 {
+        self.first_absolute_target
+    }
+
+    /// Returns the source of the second incompatible absolute target.
+    pub fn second_absolute_source(&self) -> &SourceId {
+        &self.second_absolute_source
+    }
+
+    /// Returns the second incompatible absolute target without derived arithmetic.
+    pub fn second_absolute_target(&self) -> f64 {
+        self.second_absolute_target
+    }
+
+    /// Reports whether a backend was invoked before proving the contradiction.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
     }
 }
 

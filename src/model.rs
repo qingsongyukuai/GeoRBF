@@ -1,10 +1,12 @@
 //! Immutable solved models and single-point field sampling.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
 use crate::cubic_equality::RecoveredCubicField;
+use crate::functional::GroupId;
 use crate::geometry::{Point3, Vector3};
 use crate::problem::ProblemSnapshot;
 
@@ -21,9 +23,17 @@ impl fmt::Debug for SolvedModel {
 }
 
 impl SolvedModel {
-    pub(crate) fn new(snapshot: ProblemSnapshot, field: RecoveredCubicField) -> Self {
+    pub(crate) fn new(
+        snapshot: ProblemSnapshot,
+        field: RecoveredCubicField,
+        shared_level_values: BTreeMap<GroupId, f64>,
+    ) -> Self {
         Self {
-            inner: Arc::new(SolvedModelData { snapshot, field }),
+            inner: Arc::new(SolvedModelData {
+                snapshot,
+                field,
+                shared_level_values,
+            }),
         }
     }
 
@@ -47,12 +57,18 @@ impl SolvedModel {
     pub fn problem_snapshot(&self) -> &ProblemSnapshot {
         &self.inner.snapshot
     }
+
+    /// Returns a recovered shared-level or horizon value by stable GroupId.
+    pub fn shared_level_value(&self, group_id: &GroupId) -> Option<f64> {
+        self.inner.shared_level_values.get(group_id).copied()
+    }
 }
 
 #[derive(Debug)]
 struct SolvedModelData {
     snapshot: ProblemSnapshot,
     field: RecoveredCubicField,
+    shared_level_values: BTreeMap<GroupId, f64>,
 }
 
 /// One coherent field value and complete input-frame gradient.

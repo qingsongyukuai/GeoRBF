@@ -36,9 +36,11 @@ the NUM-009 formula
 1e-10 * characteristic_scale + 1e-8 * relation_reference_scale
 ```
 
-where the characteristic field scale comes from Cubic FieldEnergy over `L`
-and relation references are projected off the additive field gauge. Derivative
-references retain their explicit gradient scale. Each tolerance records its
+where the characteristic field scale is the maximum of Cubic FieldEnergy over
+`L` and the explicit gradient-implied field scale over `L`; relation references
+are projected off the additive field gauge. This keeps a nonconstant affine
+field's value tolerance physical even though its Cubic quotient energy is zero.
+Each tolerance records its
 physical, solve-coordinate, scaled-KKT, and recovered-physical values; both
 coordinate and Ruiz forward/inverse maps are verified at `1e-11`.
 

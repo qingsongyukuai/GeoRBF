@@ -1,0 +1,3 @@
+# Keep tracked text byte-stable across operating systems. Binary files detected
+# by Git remain binary because text=auto only normalizes files classified as text.
+* text=auto eol=lf
