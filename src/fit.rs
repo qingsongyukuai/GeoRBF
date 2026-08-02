@@ -603,6 +603,7 @@ fn scalar_relation_count(snapshot: &ProblemSnapshot) -> Option<usize> {
             count.checked_add(match observation {
                 ObservationInput::FieldValue(_) => 1,
                 ObservationInput::Gradient(_) => 3,
+                ObservationInput::TangentDirection(_) => 1,
             })
         })?
         .checked_add(
@@ -721,32 +722,44 @@ struct ScalarObservation {
     source_id: SourceId,
     group_id: Option<GroupId>,
     support: [f64; 3],
-    component: DirectInputComponent,
+    functional: ScalarFunctionalDescriptor,
     semantic_role: SemanticRolePath,
     target: f64,
 }
 
-impl ScalarObservation {
-    fn dimension(&self) -> FunctionalDimension {
-        match self.component {
-            DirectInputComponent::FieldValue => FunctionalDimension::FieldValue,
-            DirectInputComponent::Gradient(_) => FunctionalDimension::FieldValuePerLength,
+#[derive(Debug, Clone, Copy)]
+struct ScalarFunctionalDescriptor {
+    dimension: FunctionalDimension,
+    value_coefficient: f64,
+    gradient_coefficient: [f64; 3],
+}
+
+impl ScalarFunctionalDescriptor {
+    fn field_value() -> Self {
+        Self {
+            dimension: FunctionalDimension::FieldValue,
+            value_coefficient: 1.0,
+            gradient_coefficient: [0.0; 3],
         }
     }
 
-    fn value_coefficient(&self) -> f64 {
-        match self.component {
-            DirectInputComponent::FieldValue => 1.0,
-            DirectInputComponent::Gradient(_) => 0.0,
+    fn gradient_component(axis: usize) -> Self {
+        Self {
+            dimension: FunctionalDimension::FieldValuePerLength,
+            value_coefficient: 0.0,
+            gradient_coefficient: std::array::from_fn(
+                |component| {
+                    if component == axis { 1.0 } else { 0.0 }
+                },
+            ),
         }
     }
 
-    fn gradient_coefficient(&self) -> [f64; 3] {
-        match self.component {
-            DirectInputComponent::FieldValue => [0.0; 3],
-            DirectInputComponent::Gradient(axis) => {
-                std::array::from_fn(|component| if component == axis { 1.0 } else { 0.0 })
-            }
+    fn directional_derivative(direction: [f64; 3]) -> Self {
+        Self {
+            dimension: FunctionalDimension::FieldValuePerLength,
+            value_coefficient: 0.0,
+            gradient_coefficient: direction,
         }
     }
 }
@@ -759,7 +772,7 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                 source_id: observation.source_id().clone(),
                 group_id: None,
                 support: observation.location().components(),
-                component: DirectInputComponent::FieldValue,
+                functional: ScalarFunctionalDescriptor::field_value(),
                 semantic_role: SemanticRolePath::new("field-value-observation/value"),
                 target: observation.value(),
             }],
@@ -772,13 +785,25 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                     source_id: observation.source_id().clone(),
                     group_id: None,
                     support: observation.location().components(),
-                    component: DirectInputComponent::Gradient(axis),
+                    functional: ScalarFunctionalDescriptor::gradient_component(axis),
                     semantic_role: SemanticRolePath::new(format!(
                         "gradient-observation/component/{axis}"
                     )),
                     target,
                 })
                 .collect(),
+            ObservationInput::TangentDirection(observation) => vec![ScalarObservation {
+                source_id: observation.source_id().clone(),
+                group_id: None,
+                support: observation.location().components(),
+                functional: ScalarFunctionalDescriptor::directional_derivative(
+                    observation.direction().components(),
+                ),
+                semantic_role: SemanticRolePath::new(
+                    "tangent-direction-observation/directional-derivative",
+                ),
+                target: 0.0,
+            }],
         })
         .collect()
 }
@@ -1236,13 +1261,14 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
     let mut value_constraints = CanonicalValueConstraintForest::default();
     for observation in scalar_observations(&snapshot.inner.observations) {
-        let edge = (observation.component == DirectInputComponent::FieldValue).then(|| {
-            value_constraints.add_absolute_support(
-                observation.support,
-                observation.target,
-                &observation.source_id,
-            )
-        });
+        let edge =
+            (observation.functional.dimension == FunctionalDimension::FieldValue).then(|| {
+                value_constraints.add_absolute_support(
+                    observation.support,
+                    observation.target,
+                    &observation.source_id,
+                )
+            });
         if let Some(edge) = &edge {
             lowering.record_graph_conflict(edge, &observation.semantic_role);
         }
@@ -1353,7 +1379,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                         source_id: gauge.source_id().clone(),
                         group_id: None,
                         support: point.components(),
-                        component: DirectInputComponent::FieldValue,
+                        functional: ScalarFunctionalDescriptor::field_value(),
                         semantic_role: role,
                         target: gauge.value(),
                     },
@@ -1405,11 +1431,11 @@ fn field_equality(
         observation.semantic_role.clone(),
     );
     let functional = CanonicalFunctional::new(
-        observation.dimension(),
+        observation.functional.dimension,
         vec![FunctionalTerm::new(
             observation.support,
-            observation.value_coefficient(),
-            observation.gradient_coefficient(),
+            observation.functional.value_coefficient,
+            observation.functional.gradient_coefficient,
         )],
     )
     .expect("checked public observations lower to a finite nonzero functional");
@@ -1417,7 +1443,7 @@ fn field_equality(
         Some(FunctionalUse::new(functional, provenance.clone())),
         Vec::new(),
         provenance,
-        observation.dimension(),
+        observation.functional.dimension,
         observation.target,
         participation,
     )
@@ -1539,12 +1565,6 @@ fn hard_relation_assessment(
         recovered_physical_tolerance: tolerance.recovered_physical_tolerance,
         tolerance_round_trip_error: tolerance.round_trip_error,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum DirectInputComponent {
-    FieldValue,
-    Gradient(usize),
 }
 
 fn failure_report(

@@ -1,10 +1,11 @@
-//! Supported absolute field-value and complete-gradient observations.
+//! Supported field-value, complete-gradient, and tangent-direction observations.
 
 use std::error::Error;
 use std::fmt;
 
 use crate::functional::SourceId;
 use crate::geometry::{Point3, Vector3};
+use crate::math::canonical_zero;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
 
 /// A hard observation of an absolute scalar field value at one point.
@@ -85,18 +86,96 @@ impl GradientObservation {
     }
 }
 
+/// A hard observation of an unoriented tangent direction at one point.
+///
+/// A tangent direction constrains only the directional derivative to zero. It
+/// permits a zero gradient and therefore does not assert a regular level set,
+/// a normal polarity, or a gradient magnitude. Use [`GradientObservation`]
+/// when the complete gradient vector is observed. Normal-direction semantics
+/// would additionally constrain gradient alignment, polarity or axial
+/// equivalence, and nonzero slope; no normal observation is public in this
+/// milestone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TangentDirectionObservation {
+    source_id: SourceId,
+    location: Point3,
+    direction: Vector3,
+}
+
+impl TangentDirectionObservation {
+    /// Creates a hard, unoriented unit tangent-direction observation.
+    ///
+    /// The direction is normalized in the problem's physical input
+    /// coordinates. Opposite and nonzero scaled vectors produce the same
+    /// canonical axial representative. Non-finite vectors cannot be created
+    /// by [`Vector3`], and a zero vector is rejected here.
+    pub fn try_new(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+    ) -> Result<Self, ObservationError> {
+        let components = direction.components();
+        let scale = components
+            .iter()
+            .map(|component| component.abs())
+            .fold(0.0_f64, f64::max);
+        if scale == 0.0 {
+            return Err(ObservationError::ZeroTangentDirection);
+        }
+        let scaled = components.map(|component| component / scale);
+        let norm = scaled
+            .into_iter()
+            .map(|component| component * component)
+            .sum::<f64>()
+            .sqrt();
+        let mut unit = scaled.map(|component| canonical_zero(component / norm));
+        if unit
+            .iter()
+            .find(|component| **component != 0.0)
+            .is_some_and(|component| component.is_sign_negative())
+        {
+            unit = unit.map(|component| canonical_zero(-component));
+        }
+        let direction = Vector3::try_new(unit[0], unit[1], unit[2])
+            .expect("normalizing a finite nonzero vector produces finite components");
+        Ok(Self {
+            source_id,
+            location,
+            direction,
+        })
+    }
+
+    /// Returns the stable caller-owned source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the observation location.
+    pub fn location(&self) -> Point3 {
+        self.location
+    }
+
+    /// Returns the canonical unit representative of the unoriented axis.
+    pub fn direction(&self) -> Vector3 {
+        self.direction
+    }
+}
+
 /// A rejected observation value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ObservationError {
     /// An absolute field value was NaN or infinite.
     NonFiniteFieldValue,
+    /// A tangent direction had no orientation because every component was zero.
+    ZeroTangentDirection,
 }
 
 impl fmt::Display for ObservationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NonFiniteFieldValue => formatter.write_str("field value is not finite"),
+            Self::ZeroTangentDirection => formatter.write_str("tangent direction is zero"),
         }
     }
 }
@@ -107,6 +186,7 @@ impl Error for ObservationError {}
 pub(crate) enum ObservationInput {
     FieldValue(FieldValueObservation),
     Gradient(GradientObservation),
+    TangentDirection(TangentDirectionObservation),
 }
 
 impl ObservationInput {
@@ -114,6 +194,7 @@ impl ObservationInput {
         match self {
             Self::FieldValue(observation) => observation.source_id(),
             Self::Gradient(observation) => observation.source_id(),
+            Self::TangentDirection(observation) => observation.source_id(),
         }
     }
 }
@@ -131,5 +212,13 @@ impl private::Sealed for GradientObservation {}
 impl ProblemInput for GradientObservation {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
         builder.add_observation(ObservationInput::Gradient(self))
+    }
+}
+
+impl private::Sealed for TangentDirectionObservation {}
+
+impl ProblemInput for TangentDirectionObservation {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_observation(ObservationInput::TangentDirection(self))
     }
 }

@@ -1850,6 +1850,14 @@ fn canonical_relation_tolerances(
     let field_value_gauge_offset = canonical_gauge_offset(problem, FunctionalDimension::FieldValue);
     let derivative_gauge_offset =
         canonical_gauge_offset(problem, FunctionalDimension::FieldValuePerLength);
+    let value_implied_field_scale = problem
+        .equalities
+        .iter()
+        .filter(|equality| equality.dimension == FunctionalDimension::FieldValue)
+        .map(|equality| {
+            (equality.target - equality.constant_shift_response() * field_value_gauge_offset).abs()
+        })
+        .fold(0.0_f64, f64::max);
     let derivative_implied_field_scale = representation.coordinates.length()
         * problem
             .equalities
@@ -1859,6 +1867,7 @@ fn canonical_relation_tolerances(
             .fold(0.0_f64, f64::max);
     let field_scale = (field_energy.abs() * representation.coordinates.length().powi(3))
         .sqrt()
+        .max(value_implied_field_scale)
         .max(derivative_implied_field_scale);
     let mut standard_by_kkt_row = vec![0.0; backend.scaling.cumulative_exponents.len()];
     let mut tolerance_plans = problem

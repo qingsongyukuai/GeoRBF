@@ -5,16 +5,21 @@ geological observations.
 
 Version 0.1.0 exposes complete public Cubic Equality tracers. Callers declare
 an input coordinate frame and units; add hard absolute field-value and complete
-gradient observations or atomically built shared level sets and geological
-horizons; choose an explicit additive field gauge where the relations are
-translation-invariant; build an immutable snapshot; and query field value,
-gradient, and recovered shared values from an immutable model.
+gradient observations, unoriented tangent directions, or atomically built
+shared level sets and geological horizons; choose an explicit additive field
+gauge where the relations are translation-invariant; build an immutable
+snapshot; and query field value, gradient, and recovered shared values from an
+immutable model. A tangent direction constrains only `t^T grad(f) = 0`: it
+allows zero gradient and carries neither the magnitude of a complete gradient
+observation nor the polarity and nonzero-slope semantics of a normal direction.
 
 ```rust,no_run
 use georbf::geometry::{
     FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel,
 };
-use georbf::observation::{FieldValueObservation, GradientObservation};
+use georbf::observation::{
+    FieldValueObservation, GradientObservation, TangentDirectionObservation,
+};
 use georbf::{Point3, ProblemBuilder, SourceId, Vector3};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,6 +50,11 @@ problem.add(GradientObservation::new(
     Point3::try_new(0.25, -0.5, 0.75)?,
     Vector3::try_new(0.5, -1.25, 0.75)?,
 ))?;
+problem.add(TangentDirectionObservation::try_new(
+    SourceId::new("tangent"),
+    Point3::try_new(0.25, -0.5, 0.75)?,
+    Vector3::try_new(2.5, 1.0, 0.0)?,
+)?)?;
 
 let snapshot = problem.build()?;
 let fit = snapshot.fit()?;
@@ -70,4 +80,5 @@ Implementation evidence is recorded for
 [#17](docs/implementation/17-cubic-equality-core.md),
 [#18](docs/implementation/18-cubic-equality-numerical-policy.md), and the public
 tracers in [#19](docs/implementation/19-public-absolute-field-tracer.md) and
-[#20](docs/implementation/20-shared-level-set-gauge.md).
+[#20](docs/implementation/20-shared-level-set-gauge.md), plus
+[#21](docs/implementation/21-tangent-direction-observation.md).
