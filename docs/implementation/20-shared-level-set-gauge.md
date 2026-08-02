@@ -31,42 +31,55 @@ zeroing, or backend minimum-norm representative is used.
 
 ## Canonical latent and derived equality form
 
-Lowering materializes one stable semantic latent record per group. The record
-owns its `GroupId`, field unit, and every member `SourceId` and support. Thus the
-canonical shared value remains present independently of input ordering and of
-the algebraic form selected below.
+Lowering materializes one stable semantic latent variable per group. The
+variable owns its `GroupId`, field unit, and every member `SourceId`. It remains
+an explicit primal variable from Canonical Problem IR through the augmented KKT
+and physical recovery; it is not reconstructed from the field afterward.
 
 The current all-hard Cubic path derives a deterministic equality realization:
 
-- an explicitly gauged level set lowers each member to the selected recovered
-  representative;
-- an ungauged multi-member level set lowers to a deterministic full-rank set of
-  Helmert-style mean contrasts in stable SourceId order;
-- a point gauge lowers as a distinct absolute convention functional.
+- every member lowers to `f(x_member) - h_group = 0` with its own source and
+  group provenance;
+- a level-set gauge lowers to `h_group = value`;
+- a point gauge lowers to `f(x_gauge) = value` as a distinct convention
+  relation.
 
-No member is assigned a value or selected as a semantic reference, so the
-contrast realization introduces no first-point anchor. Exact equalities are
-normalized, merged, and retain all original public relation assessments.
-Opposite-orientation duplicate contrasts share one backend row. This form is a
-recovery-mapped optimization only: after solving,
-GeoRBF evaluates every original member and recovers the latent as the stable
-mean of those equal values. The report independently verifies each canonical
-member residual against that recovered latent and each level-set gauge residual
-against its declared representative.
+No member is assigned a known value or selected as a semantic reference. Exact
+duplicate relations share a canonical row while retaining every caller-owned
+assessment. When two groups have the same complete support set, one independent
+member row connects each later latent and its remaining member equations stay
+in Canonical IR as verification-only relations; this avoids a redundant KKT row
+without merging `GroupId` identity.
+
+If no true field-value observation exists, the first gauge in stable `SourceId`
+order supplies the one solver constraint that selects the additive constant.
+All additional gauges remain canonical verification relations. If a true
+field-value observation already selects the absolute field, every explicit
+gauge is verification-only. Consequently additional conventions can accept or
+reject the chosen representative but cannot alter gradient, value differences,
+geometry, or FieldEnergy.
+
+Recover and Verify reads each semantic latent directly from the backend
+candidate, independently evaluates every member and gauge equation, applies a
+relation-specific physical tolerance, and rejects the candidate if any
+verification-only convention is incompatible. There is no post-hoc averaging
+or tolerance borrowed from another relation.
 
 The recovered `SharedLevelValue` retains `GroupId`, field unit, and all member
 sources. `SolvedModel::shared_level_value` exposes the same immutable value by
 `GroupId`. `HardRelationAssessment::group_id` completes source/group provenance
-for member and gauge relations without exposing a latent column, coefficient,
-matrix, or backend variable.
+for member and gauge relations without exposing a backend column, coefficient,
+or matrix.
 
 ## Preflight and physical verification
 
-A group whose distinct support contains only one point and whose latent is not
-referenced produces typed `UninformativeSharedLevelSet` evidence before backend
-execution. A level-set gauge is a real latent reference, so a gauged singleton
-is not misreported. If every relation is invariant to `f -> f + c` and there is
-neither a true field-value observation nor an explicit gauge, fit returns typed
+A group with exactly one member and whose latent is not referenced produces
+typed `UninformativeSharedLevelSet` evidence before backend execution. A
+level-set gauge is a real latent reference, so a gauged singleton is not
+misreported. Repeated locations in a multi-member group do not redefine the
+one-member semantic rule. If every relation is invariant to the simultaneous
+shift `f -> f + c`, `h_group -> h_group + c` and there is neither a true
+field-value observation nor an explicit gauge, fit returns typed
 `UnidentifiedAdditiveGauge` evidence with stably ordered source and group IDs,
 again before backend execution.
 
@@ -76,7 +89,9 @@ zero affine Cubic quotient energy, and complete provenance. Changing only the
 gauge shifts queried and shared field values by the same constant while leaving
 the full gradient and FieldEnergy unchanged. Reordering member construction and
 top-level inputs leaves the recovered shared-value map and all canonical
-observables unchanged.
+observables unchanged. Compatible secondary gauges leave geometry and energy
+unchanged; an incompatible secondary gauge is retained in the failed recovery
+report with its own provenance, residual, and physical tolerance.
 
 The manufactured affine case also closes a tolerance-policy edge: because an
 affine field has zero Cubic seminorm, NUM-009's characteristic field scale now

@@ -6,10 +6,11 @@ use std::fmt;
 
 use crate::capacity::{CapacityExceededEvidence, CapacityExceededReason};
 use crate::cubic_equality::{
-    AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalRelationToleranceEvidence,
-    CpdEvidence, CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, HardEquality,
-    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
-    ReducedPairingFailureClassification, RepresentationFailure,
+    AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
+    CanonicalHardEquality, CanonicalRelationToleranceEvidence, CpdEvidence, CubicCanonicalProblem,
+    CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
+    RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
+    RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
 };
 use crate::diagnostics::{
@@ -46,7 +47,7 @@ use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
 use crate::observation::ObservationInput;
 use crate::problem::{ProblemSnapshot, ThreadBudget};
-use crate::relation::{AdditiveFieldGaugeReference, SharedLevelSetInput};
+use crate::relation::AdditiveFieldGaugeReference;
 
 /// Successful fit output: one accepted model and its complete report.
 #[derive(Debug)]
@@ -119,11 +120,12 @@ impl ProblemSize {
         input_observations: usize,
         scalar_hard_relations: usize,
         canonical_hard_equalities: usize,
+        center_coefficients: usize,
         semantic_latents: usize,
+        solver_hard_equalities: usize,
     ) -> Self {
-        let center_coefficients = canonical_hard_equalities;
-        let primal_variables = center_coefficients + 4;
-        let equality_constraints = canonical_hard_equalities + 4;
+        let primal_variables = center_coefficients + 4 + semantic_latents;
+        let equality_constraints = solver_hard_equalities + 4;
         Self {
             input_observations,
             scalar_hard_relations,
@@ -458,14 +460,7 @@ impl FitReport {
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
-    let scalar_inputs = scalar_inputs(snapshot);
-    let (level_gauges, level_gauge_conflict) = level_gauge_targets(snapshot);
-    let lowering = lower_snapshot(
-        &scalar_inputs,
-        &snapshot.inner.shared_level_sets,
-        &level_gauges,
-        &snapshot.inner.field_unit,
-    );
+    let lowering = lower_snapshot(snapshot);
     let scalar_relation_count = scalar_observations(&snapshot.inner.observations).len()
         + snapshot
             .inner
@@ -475,10 +470,12 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             .sum::<usize>()
         + snapshot.inner.additive_field_gauges.len();
     let problem_size = ProblemSize::cubic_equality(
-        snapshot.inner.source_count,
+        snapshot.inner.observations.len(),
         scalar_relation_count,
         lowering.canonical_equalities.len(),
+        lowering.fitting_functional_count(),
         lowering.semantic_latents.len(),
+        lowering.solver_equality_count(),
     );
     let base_report = || FitReport {
         problem_size,
@@ -504,8 +501,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         unidentified_additive_gauge: None,
         uninformative_shared_level_set: None,
     };
-    if let Some(conflict) = level_gauge_conflict.or_else(|| lowering.direct_input_conflict.clone())
-    {
+    if let Some(conflict) = lowering.direct_input_conflict.clone() {
         let mut report = base_report();
         report.direct_input_conflict = Some(conflict);
         return Err(FitFailure {
@@ -513,26 +509,20 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             report: Box::new(report),
         });
     }
-    let referenced_groups = level_gauges
-        .keys()
+    let referenced_groups = snapshot
+        .inner
+        .additive_field_gauges
+        .iter()
+        .filter_map(|gauge| match gauge.reference() {
+            AdditiveFieldGaugeReference::LevelSet(group_id) => Some(group_id),
+            AdditiveFieldGaugeReference::Point(_) => None,
+        })
         .collect::<std::collections::BTreeSet<_>>();
-    if let Some(group) = snapshot.inner.shared_level_sets.iter().find(|group| {
-        let distinct_locations = group
-            .members()
-            .iter()
-            .map(|member| {
-                member.location().components().map(|coordinate| {
-                    if coordinate == 0.0 {
-                        0.0_f64.to_bits()
-                    } else {
-                        coordinate.to_bits()
-                    }
-                })
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        distinct_locations < 2 && !referenced_groups.contains(group.group_id())
-    }) {
+    if let Some(group) =
+        snapshot.inner.shared_level_sets.iter().find(|group| {
+            group.members().len() == 1 && !referenced_groups.contains(group.group_id())
+        })
+    {
         let mut report = base_report();
         report.uninformative_shared_level_set = Some(UninformativeSharedLevelSetEvidence::new(
             group.group_id().clone(),
@@ -581,8 +571,11 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             report: Box::new(report),
         });
     }
-    let solution = match CubicEqualityCore::solve(
-        lowering.canonical_equalities.clone(),
+    let solution = match CubicEqualityCore::solve_canonical(
+        CubicCanonicalProblem {
+            equalities: lowering.canonical_equalities.clone(),
+            semantic_latents: lowering.semantic_latents.clone(),
+        },
         snapshot.inner.global_anisotropy_metric.as_cubic_metric(),
     ) {
         Ok(solution) => solution,
@@ -597,12 +590,21 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             });
         }
     };
-    let shared_level_values = recover_shared_level_values(&lowering.semantic_latents, &solution);
+    let shared_level_values = solution
+        .semantic_latents
+        .iter()
+        .map(|latent| SharedLevelValue {
+            group_id: latent.group_id.clone(),
+            value: latent.value,
+            field_unit: latent.field_unit.clone(),
+            member_source_ids: latent.member_source_ids.clone().into(),
+        })
+        .collect::<Vec<_>>();
     let report = success_report(
         snapshot,
         problem_size,
         &solution,
-        &lowering.public_source_relations,
+        &lowering.source_relations,
         &shared_level_values,
     );
     let model = SolvedModel::new(
@@ -685,68 +687,46 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
 
 #[derive(Debug, Clone)]
 struct SourceHardRelation {
-    equality: HardEquality,
+    equality: CanonicalHardEquality,
     canonical_index: usize,
 }
 
 #[derive(Debug, Clone)]
 struct EqualityLowering {
     source_relations: Vec<SourceHardRelation>,
-    public_source_relations: Vec<SourceHardRelation>,
-    canonical_equalities: Vec<HardEquality>,
-    canonical_index_by_key: BTreeMap<FunctionalKey, (usize, f64)>,
+    canonical_equalities: Vec<CanonicalHardEquality>,
+    canonical_index_by_key: BTreeMap<CanonicalEqualityKey, (usize, f64)>,
     direct_input_conflict: Option<DirectInputConflictEvidence>,
-    semantic_latents: Vec<CanonicalSharedLevelLatent>,
-}
-
-#[derive(Debug, Clone)]
-struct CanonicalSharedLevelLatent {
-    group_id: GroupId,
-    field_unit: FieldUnitLabel,
-    members: Vec<CanonicalSharedLevelMember>,
-}
-
-#[derive(Debug, Clone)]
-struct CanonicalSharedLevelMember {
-    source_id: SourceId,
-    support: [f64; 3],
-}
-
-fn lower_observations(observations: &[ScalarObservation]) -> EqualityLowering {
-    let mut lowering = EqualityLowering {
-        public_source_relations: Vec::new(),
-        source_relations: Vec::new(),
-        canonical_equalities: Vec::new(),
-        canonical_index_by_key: BTreeMap::new(),
-        direct_input_conflict: None,
-        semantic_latents: Vec::new(),
-    };
-    for observation in observations {
-        lowering.push(hard_equality(observation), true);
-    }
-    lowering
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct FunctionalKey {
-    dimension: u8,
-    terms: Vec<([u64; 3], u64, [u64; 3])>,
+    semantic_latents: Vec<SemanticLatentDefinition>,
 }
 
 impl EqualityLowering {
-    fn push(&mut self, equality: HardEquality, public: bool) {
+    fn new() -> Self {
+        Self {
+            source_relations: Vec::new(),
+            canonical_equalities: Vec::new(),
+            canonical_index_by_key: BTreeMap::new(),
+            direct_input_conflict: None,
+            semantic_latents: Vec::new(),
+        }
+    }
+
+    fn push_source(&mut self, equality: CanonicalHardEquality) {
         let (key, normalized_target) = normalized_equality_key(&equality);
         let canonical_index =
             if let Some((index, first_target)) = self.canonical_index_by_key.get(&key).copied() {
                 if first_target != normalized_target && self.direct_input_conflict.is_none() {
                     let first = &self.canonical_equalities[index];
                     self.direct_input_conflict = Some(DirectInputConflictEvidence::new(
-                        first.usage().provenance().source().clone(),
-                        equality.usage().provenance().source().clone(),
-                        equality.usage().provenance().semantic_role().clone(),
+                        first.provenance().source().clone(),
+                        equality.provenance().source().clone(),
+                        equality.provenance().semantic_role().clone(),
                         first.target(),
                         equality.target(),
                     ));
+                }
+                if equality.participation() == CanonicalEqualityParticipation::SolverConstraint {
+                    self.canonical_equalities[index].promote_to_solver_constraint();
                 }
                 index
             } else {
@@ -756,39 +736,76 @@ impl EqualityLowering {
                     .insert(key, (index, normalized_target));
                 index
             };
-        let relation = SourceHardRelation {
+        self.source_relations.push(SourceHardRelation {
             equality,
             canonical_index,
-        };
-        self.source_relations.push(relation.clone());
-        if public {
-            self.public_source_relations.push(relation);
+        });
+    }
+
+    fn solver_equality_count(&self) -> usize {
+        self.canonical_equalities
+            .iter()
+            .filter(|equality| {
+                equality.participation() == CanonicalEqualityParticipation::SolverConstraint
+            })
+            .count()
+    }
+
+    fn fitting_functional_count(&self) -> usize {
+        let mut functionals = Vec::<CanonicalFunctional>::new();
+        for functional in self
+            .canonical_equalities
+            .iter()
+            .filter(|equality| {
+                equality.participation() == CanonicalEqualityParticipation::SolverConstraint
+            })
+            .filter_map(CanonicalHardEquality::field)
+            .map(FunctionalUse::functional)
+        {
+            if !functionals.iter().any(|existing| existing == functional) {
+                functionals.push(functional.clone());
+            }
         }
+        functionals.len()
     }
 }
 
-fn normalized_equality_key(equality: &HardEquality) -> (FunctionalKey, f64) {
-    let functional = equality.usage().functional();
-    let first_coefficient = functional
-        .terms()
-        .iter()
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonicalEqualityKey {
+    dimension: u8,
+    field_terms: Vec<([u64; 3], u64, [u64; 3])>,
+    latent_coefficients: Vec<(usize, u64)>,
+}
+
+fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEqualityKey, f64) {
+    let first_coefficient = equality
+        .field()
+        .into_iter()
+        .flat_map(|field| field.functional().terms())
         .flat_map(|term| {
             std::iter::once(term.value_coefficient()).chain(term.gradient_coefficient())
         })
+        .chain(
+            equality
+                .latent_coefficients()
+                .iter()
+                .map(|term| term.coefficient),
+        )
         .find(|coefficient| *coefficient != 0.0)
-        .expect("canonical functionals are nonzero");
+        .expect("a canonical equality has a field or semantic-latent coefficient");
     let sign = if first_coefficient.is_sign_negative() {
         -1.0
     } else {
         1.0
     };
-    let dimension = match functional.dimension() {
+    let dimension = match equality.dimension() {
         FunctionalDimension::FieldValue => 0,
         FunctionalDimension::FieldValuePerLength => 1,
     };
-    let terms = functional
-        .terms()
-        .iter()
+    let field_terms = equality
+        .field()
+        .into_iter()
+        .flat_map(|field| field.functional().terms())
         .map(|term| {
             (
                 term.support().map(f64::to_bits),
@@ -798,173 +815,153 @@ fn normalized_equality_key(equality: &HardEquality) -> (FunctionalKey, f64) {
             )
         })
         .collect();
-    (FunctionalKey { dimension, terms }, sign * equality.target())
+    let mut latent_coefficients = equality
+        .latent_coefficients()
+        .iter()
+        .map(|term| (term.latent, signed_coefficient_bits(sign, term.coefficient)))
+        .collect::<Vec<_>>();
+    latent_coefficients.sort_by_key(|(latent, _)| *latent);
+    (
+        CanonicalEqualityKey {
+            dimension,
+            field_terms,
+            latent_coefficients,
+        },
+        sign * equality.target(),
+    )
 }
 
-fn signed_coefficient_bits(sign: f64, coefficient: f64) -> u64 {
-    let value = sign * coefficient;
-    if value == 0.0 {
-        0.0_f64.to_bits()
-    } else {
-        value.to_bits()
+fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
+    let mut lowering = EqualityLowering::new();
+    for observation in scalar_observations(&snapshot.inner.observations) {
+        lowering.push_source(field_equality(
+            &observation,
+            CanonicalEqualityParticipation::SolverConstraint,
+        ));
     }
-}
 
-#[derive(Debug, Clone)]
-struct LevelGaugeTarget {
-    source_id: SourceId,
-    value: f64,
-}
-
-fn level_gauge_targets(
-    snapshot: &ProblemSnapshot,
-) -> (
-    BTreeMap<GroupId, LevelGaugeTarget>,
-    Option<DirectInputConflictEvidence>,
-) {
-    let mut targets = BTreeMap::<GroupId, LevelGaugeTarget>::new();
-    for gauge in &snapshot.inner.additive_field_gauges {
-        let AdditiveFieldGaugeReference::LevelSet(group_id) = gauge.reference() else {
-            continue;
-        };
-        if let Some(first) = targets.get(group_id).cloned() {
-            if first.value != gauge.value() {
-                return (
-                    targets,
-                    Some(DirectInputConflictEvidence::new(
-                        first.source_id.clone(),
-                        gauge.source_id().clone(),
-                        SemanticRolePath::new("additive-field-gauge/level-set"),
-                        first.value,
-                        gauge.value(),
-                    )),
-                );
-            }
-        } else {
-            targets.insert(
-                group_id.clone(),
-                LevelGaugeTarget {
-                    source_id: gauge.source_id().clone(),
-                    value: gauge.value(),
-                },
-            );
-        }
-    }
-    (targets, None)
-}
-
-fn scalar_inputs(snapshot: &ProblemSnapshot) -> Vec<ScalarObservation> {
-    let mut inputs = scalar_observations(&snapshot.inner.observations);
-    inputs.extend(
-        snapshot
-            .inner
-            .additive_field_gauges
-            .iter()
-            .filter_map(|gauge| match gauge.reference() {
-                AdditiveFieldGaugeReference::Point(point) => Some(ScalarObservation {
-                    source_id: gauge.source_id().clone(),
-                    group_id: None,
-                    support: point.components(),
-                    component: DirectInputComponent::FieldValue,
-                    semantic_role: SemanticRolePath::new("additive-field-gauge/point"),
-                    target: gauge.value(),
-                }),
-                AdditiveFieldGaugeReference::LevelSet(_) => None,
-            }),
-    );
-    inputs.sort_by(|left, right| {
-        left.source_id
-            .cmp(&right.source_id)
-            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
-    });
-    inputs
-}
-
-fn lower_snapshot(
-    scalar_inputs: &[ScalarObservation],
-    groups: &[SharedLevelSetInput],
-    level_gauges: &BTreeMap<GroupId, LevelGaugeTarget>,
-    field_unit: &FieldUnitLabel,
-) -> EqualityLowering {
-    let mut lowering = lower_observations(scalar_inputs);
-    for group in groups {
-        lowering.semantic_latents.push(CanonicalSharedLevelLatent {
+    let latent_index_by_group = snapshot
+        .inner
+        .shared_level_sets
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (group.group_id().clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut first_group_by_supports = BTreeMap::<Vec<[u64; 3]>, GroupId>::new();
+    for group in &snapshot.inner.shared_level_sets {
+        let latent = lowering.semantic_latents.len();
+        debug_assert_eq!(latent_index_by_group[group.group_id()], latent);
+        lowering.semantic_latents.push(SemanticLatentDefinition {
             group_id: group.group_id().clone(),
-            field_unit: field_unit.clone(),
-            members: group
+            field_unit: snapshot.inner.field_unit.clone(),
+            member_source_ids: group
                 .members()
                 .iter()
-                .map(|member| CanonicalSharedLevelMember {
-                    source_id: member.source_id().clone(),
-                    support: member.location().components(),
-                })
+                .map(|member| member.source_id().clone())
                 .collect(),
         });
-        if let Some(gauge) = level_gauges.get(group.group_id()) {
-            for member in group.members() {
-                let equality = hard_equality(&ScalarObservation {
-                    source_id: member.source_id().clone(),
-                    group_id: Some(group.group_id().clone()),
-                    support: member.location().components(),
-                    component: DirectInputComponent::FieldValue,
-                    semantic_role: SemanticRolePath::new("shared-level-set/member/value"),
-                    target: gauge.value,
-                });
-                lowering.push(equality, false);
-            }
-            continue;
-        }
-
-        for (index, member) in group.members()[1..].iter().enumerate() {
-            let previous_count = index + 1;
-            let mut terms = group.members()[..previous_count]
-                .iter()
-                .map(|previous| {
-                    FunctionalTerm::new(
-                        previous.location().components(),
-                        -1.0 / previous_count as f64,
-                        [0.0; 3],
-                    )
-                })
-                .collect::<Vec<_>>();
-            terms.push(FunctionalTerm::new(
-                member.location().components(),
-                1.0,
-                [0.0; 3],
-            ));
-            let Ok(functional) = CanonicalFunctional::new(FunctionalDimension::FieldValue, terms)
-            else {
-                continue;
-            };
-            let semantic_role = SemanticRolePath::new("shared-level-set/member-equality");
-            let relation_id = RelationId::new(format!(
-                "{}:{}:{}",
-                group.group_id().as_str(),
-                member.source_id().as_str(),
-                semantic_role.as_str()
-            ));
-            let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
-            let equality = HardEquality::new(
-                FunctionalUse::new(
-                    functional,
-                    UsageProvenance::new(
-                        member.source_id().clone(),
-                        Some(group.group_id().clone()),
-                        relation_id,
-                        residual_id,
-                        semantic_role,
-                    ),
-                ),
-                0.0,
+        let mut support_signature = group
+            .members()
+            .iter()
+            .map(|member| member.location().components().map(f64::to_bits))
+            .collect::<Vec<_>>();
+        support_signature.sort();
+        let repeats_existing_group = first_group_by_supports
+            .insert(support_signature, group.group_id().clone())
+            .is_some();
+        for (member_index, member) in group.members().iter().enumerate() {
+            let role = SemanticRolePath::new("shared-level-set/member/value");
+            let provenance = relation_provenance(
+                member.source_id().clone(),
+                Some(group.group_id().clone()),
+                role,
             );
-            lowering.push(equality, false);
+            let field = CanonicalFunctional::new(
+                FunctionalDimension::FieldValue,
+                vec![FunctionalTerm::new(
+                    member.location().components(),
+                    1.0,
+                    [0.0; 3],
+                )],
+            )
+            .expect("a shared-level member lowers to one finite value functional");
+            lowering.push_source(CanonicalHardEquality::new(
+                Some(FunctionalUse::new(field, provenance.clone())),
+                vec![SemanticLatentCoefficient {
+                    latent,
+                    coefficient: -1.0,
+                }],
+                provenance,
+                FunctionalDimension::FieldValue,
+                0.0,
+                if !repeats_existing_group || member_index == 0 {
+                    CanonicalEqualityParticipation::SolverConstraint
+                } else {
+                    CanonicalEqualityParticipation::VerificationOnly
+                },
+            ));
+        }
+    }
+
+    let has_absolute_observation = snapshot
+        .inner
+        .observations
+        .iter()
+        .any(|observation| matches!(observation, ObservationInput::FieldValue(_)));
+    let primary_gauge = (!has_absolute_observation)
+        .then(|| snapshot.inner.additive_field_gauges.first())
+        .flatten()
+        .map(|gauge| gauge.source_id());
+    for gauge in &snapshot.inner.additive_field_gauges {
+        let participation = if primary_gauge == Some(gauge.source_id()) {
+            CanonicalEqualityParticipation::SolverConstraint
+        } else {
+            CanonicalEqualityParticipation::VerificationOnly
+        };
+        match gauge.reference() {
+            AdditiveFieldGaugeReference::Point(point) => {
+                lowering.push_source(field_equality(
+                    &ScalarObservation {
+                        source_id: gauge.source_id().clone(),
+                        group_id: None,
+                        support: point.components(),
+                        component: DirectInputComponent::FieldValue,
+                        semantic_role: SemanticRolePath::new("additive-field-gauge/point"),
+                        target: gauge.value(),
+                    },
+                    participation,
+                ));
+            }
+            AdditiveFieldGaugeReference::LevelSet(group_id) => {
+                let role = SemanticRolePath::new("additive-field-gauge/level-set");
+                let provenance =
+                    relation_provenance(gauge.source_id().clone(), Some(group_id.clone()), role);
+                lowering.push_source(CanonicalHardEquality::new(
+                    None,
+                    vec![SemanticLatentCoefficient {
+                        latent: latent_index_by_group[group_id],
+                        coefficient: 1.0,
+                    }],
+                    provenance,
+                    FunctionalDimension::FieldValue,
+                    gauge.value(),
+                    participation,
+                ));
+            }
         }
     }
     lowering
 }
 
-fn hard_equality(observation: &ScalarObservation) -> HardEquality {
-    let semantic_role = observation.semantic_role.clone();
+fn field_equality(
+    observation: &ScalarObservation,
+    participation: CanonicalEqualityParticipation,
+) -> CanonicalHardEquality {
+    let provenance = relation_provenance(
+        observation.source_id.clone(),
+        observation.group_id.clone(),
+        observation.semantic_role.clone(),
+    );
     let functional = CanonicalFunctional::new(
         observation.dimension(),
         vec![FunctionalTerm::new(
@@ -974,25 +971,33 @@ fn hard_equality(observation: &ScalarObservation) -> HardEquality {
         )],
     )
     .expect("checked public observations lower to a finite nonzero functional");
-    let relation_id = RelationId::new(format!(
-        "{}:{}",
-        observation.source_id.as_str(),
-        semantic_role.as_str()
-    ));
-    let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
-    HardEquality::new(
-        FunctionalUse::new(
-            functional,
-            UsageProvenance::new(
-                observation.source_id.clone(),
-                observation.group_id.clone(),
-                relation_id,
-                residual_id,
-                semantic_role,
-            ),
-        ),
+    CanonicalHardEquality::new(
+        Some(FunctionalUse::new(functional, provenance.clone())),
+        Vec::new(),
+        provenance,
+        observation.dimension(),
         observation.target,
+        participation,
     )
+}
+
+fn relation_provenance(
+    source_id: SourceId,
+    group_id: Option<GroupId>,
+    semantic_role: SemanticRolePath,
+) -> UsageProvenance {
+    let relation_id = RelationId::new(format!("{}:{}", source_id.as_str(), semantic_role.as_str()));
+    let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
+    UsageProvenance::new(source_id, group_id, relation_id, residual_id, semantic_role)
+}
+
+fn signed_coefficient_bits(sign: f64, coefficient: f64) -> u64 {
+    let value = sign * coefficient;
+    if value == 0.0 {
+        0.0_f64.to_bits()
+    } else {
+        value.to_bits()
+    }
 }
 
 fn success_report(
@@ -1005,9 +1010,9 @@ fn success_report(
     let problem_size = ProblemSize {
         input_observations: planned_problem_size.input_observations,
         scalar_hard_relations: planned_problem_size.scalar_hard_relations,
-        canonical_hard_equalities: solution.assembly.hard_equalities,
+        canonical_hard_equalities: solution.assembly.canonical_hard_equalities,
         center_coefficients: solution.assembly.field_coefficients,
-        semantic_latents: planned_problem_size.semantic_latents,
+        semantic_latents: solution.assembly.semantic_latents,
         auxiliary_variables: 0,
         cone_blocks: 0,
         primal_variables: solution.assembly.primal_variables,
@@ -1017,56 +1022,11 @@ fn success_report(
     let mut hard_relations = source_relations
         .iter()
         .map(|source_relation| {
-            let usage = source_relation.equality.usage();
             let tolerance = solution.relation_tolerances[source_relation.canonical_index];
-            let recovered_value = solution.field.evaluate_functional(usage.functional());
+            let recovered_value = solution.hard_equalities[source_relation.canonical_index].value;
             hard_relation_assessment(source_relation, recovered_value, tolerance)
         })
         .collect::<Vec<_>>();
-    if !shared_level_values.is_empty() {
-        let tolerance = solution
-            .relation_tolerances
-            .iter()
-            .copied()
-            .filter(|evidence| evidence.dimension == FunctionalDimension::FieldValue)
-            .max_by(|left, right| left.physical_tolerance.total_cmp(&right.physical_tolerance))
-            .expect("a shared level set contributes a field-value equality");
-        for (group, recovered) in snapshot
-            .inner
-            .shared_level_sets
-            .iter()
-            .zip(shared_level_values)
-        {
-            for member in group.members() {
-                let field_value = solution.field.sample(member.location().components()).value;
-                hard_relations.push(hard_relation_assessment_from_parts(
-                    member.source_id().clone(),
-                    Some(group.group_id().clone()),
-                    SemanticRolePath::new("shared-level-set/member/value"),
-                    recovered.value,
-                    field_value,
-                    tolerance,
-                ));
-            }
-            hard_relations.extend(snapshot.inner.additive_field_gauges.iter().filter_map(
-                |gauge| match gauge.reference() {
-                    AdditiveFieldGaugeReference::LevelSet(group_id)
-                        if group_id == group.group_id() =>
-                    {
-                        Some(hard_relation_assessment_from_parts(
-                            gauge.source_id().clone(),
-                            Some(group.group_id().clone()),
-                            SemanticRolePath::new("additive-field-gauge/level-set"),
-                            gauge.value(),
-                            recovered.value,
-                            tolerance,
-                        ))
-                    }
-                    _ => None,
-                },
-            ));
-        }
-    }
     hard_relations.sort_by(|left, right| {
         left.source_id
             .cmp(&right.source_id)
@@ -1113,13 +1073,13 @@ fn hard_relation_assessment(
     recovered_value: f64,
     tolerance: CanonicalRelationToleranceEvidence,
 ) -> HardRelationAssessment {
-    let usage = source_relation.equality.usage();
-    let target = source_relation.equality.target();
+    let equality = &source_relation.equality;
+    let target = equality.target();
     HardRelationAssessment {
-        source_id: usage.provenance().source().clone(),
-        group_id: usage.provenance().group().cloned(),
-        semantic_role: usage.provenance().semantic_role().clone(),
-        dimension: match usage.functional().dimension() {
+        source_id: equality.provenance().source().clone(),
+        group_id: equality.provenance().group().cloned(),
+        semantic_role: equality.provenance().semantic_role().clone(),
+        dimension: match equality.dimension() {
             FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
             FunctionalDimension::FieldValuePerLength => ResidualDimension::FieldValuePerLength,
         },
@@ -1134,62 +1094,6 @@ fn hard_relation_assessment(
         recovered_physical_tolerance: tolerance.recovered_physical_tolerance,
         tolerance_round_trip_error: tolerance.round_trip_error,
     }
-}
-
-fn hard_relation_assessment_from_parts(
-    source_id: SourceId,
-    group_id: Option<GroupId>,
-    semantic_role: SemanticRolePath,
-    target: f64,
-    recovered_value: f64,
-    tolerance: CanonicalRelationToleranceEvidence,
-) -> HardRelationAssessment {
-    HardRelationAssessment {
-        source_id,
-        group_id,
-        semantic_role,
-        dimension: ResidualDimension::FieldValue,
-        target,
-        recovered_value,
-        residual: recovered_value - target,
-        tolerance: tolerance.physical_tolerance,
-        characteristic_scale: tolerance.characteristic_scale,
-        relation_reference_scale: target.abs(),
-        standard_tolerance: tolerance.standard_tolerance,
-        scaled_kkt_tolerance: tolerance.scaled_kkt_tolerance,
-        recovered_physical_tolerance: tolerance.recovered_physical_tolerance,
-        tolerance_round_trip_error: tolerance.round_trip_error,
-    }
-}
-
-fn recover_shared_level_values(
-    latents: &[CanonicalSharedLevelLatent],
-    solution: &CubicEqualitySolution,
-) -> Vec<SharedLevelValue> {
-    latents
-        .iter()
-        .map(|latent| {
-            let values = latent
-                .members
-                .iter()
-                .map(|member| solution.field.sample(member.support).value)
-                .collect::<Vec<_>>();
-            let origin = values[0];
-            let value = origin
-                + values.iter().map(|value| *value - origin).sum::<f64>() / values.len() as f64;
-            SharedLevelValue {
-                group_id: latent.group_id.clone(),
-                value,
-                field_unit: latent.field_unit.clone(),
-                member_source_ids: latent
-                    .members
-                    .iter()
-                    .map(|member| member.source_id.clone())
-                    .collect::<Vec<_>>()
-                    .into(),
-            }
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

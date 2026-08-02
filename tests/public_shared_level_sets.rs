@@ -138,6 +138,26 @@ fn an_unreferenced_single_member_group_is_diagnosed_as_uninformative() {
 }
 
 #[test]
+fn repeated_locations_do_not_turn_a_multi_member_group_into_a_singleton() {
+    let mut group = SharedLevelSetBuilder::new(GroupId::new("repeated-location-group"));
+    group
+        .add_member(SourceId::new("repeated/member-a"), point(0.0, 0.0, 0.0))
+        .unwrap();
+    group
+        .add_member(SourceId::new("repeated/member-b"), point(0.0, 0.0, 0.0))
+        .unwrap();
+    let mut builder = problem_builder();
+    builder.add(group.build().unwrap()).unwrap();
+
+    let failure = builder.build().unwrap().fit().unwrap_err();
+    assert_eq!(
+        failure.diagnosis(),
+        ProblemDiagnosis::UnidentifiedAdditiveGauge
+    );
+    assert!(failure.report().uninformative_shared_level_set().is_none());
+}
+
+#[test]
 fn user_can_fit_a_manufactured_planar_horizon_and_recover_its_semantic_latent() {
     let horizon_id = GroupId::new("planar-horizon");
     let mut horizon = HorizonBuilder::new(horizon_id.clone());
@@ -278,6 +298,52 @@ fn fit_point_gauged_horizon(
     builder.build().unwrap().fit().unwrap()
 }
 
+fn fit_horizon_with_point_gauges(
+    first_value: f64,
+    second_value: Option<f64>,
+) -> Result<georbf::fit::FitSuccess, georbf::fit::FitFailure> {
+    let mut horizon = HorizonBuilder::new(GroupId::new("multi-gauge-horizon"));
+    for (source, location) in [
+        ("multi/member-a", point(-2.0, 0.0, 1.0)),
+        ("multi/member-b", point(2.0, 0.0, -1.0)),
+        ("multi/member-c", point(0.0, 4.0, 1.0)),
+    ] {
+        horizon.add_member(SourceId::new(source), location).unwrap();
+    }
+    let mut builder = problem_builder();
+    builder.add(horizon.build().unwrap()).unwrap();
+    builder
+        .add(GradientObservation::new(
+            SourceId::new("multi/gradient"),
+            point(0.5, -0.5, 0.25),
+            Vector3::try_new(0.5, -0.25, 1.0).unwrap(),
+        ))
+        .unwrap();
+    builder
+        .add(
+            AdditiveFieldGauge::at_point(
+                SourceId::new("multi/gauge-a"),
+                point(0.0, 0.0, 0.0),
+                first_value,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    if let Some(value) = second_value {
+        builder
+            .add(
+                AdditiveFieldGauge::at_point(
+                    SourceId::new("multi/gauge-b"),
+                    point(2.0, 0.0, 0.0),
+                    value,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    builder.build().unwrap().fit()
+}
+
 #[test]
 fn additive_gauge_and_input_reordering_preserve_canonical_observables() {
     let baseline = fit_point_gauged_horizon(3.0, false);
@@ -322,6 +388,62 @@ fn additive_gauge_and_input_reordering_preserve_canonical_observables() {
         reordered.report().shared_level_values(),
         baseline.report().shared_level_values()
     );
+}
+
+#[test]
+fn additional_gauges_verify_the_additive_representative_without_changing_geometry() {
+    let baseline = fit_horizon_with_point_gauges(3.0, None).unwrap();
+    let compatible = fit_horizon_with_point_gauges(3.0, Some(4.0)).unwrap();
+    let shifted = fit_horizon_with_point_gauges(10.0, Some(11.0)).unwrap();
+    let query = point(0.75, -1.0, 2.0);
+    let baseline_sample = baseline.model().evaluate(query).unwrap();
+    let compatible_sample = compatible.model().evaluate(query).unwrap();
+    let shifted_sample = shifted.model().evaluate(query).unwrap();
+
+    for ((baseline_component, compatible_component), shifted_component) in baseline_sample
+        .gradient()
+        .components()
+        .into_iter()
+        .zip(compatible_sample.gradient().components())
+        .zip(shifted_sample.gradient().components())
+    {
+        assert_close(compatible_component, baseline_component);
+        assert_close(shifted_component, baseline_component);
+    }
+    assert_close(
+        compatible.report().field_energy().unwrap(),
+        baseline.report().field_energy().unwrap(),
+    );
+    assert_close(
+        shifted.report().field_energy().unwrap(),
+        baseline.report().field_energy().unwrap(),
+    );
+    assert_close(compatible_sample.value(), baseline_sample.value());
+    assert_close(shifted_sample.value() - baseline_sample.value(), 7.0);
+    assert_eq!(
+        compatible
+            .report()
+            .hard_relations()
+            .iter()
+            .filter(|relation| relation.source_id().as_str().starts_with("multi/gauge-"))
+            .count(),
+        2
+    );
+
+    let failure = fit_horizon_with_point_gauges(3.0, Some(4.5))
+        .expect_err("an incompatible secondary convention must reject during recovery");
+    assert_eq!(
+        failure.diagnosis(),
+        ProblemDiagnosis::RecoveryVerificationFailure
+    );
+    assert!(failure.report().recovery_verification().is_some());
+    let conflicting = failure
+        .report()
+        .hard_relations()
+        .iter()
+        .find(|relation| relation.source_id().as_str() == "multi/gauge-b")
+        .expect("the failed verification retains secondary-gauge provenance");
+    assert!(conflicting.residual().abs() > conflicting.tolerance());
 }
 
 #[test]
@@ -453,7 +575,7 @@ fn duplicate_derived_equalities_do_not_merge_semantic_latent_identity() {
     assert_eq!(success.report().problem_size().semantic_latents(), 2);
     assert_eq!(
         success.report().problem_size().canonical_hard_equalities(),
-        5
+        8
     );
     assert_close(
         success
