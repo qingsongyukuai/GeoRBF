@@ -1,17 +1,37 @@
-name: Product v0.1 - Cubic equality core
+name: Product v0.1 - Equality Spine release gates
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Validation profile to execute
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - release
+  schedule:
+    - cron: "23 18 * * *"
   push:
+    branches:
+      - main
+    tags:
+      - v0.1.0
     paths:
       - ".github/workflows/product-v0.1.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
       - "src/**"
-      - "validation/oracle/cubic-v1/**"
-      - "scripts/audit.py"
-      - "scripts/test_audit.py"
+      - "tests/**"
+      - "examples/**"
+      - "validation/**"
+      - "scripts/**"
+      - "spikes/**"
+      - "docs/implementation/**"
+      - "README.md"
+      - "RELEASE_NOTES.md"
   pull_request:
     paths:
       - ".github/workflows/product-v0.1.yml"
@@ -19,16 +39,131 @@ on:
       - "Cargo.toml"
       - "rust-toolchain.toml"
       - "src/**"
-      - "validation/oracle/cubic-v1/**"
-      - "scripts/audit.py"
-      - "scripts/test_audit.py"
+      - "tests/**"
+      - "examples/**"
+      - "validation/**"
+      - "scripts/**"
+      - "spikes/**"
+      - "docs/implementation/**"
+      - "README.md"
+      - "RELEASE_NOTES.md"
 
 permissions:
   contents: read
 
 jobs:
+  validation-profile:
+    name: Classify validation profile
+    runs-on: ubuntu-24.04
+    outputs:
+      profile: ${{ steps.classify.outputs.profile }}
+    steps:
+      - name: Classify this event once for all gated jobs
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          REQUESTED_PROFILE: ${{ inputs.profile }}
+        run: |
+          profile=standard
+          if [[ "$EVENT_REF" == refs/tags/* ]]; then
+            profile=release
+          elif [[ "$EVENT_NAME" == workflow_dispatch && "$REQUESTED_PROFILE" == release ]]; then
+            profile=release
+          elif [[ "$EVENT_NAME" == schedule ]]; then
+            profile=extended
+          fi
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+
   native-product:
-    name: ${{ matrix.target }}
+    name: product / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            property_cases: 256
+            property_seed: 250101
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            property_cases: 32
+            property_seed: 250102
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            property_cases: 32
+            property_seed: 250103
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            property_cases: 32
+            property_seed: 250104
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            property_cases: 32
+            property_seed: 250105
+    runs-on: ${{ matrix.runner }}
+    env:
+      EXPECTED_RUSTC: rustc 1.85.0
+      EXPECTED_TARGET: ${{ matrix.target }}
+      PROPTEST_CASES: ${{ matrix.property_cases }}
+      PROPTEST_RNG_SEED: ${{ matrix.property_seed }}
+    steps:
+      - name: Check out the accepted commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Verify types and compile targets
+        run: cargo check --locked --all-targets
+      - name: Run the cumulative Equality Spine corpus
+        run: cargo test --locked --all-targets
+      - name: Run rustdoc and compile tests
+        run: cargo test --locked --doc
+      - name: Deny Clippy warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build the optimized release artifact
+        run: cargo build --locked --release
+      - name: Run the public Equality Spine example
+        run: cargo run --locked --example equality_spine
+      - name: Test cross-platform and release audits
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
+      - name: Audit release traceability and adopted oracle identity
+        run: python scripts/release_audit.py
+      - name: Audit dependencies, features, build scripts, native links, and licenses
+        run: python scripts/audit.py
+      - name: Emit the complete feature graph
+        run: cargo tree --locked --target all -e features
+      - name: Verify the publishable package
+        run: cargo package --locked
+
+  release-corpus:
+    name: release-corpus / seed-${{ matrix.seed }}
+    needs: validation-profile
+    if: needs.validation-profile.outputs.profile != 'standard'
+    strategy:
+      fail-fast: false
+      matrix:
+        seed:
+          - 25010000
+          - 25012500
+          - 25015000
+          - 25017500
+    runs-on: ubuntu-24.04
+    env:
+      PROPTEST_CASES: 2500
+      PROPTEST_RNG_SEED: ${{ matrix.seed }}
+    steps:
+      - name: Check out the accepted commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Run one fixed T12 property seed range
+        run: cargo test --locked --test public_problem_contract
+
+  dependency-risk:
+    name: dependency-risk / ${{ matrix.target }}
+    needs: validation-profile
+    if: needs.validation-profile.outputs.profile == 'release'
     strategy:
       fail-fast: false
       matrix:
@@ -45,22 +180,85 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     env:
-      EXPECTED_RUSTC: rustc 1.85.0
       EXPECTED_TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        working-directory: spikes/faer-clarabel
     steps:
-      - name: Check out the product crate
+      - name: Check out the accepted commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install the exact MSRV
         run: rustup toolchain install 1.85.0 --profile minimal
-      - name: Verify types and compile targets
+      - name: Typecheck the locked dependency envelope
         run: cargo check --locked --all-targets
-      - name: Run the issue 16 and 17 behavior cases
+      - name: Run the T15 behavior seam
         run: cargo test --locked --all-targets
-      - name: Test cross-platform audit identity
-        run: python -m unittest discover -s scripts -p "test_*.py" -v
-      - name: Audit dependencies, features, build scripts, native links, and licenses
+      - name: Emit dependency capability evidence
+        run: cargo run --locked
+      - name: Audit the risk dependency closure
         run: python scripts/audit.py
-      - name: Emit the complete feature graph
+      - name: Emit the risk feature graph
         run: cargo tree --locked --target all -e features
-      - name: Verify the publishable package
-        run: cargo package --locked
+
+  cubic-cpd-risk:
+    name: Cubic CPD KKT/QP/SOCP recovery
+    needs: validation-profile
+    if: needs.validation-profile.outputs.profile == 'release'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: spikes/cubic-cpd-recovery
+    steps:
+      - name: Check out the accepted commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Typecheck the locked recovery probe
+        run: cargo check --locked --all-targets
+      - name: Run the T06 and T07 behavior seams
+        run: cargo test --locked --all-targets
+      - name: Emit recovery capability evidence
+        run: cargo run --locked
+
+  oracle-regeneration:
+    name: Independent oracle regeneration and consumer integrity
+    needs: validation-profile
+    if: needs.validation-profile.outputs.profile != 'standard'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the accepted commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install the exact interpreter
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.3"
+          cache: pip
+          cache-dependency-path: spikes/oracle-fixtures/requirements.lock
+      - name: Install the empty locked dependency closure
+        run: python -m pip install --require-hashes -r spikes/oracle-fixtures/requirements.lock
+      - name: Test the independent T13 pipeline
+        run: python -m unittest discover -s spikes/oracle-fixtures/tests -v
+      - name: Regenerate the oracle twice without drift
+        run: |
+          python spikes/oracle-fixtures/generate.py --check
+          python spikes/oracle-fixtures/generate.py --check
+      - name: Verify independent and adopted fixture integrity
+        run: |
+          python spikes/oracle-fixtures/verify.py
+          python scripts/release_audit.py
+
+  oracle-oci:
+    name: Digest-pinned oracle replay
+    needs: validation-profile
+    if: needs.validation-profile.outputs.profile == 'release'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the accepted commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Replay in the fixed OCI image
+        run: |
+          docker run --rm \
+            --mount type=bind,source="$GITHUB_WORKSPACE",target=/workspace,readonly \
+            --workdir /workspace/spikes/oracle-fixtures \
+            python:3.12.3-slim-bookworm@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63 \
+            sh -ec 'python -m pip install --require-hashes -r requirements.lock && python -m unittest discover -s tests -v && python generate.py --check && python generate.py --check && python verify.py'

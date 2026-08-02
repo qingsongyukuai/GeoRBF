@@ -1,0 +1,172 @@
+{
+  "schema_version": "georbf-traceability-v1",
+  "release": "0.1.0",
+  "evidence_sets": {
+    "issue16": [
+      {"path": "src/kkt.rs", "contains": "capacity_report_envelope_covers_the_fixed_kkt_evidence"},
+      {"path": "scripts/audit.py", "contains": "audit.result=PROVEN"}
+    ],
+    "risk13": [
+      {"path": "spikes/faer-clarabel/tests/probe.rs", "contains": "faer_exposes_the_required_dense_kkt_and_rank_evidence"}
+    ],
+    "issue17": [
+      {"path": "src/cubic.rs", "contains": "cubic_general_jet_matches_the_independent_fixture"},
+      {"path": "src/cubic_equality.rs", "contains": "cubic_representation_retains_full_pi1_and_passes_cpd_preflight"}
+    ],
+    "risk15": [
+      {"path": "spikes/oracle-fixtures/tests/test_t13.py", "contains": "test_committed_outputs_regenerate_without_a_byte_diff"},
+      {"path": "scripts/release_repository_checks.py", "contains": "audit_oracle_mirror"}
+    ],
+    "issue18": [
+      {"path": "src/kkt.rs", "contains": "ruiz_congruence_runs_eight_quantized_rounds_and_is_reversible"},
+      {"path": "src/cubic_equality.rs", "contains": "damaged_coordinate_map_is_a_recovery_failure_not_a_backend_contract_failure"}
+    ],
+    "issue19": [
+      {"path": "tests/public_affine_workflow.rs", "contains": "user_can_fit_and_sample_an_absolute_affine_field"},
+      {"path": "tests/public_frame_covariance.rs", "contains": "field_observables_are_covariant_under_a_legal_frame_transform"}
+    ],
+    "issue20": [
+      {"path": "tests/public_shared_level_sets.rs", "contains": "user_can_fit_a_manufactured_planar_horizon_and_recover_its_semantic_latent"}
+    ],
+    "issue21": [
+      {"path": "tests/public_tangent_directions.rs", "contains": "tangent_direction_fits_through_cubic_equality_and_is_physically_reverified"}
+    ],
+    "issue22": [
+      {"path": "tests/public_problem_contract.rs", "contains": "dangling_references_aggregate_stably_and_the_builder_can_be_repaired"}
+    ],
+    "issue23": [
+      {"path": "tests/public_fit_diagnostics.rs", "contains": "preflight_retains_all_evidence_and_selects_primary_diagnosis_stably"},
+      {"path": "tests/public_input_validation.rs", "contains": "contradictory_hard_values_return_typed_source_evidence_without_solver_attempts"}
+    ],
+    "issue24": [
+      {"path": "tests/public_model_queries.rs", "contains": "logical_batch_smoke_accepts_one_hundred_thousand_locations"},
+      {"path": "tests/public_model_queries.rs", "contains": "cloned_models_support_concurrent_single_and_varied_batch_queries"}
+    ],
+    "issue25": [
+      {"path": "tests/public_equality_spine_release.rs", "contains": "user_can_run_the_complete_v0_1_equality_spine"},
+      {"path": ".github/workflows/product-v0.1.yml", "contains": "release-corpus"},
+      {"path": "scripts/release_traceability.py", "contains": "EXPECTED_REQUIREMENTS"}
+    ]
+  },
+  "documentation_sets": {
+    "issue16": [
+      {"path": "docs/implementation/16-production-equality-spine.md", "contains": "Production admission verdict"}
+    ],
+    "risk13": [
+      {"path": "docs/risk-spikes/13-faer-clarabel-dependency-envelope.md", "contains": "Dependency and license audit"}
+    ],
+    "issue17": [
+      {"path": "docs/implementation/17-cubic-equality-core.md", "contains": "Cubic contract and oracle adoption"}
+    ],
+    "risk15": [
+      {"path": "docs/risk-spikes/15-independent-oracle-fixtures.md", "contains": "Fixed envelope"}
+    ],
+    "issue18": [
+      {"path": "docs/implementation/18-cubic-equality-numerical-policy.md", "contains": "Physical canonical form and reversible solve coordinates"}
+    ],
+    "issue19": [
+      {"path": "docs/implementation/19-public-absolute-field-tracer.md", "contains": "Public boundary"}
+    ],
+    "issue20": [
+      {"path": "docs/implementation/20-shared-level-set-gauge.md", "contains": "Public groups and gauges"}
+    ],
+    "issue21": [
+      {"path": "docs/implementation/21-tangent-direction-observation.md", "contains": "Public tangent semantics"}
+    ],
+    "issue22": [
+      {"path": "docs/implementation/22-equality-builder-problem-snapshot-contract.md", "contains": "Contract closure"}
+    ],
+    "issue23": [
+      {"path": "docs/implementation/23-equality-structured-diagnostics-fit-report.md", "contains": "Strict fit outcome and complete report"}
+    ],
+    "issue24": [
+      {"path": "docs/implementation/24-immutable-model-batch-query.md", "contains": "One single/batch evaluation meaning"}
+    ],
+    "issue25": [
+      {"path": "docs/implementation/25-equality-spine-release.md", "contains": "Traceability audit"},
+      {"path": "RELEASE_NOTES.md", "contains": "Supported scope"}
+    ]
+  },
+  "requirements": [
+    {"id": "PAPI-001", "behavior": "The crate exposes an in-process three-dimensional f64 scalar-field library and no unsupported application surface.", "api_ir": "georbf public crate -> ProblemBuilder scalar-field workflow", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-002", "behavior": "The package is one Rust 2024 crate at MSRV 1.85 with a pure-Rust, feature-free production envelope.", "api_ir": "Cargo package contract -> georbf crate and audited dependency graph", "evidence": "issue16", "documentation": "issue16"},
+    {"id": "PAPI-003", "behavior": "The public module and crate-root re-export surface is deliberately closed and contains no prelude.", "api_ir": "crate root -> named public modules and selected owned re-exports", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-004", "behavior": "Public signatures use crate-owned geometry and domain types and seal implementation extension points.", "api_ir": "public constructors -> crate-owned Point3/Vector3 and sealed ProblemInput", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-005", "behavior": "Public fields stay private and extensible enums and standard traits carry their intended SemVer meaning.", "api_ir": "public domain types -> private representation and non-exhaustive outcomes", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-006", "behavior": "Every problem owns an explicit orthonormal coordinate frame, handedness, and opaque unit labels without conversion defaults.", "api_ir": "ProblemBuilder::new -> InputCoordinateFrame and field-unit contract", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-007", "behavior": "Caller-owned SourceId and GroupId identities remain distinct, stable, and independent of insertion order.", "api_ir": "input constructors -> SourceId/GroupId provenance identities", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-008", "behavior": "ProblemBuilder is the only mutable phase, rejects local mutations atomically, and returns a repairable aggregate BuildFailure.", "api_ir": "checked input -> ProblemBuilder::add/build -> immutable ProblemSnapshot", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-009", "behavior": "Forward-referenced shared groups are added atomically and cannot be empty or incrementally mutated.", "api_ir": "HorizonBuilder/SharedLevelSetBuilder -> atomic ProblemBuilder group input", "evidence": "issue20", "documentation": "issue20"},
+    {"id": "PAPI-011", "behavior": "Kernel configuration resolves explicitly to Cubic for the hard Equality path with an independent field-energy normalization.", "api_ir": "KernelConfig::default -> resolved Cubic KernelContract", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-012", "behavior": "Fit is synchronous and zero-argument, with numerical policy and thread budget frozen into the snapshot.", "api_ir": "ProblemSnapshot::fit -> resolved FitConfiguration execution", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "PAPI-013", "behavior": "Every fit returns either a complete model and report or a typed diagnosis and equally complete report, never a partial model.", "api_ir": "ProblemSnapshot::fit -> Result<FitSuccess, FitFailure>", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "PAPI-014", "behavior": "Solved models are immutable and thread-safe, and single and ordered batch queries return the same value-gradient sample semantics.", "api_ir": "SolvedModel::evaluate/evaluate_batch -> FieldSample", "evidence": "issue24", "documentation": "issue24"},
+    {"id": "PAPI-015", "behavior": "A model exposes its snapshot, recovered shared values, and resolved audit configuration without exposing backend coefficients.", "api_ir": "SolvedModel audit/shared-value accessors -> owned semantic observables", "evidence": "issue24", "documentation": "issue24"},
+    {"id": "PAPI-017", "behavior": "Expected input, preflight, capacity, backend, and numerical failures use structured return values rather than panics.", "api_ir": "builder/fit/query boundaries -> typed failure enums", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "PAPI-018", "behavior": "Fit and query planning use the 2,000-constraint and 100,000-location resource envelope with checked admission.", "api_ir": "capacity planners -> admitted fit and 100k logical batch", "evidence": "issue24", "documentation": "issue24"},
+    {"id": "DOM-001", "behavior": "Finite geological observations constrain one implicit scalar field whose queries return value and full gradient.", "api_ir": "absolute observations -> SolvedModel FieldSample", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "DOM-002", "behavior": "A Horizon is a shared-level set with an unknown semantic field value, not a known isovalue.", "api_ir": "HorizonBuilder -> SharedLevelSet canonical latent", "evidence": "issue20", "documentation": "issue20"},
+    {"id": "DOM-003", "behavior": "Shared-level latents retain stable identity and singleton uninformative groups are diagnosed before solving.", "api_ir": "GroupId shared latent -> preflight and recovered shared value", "evidence": "issue20", "documentation": "issue20"},
+    {"id": "DOM-005", "behavior": "A gradient observation is a full vector equality with field-per-length units and preserved magnitude and polarity.", "api_ir": "GradientObservation -> three canonical derivative equalities", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "DOM-010", "behavior": "A tangent observation normalizes an unoriented direction and constrains only its zero directional derivative.", "api_ir": "TangentDirectionObservation -> canonical t dot grad(f) equality", "evidence": "issue21", "documentation": "issue21"},
+    {"id": "DOM-017", "behavior": "Hard observations remain exact feasible-set relations and are never approximated, relaxed, or silently discarded.", "api_ir": "hard observation enforcement -> canonical equality relation", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "DOM-019", "behavior": "Offset-invariant inputs require an explicit field-value observation or additive field gauge before fit.", "api_ir": "AdditiveFieldGauge -> fixed representative for the global constant mode", "evidence": "issue20", "documentation": "issue20"},
+    {"id": "DOM-020", "behavior": "Exact hard duplicates remain auditable while direct target and geometry conflicts are diagnosed without perturbation.", "api_ir": "ProblemSnapshot preflight -> duplicate provenance and DirectInputConflict", "evidence": "issue22", "documentation": "issue22"},
+    {"id": "DOM-021", "behavior": "Legal similarity-frame transforms preserve field values and apply the physical chain rule to gradients.", "api_ir": "InputCoordinateFrame transform -> covariant Point3/Vector3 observables", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "DOM-022", "behavior": "A problem has one checked determinant-one SPD anisotropy metric, resolved to identity when absent.", "api_ir": "GlobalAnisotropyMetric input -> resolved kernel-distance metric", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "IR-001", "behavior": "Canonical Problem IR is the sole computational meaning between an immutable snapshot and recover-and-verify.", "api_ir": "ProblemSnapshot -> CanonicalProblem -> algebraic plan -> recovered model", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "IR-002", "behavior": "Scalar functionals use a deterministic finite value-and-gradient normal form with exact support merging.", "api_ir": "GeneralFunctional terms -> normalized CanonicalFunctional", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "IR-003", "behavior": "Functional dimensions and provenance usage edges stay separate from interned structural identity.", "api_ir": "typed functional usage -> provenance edge plus canonical functional identity", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "IR-004", "behavior": "Every shared-level value remains an explicit semantic latent with identity, units, provenance, and recovery.", "api_ir": "SharedLevelSet GroupId -> CanonicalLatent -> SolvedModel shared value", "evidence": "issue20", "documentation": "issue20"},
+    {"id": "IR-005", "behavior": "Canonical scalar affine expressions keep hard enforcement separate from residual and objective concepts.", "api_ir": "observation lowering -> ScalarAffineExpression and Equality relation", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "IR-007", "behavior": "Physical canonical coordinates remain unscaled while every derived coordinate and scaling transform is reversible and audited.", "api_ir": "CanonicalProblem -> CoordinateMap/RuizScaling -> physical recovery", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "IR-008", "behavior": "Stable semantic identities drive a provenance graph independent of matrix row, column, or input ordering.", "api_ir": "SourceId/GroupId usage -> canonical row provenance -> recovered observables", "evidence": "issue19", "documentation": "issue19"},
+    {"id": "IR-009", "behavior": "Preflight retains the canonical IR and produces layered structural, conflict, graph, and CPD evidence.", "api_ir": "CanonicalProblem -> non-mutating PreflightReport", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "IR-010", "behavior": "The representer span is built only from fitting functionals and records reconstruction independently of later queries.", "api_ir": "canonical fit functionals -> RepresentationPlan reconstruction map", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "IR-011", "behavior": "Cubic representation carries full Pi1 pairing, side conditions, rank, and reduced-positive-definiteness obligations.", "api_ir": "resolved Cubic contract -> K/P pairings and Pi1 side condition", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "IR-012", "behavior": "The Equality route derives a solver-independent symmetric KKT form before faer realization.", "api_ir": "CanonicalProblem -> SymmetricKktPlan -> faer dense adapter", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "IR-013", "behavior": "Queries reuse canonical functional and kernel pairing semantics while single and batch plans preserve order.", "api_ir": "query Point3 -> canonical evaluation functional -> shared evaluator", "evidence": "issue24", "documentation": "issue24"},
+    {"id": "IR-014", "behavior": "Backend output is only a candidate until field, polynomial, latents, provenance, energy, and physical residuals independently verify.", "api_ir": "backend candidate -> RecoverAndVerify -> SolvedModel", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "KER-001", "behavior": "The closed kernel registry resolves the Equality release default to Cubic without fallback or custom kernels.", "api_ir": "KernelConfig::Cubic/default -> resolved KernelContract", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-002", "behavior": "The Cubic kernel is exactly anisotropic distance cubed and accepts no length parameter.", "api_ir": "CubicKernel::value -> r_M cubed", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-004", "behavior": "The Cubic first-order jet provides analytic value, first gradients, mixed gradient, and a zero origin limit.", "api_ir": "CubicKernel::jet -> value/gradient/mixed-jet observables", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-005", "behavior": "Anisotropy enters only through metric distance and the Cubic jet applies the full physical-coordinate chain rule.", "api_ir": "GlobalAnisotropyMetric -> Cubic metric jet", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-006", "behavior": "Cubic is treated as CPD order two with mandatory full Pi1 rank and reduced strict positivity checks.", "api_ir": "Cubic pairing matrices -> Pi1 CPD preflight", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-007", "behavior": "The Cubic polynomial stays outside the seminorm and is never deleted, anchored, jittered, or replaced to hide a missing mode.", "api_ir": "Cubic quotient representation -> explicit polynomial and independent gauge diagnosis", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-008", "behavior": "Resolved Cubic field energy uses the explicit positive normalization with its physical scale covariance.", "api_ir": "FieldEnergyNormalization -> Cubic quotient seminorm", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "KER-009", "behavior": "The Cubic contract is protected by independent golden, jet, covariance, CPD, affine-reproduction, and energy evidence.", "api_ir": "Cubic KernelContract -> oracle-backed contract corpus", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "NUM-001", "behavior": "Production Equality solving uses the admitted pure-Rust faer dense KKT route.", "api_ir": "SymmetricKktPlan -> faer factorization adapter", "evidence": "issue16", "documentation": "issue16"},
+    {"id": "NUM-002", "behavior": "The package build and correctness envelope covers the five supported native targets with compatible licenses.", "api_ir": "release target matrix -> georbf package build and conformance", "evidence": "issue16", "documentation": "issue16"},
+    {"id": "NUM-003", "behavior": "Solve coordinates use the deterministic support-bounding-box center and one positive global length scale.", "api_ir": "canonical supports/kernel scale -> CoordinateMap center and length", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-004", "behavior": "Cubic Pi1 uses normalized coordinates and the KKT receives eight rounds of bounded power-of-two Ruiz congruence.", "api_ir": "physical Cubic KKT -> normalized Pi1 and Ruiz-scaled KKT", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-006", "behavior": "Equality assembly contains complete K, P, and hard rows and verifies polynomial rank and reduced positivity before solve.", "api_ir": "Cubic RepresentationPlan -> augmented symmetric KKT", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "NUM-007", "behavior": "Rank decisions use exact structure plus RRQR/SVD thresholds and preserve a typed numerical gray zone.", "api_ir": "scaled rank evidence -> accepted/deficient/gray RankDecision", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-008", "behavior": "Reduced positivity and symmetric KKT evidence use factorization, inertia, SVD, and backward-error contracts.", "api_ir": "algebraic plan matrices -> definiteness/inertia/backend-contract evidence", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-009", "behavior": "Canonical acceptance tolerances derive from gauge-invariant physical relation and objective scales.", "api_ir": "canonical physical scales -> relation and objective AcceptanceEnvelope", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-010", "behavior": "A quadratic objective with affine equalities routes deterministically to the symmetric faer KKT path.", "api_ir": "canonical algebraic capabilities -> EqualityRoute::SymmetricKkt", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "NUM-011", "behavior": "The Equality attempt plan is deterministic, bounded, and cannot loosen semantics or change kernel or form family.", "api_ir": "NumericalPolicyId -> bounded faer attempt sequence", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-012", "behavior": "Every attempt records backend fingerprint, settings, scaling, termination, residual evidence, threads, and failure reason.", "api_ir": "faer adapter attempt -> SolveAttemptReport", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "NUM-013", "behavior": "Backend capabilities and candidates are isolated behind a solver-independent plan and typed faer realization boundary.", "api_ir": "AlgebraicPlan -> BackendCapabilities -> faer realization", "evidence": "risk13", "documentation": "risk13"},
+    {"id": "NUM-014", "behavior": "Checked capacity planning rejects fit peaks above 8 GiB and query scratch above 256 MiB before large allocation.", "api_ir": "problem/query dimensions -> CapacityReport -> admission decision", "evidence": "issue24", "documentation": "issue24"},
+    {"id": "NUM-015", "behavior": "The versioned numerical policy owns scaling, rank, acceptance, attempt, and resource boundaries independently of backend identity.", "api_ir": "NumericalPolicyId::default -> complete numerical contract", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "DIA-001", "behavior": "Fit reports separate backend attempt termination from the stable public problem diagnosis.", "api_ir": "SolveAttemptTermination plus evidence -> FitReport and ProblemDiagnosis", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "DIA-002", "behavior": "Validation and preflight own input, semantic, conflict, mode, rank, gray-zone, and capacity diagnoses without inferring them from status.", "api_ir": "builder/preflight evidence -> typed non-backend diagnoses", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "DIA-003", "behavior": "Solved and almost-solved terminations remain candidates subject to the identical physical acceptance envelope.", "api_ir": "backend termination candidate -> canonical acceptance decision", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "DIA-005", "behavior": "Backend standard-form failure is distinguished from later canonical recovery or physical verification failure.", "api_ir": "candidate verification boundary -> BackendContractViolation or RecoveryVerificationFailure", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "DIA-006", "behavior": "Success reports retain deterministic sizes, relation, rank, attempt, backend, energy, latent, residual, and provenance evidence.", "api_ir": "accepted recovered solution -> complete FitReport", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "DIA-007", "behavior": "Coexisting evidence selects a primary diagnosis by the fixed semantic precedence while retaining secondary evidence.", "api_ir": "PreflightEvidence/SolveEvidence -> ordered ProblemDiagnosis", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "DIA-008", "behavior": "Reports avoid inventing per-source dual or objective values where merged mathematics makes them non-identifiable.", "api_ir": "duplicate/group evidence -> aggregate auditable report quantities", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "DIA-009", "behavior": "Regression evidence freezes semantic observables and provenance rather than coefficients, pivots, layouts, or iterations.", "api_ir": "FitReport/SolvedModel -> canonical regression observables", "evidence": "issue23", "documentation": "issue23"},
+    {"id": "VAL-001", "behavior": "Analytic and manufactured truth outrank the production backend in the correctness evidence hierarchy.", "api_ir": "independent Cubic fixtures -> production result comparison", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "VAL-002", "behavior": "A production-independent 120-digit locked oracle regenerates adopted hexadecimal and decimal fixtures byte-for-byte.", "api_ir": "declarative oracle case -> high-precision fixture -> adopted validation corpus", "evidence": "risk15", "documentation": "risk15"},
+    {"id": "VAL-003", "behavior": "Cubic oracle evidence covers origin and general jets, derivative signs, symmetry, and frame/metric covariance.", "api_ir": "oracle Cubic case set -> jet tolerance comparison", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "VAL-004", "behavior": "Functional and manufactured evidence covers contractions, differences, tangent terms, merging, permutations, and affine recovery.", "api_ir": "manufactured functional cases -> canonical lowering and Cubic recovery", "evidence": "issue17", "documentation": "issue17"},
+    {"id": "VAL-005", "behavior": "KKT backward error, scaling round trips, and recovery acceptance obey their fixed numerical envelopes.", "api_ir": "solve/recovery evidence -> versioned numerical tolerance checks", "evidence": "issue18", "documentation": "issue18"},
+    {"id": "VAL-006", "behavior": "Query evidence covers single/batch equivalence, empty and repeated inputs, 100k capacity, invalid atomicity, and concurrent reads.", "api_ir": "SolvedModel query corpus -> ordered FieldSample equivalence", "evidence": "issue24", "documentation": "issue24"},
+    {"id": "VAL-007", "behavior": "Property families use fixed seeds with 256 primary cases, 32 other-platform cases, and 10,000 release cases per family.", "api_ir": "validation profile -> deterministic platform and release property shards", "evidence": "issue25", "documentation": "issue25"},
+    {"id": "VAL-008", "behavior": "The cumulative Equality corpus explicitly combines public observations, Cubic Pi1 gauge, conflicts, recovery, provenance, and queries.", "api_ir": "Equality Spine behavior matrix -> cumulative conformance corpus", "evidence": "issue25", "documentation": "issue25"},
+    {"id": "VAL-013", "behavior": "Dependency, Cubic algebra/recovery, and independent-oracle risk spikes remain passing prerequisite evidence.", "api_ir": "admitted risk-spike facts -> production Equality release gates", "evidence": "issue25", "documentation": "issue25"},
+    {"id": "VAL-014", "behavior": "The accepted artifact is the v0.1.0 Equality Spine milestone and does not pre-publish later roadmap capabilities.", "api_ir": "accepted Equality commit -> v0.1.0 tag and release", "evidence": "issue25", "documentation": "issue25"},
+    {"id": "VAL-015", "behavior": "Only end-to-end supported Equality capabilities ship, with cumulative conformance and no placeholder or silent fallback.", "api_ir": "release repository -> fail-closed trace/source/workflow/package audit", "evidence": "issue25", "documentation": "issue25"}
+  ]
+}

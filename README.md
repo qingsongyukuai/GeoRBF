@@ -15,6 +15,13 @@ remain addressable by `GroupId`. A tangent direction constrains only
 a complete gradient observation nor the polarity and nonzero-slope semantics of
 a normal direction.
 
+The complete release workflow is available as a runnable
+[Equality Spine example](examples/equality_spine.rs). It combines a planar
+horizon, explicit additive gauge, absolute field value, complete gradient,
+tangent direction, typed fit evidence, shared-value recovery, and ordered
+single/batch queries. The supported scope and compatibility boundary are
+recorded in the [v0.1.0 release notes](RELEASE_NOTES.md).
+
 ```rust,no_run
 use georbf::geometry::{
     FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel,
@@ -71,6 +78,22 @@ assert_eq!(samples.len(), 2);
 # }
 ```
 
+The input boundary is sealed: downstream crates cannot add custom observation,
+solver, matrix, or backend inputs to `ProblemBuilder`.
+
+```compile_fail
+struct CustomInput;
+
+impl georbf::problem::ProblemInput for CustomInput {
+    fn add_to(
+        self,
+        _builder: &mut georbf::ProblemBuilder,
+    ) -> Result<(), georbf::problem::AddError> {
+        Ok(())
+    }
+}
+```
+
 ## Verification
 
 The crate is pinned to Rust 1.85.0 and uses the checked-in lockfile:
@@ -90,3 +113,5 @@ tracers in [#19](docs/implementation/19-public-absolute-field-tracer.md) and
 [#20](docs/implementation/20-shared-level-set-gauge.md), plus
 [#21](docs/implementation/21-tangent-direction-observation.md) and the immutable
 query model in [#24](docs/implementation/24-immutable-model-batch-query.md).
+The cumulative release evidence and traceability audit are recorded in
+[#25](docs/implementation/25-equality-spine-release.md).

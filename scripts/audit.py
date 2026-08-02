@@ -48,9 +48,10 @@ FORBIDDEN_FEATURE_FRAGMENTS = (
     "pardiso",
     "sdp",
 )
-AUDITED_LOCKFILE_SHA256 = "1b6107e4b044251da66dea980740c0f65e38f1890dbd9211e3dd1ee1c938bb70"
+AUDITED_LOCKFILE_SHA256 = "2d88c646b11670707a4be6f56e322ee6ac2737494a42db4f02367c0783b6e2bb"
 AUDITED_BUILD_SCRIPTS = {
     "crunchy 0.2.4",
+    "getrandom 0.3.4",
     "libc 0.2.189",
     "libm 0.2.16",
     "nano-gemm-c32 0.2.1",

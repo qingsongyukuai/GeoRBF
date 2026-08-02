@@ -13,7 +13,9 @@ include = [
     "/Cargo.lock",
     "/LICENSE",
     "/README.md",
+    "/RELEASE_NOTES.md",
     "/rust-toolchain.toml",
+    "/examples/**",
     "/docs/implementation/16-production-equality-spine.md",
     "/docs/implementation/17-cubic-equality-core.md",
     "/docs/implementation/18-cubic-equality-numerical-policy.md",
@@ -23,11 +25,13 @@ include = [
     "/docs/implementation/22-equality-builder-problem-snapshot-contract.md",
     "/docs/implementation/23-equality-structured-diagnostics-fit-report.md",
     "/docs/implementation/24-immutable-model-batch-query.md",
+    "/docs/implementation/25-equality-spine-release.md",
     "/validation/oracle/cubic-v1/**",
+    "/validation/v0.1.0/**",
 ]
 
 [dependencies]
 faer = { version = "=0.24.4", default-features = false, features = ["linalg", "std"] }
 
 [dev-dependencies]
-proptest = { version = "=1.6.0", default-features = false, features = ["std"] }
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
