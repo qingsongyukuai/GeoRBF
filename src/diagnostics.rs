@@ -164,8 +164,10 @@ pub struct RelationGraphConflictEvidence {
     source_ids: Box<[SourceId]>,
     group_ids: Box<[GroupId]>,
     semantic_role: SemanticRolePath,
-    implied_difference: f64,
-    declared_difference: f64,
+    first_absolute_source: SourceId,
+    first_absolute_target: f64,
+    second_absolute_source: SourceId,
+    second_absolute_target: f64,
     backend_invoked: bool,
 }
 
@@ -174,15 +176,19 @@ impl RelationGraphConflictEvidence {
         source_ids: Vec<SourceId>,
         group_ids: Vec<GroupId>,
         semantic_role: SemanticRolePath,
-        implied_difference: f64,
-        declared_difference: f64,
+        first_absolute_source: SourceId,
+        first_absolute_target: f64,
+        second_absolute_source: SourceId,
+        second_absolute_target: f64,
     ) -> Self {
         Self {
             source_ids: source_ids.into(),
             group_ids: group_ids.into(),
             semantic_role,
-            implied_difference,
-            declared_difference,
+            first_absolute_source,
+            first_absolute_target,
+            second_absolute_source,
+            second_absolute_target,
             backend_invoked: false,
         }
     }
@@ -202,14 +208,24 @@ impl RelationGraphConflictEvidence {
         &self.semantic_role
     }
 
-    /// Returns the difference implied by the existing graph path.
-    pub fn implied_difference(&self) -> f64 {
-        self.implied_difference
+    /// Returns the source of the first incompatible absolute target.
+    pub fn first_absolute_source(&self) -> &SourceId {
+        &self.first_absolute_source
     }
 
-    /// Returns the incompatible difference declared by the closing relation.
-    pub fn declared_difference(&self) -> f64 {
-        self.declared_difference
+    /// Returns the first incompatible absolute target without derived arithmetic.
+    pub fn first_absolute_target(&self) -> f64 {
+        self.first_absolute_target
+    }
+
+    /// Returns the source of the second incompatible absolute target.
+    pub fn second_absolute_source(&self) -> &SourceId {
+        &self.second_absolute_source
+    }
+
+    /// Returns the second incompatible absolute target without derived arithmetic.
+    pub fn second_absolute_target(&self) -> f64 {
+        self.second_absolute_target
     }
 
     /// Reports whether a backend was invoked before proving the contradiction.

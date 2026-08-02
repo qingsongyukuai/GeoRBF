@@ -563,10 +563,10 @@ fn absolute_observations_close_group_cycles_without_redundant_kkt_rows() {
             .map(|source| source.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "conflict/member-left",
             "conflict/value-left",
-            "conflict/value-right",
+            "conflict/member-left",
             "conflict/member-right",
+            "conflict/value-right",
         ]
     );
     assert_eq!(
@@ -577,8 +577,62 @@ fn absolute_observations_close_group_cycles_without_redundant_kkt_rows() {
         conflict.semantic_role().as_str(),
         "shared-level-set/member/value"
     );
-    assert_close(conflict.implied_difference(), 1.0);
-    assert_close(conflict.declared_difference(), 0.0);
+    assert_eq!(
+        conflict.first_absolute_source().as_str(),
+        "conflict/value-left"
+    );
+    assert_close(conflict.first_absolute_target(), 3.0);
+    assert_eq!(
+        conflict.second_absolute_source().as_str(),
+        "conflict/value-right"
+    );
+    assert_close(conflict.second_absolute_target(), 4.0);
+    assert!(!conflict.backend_invoked());
+    assert!(failure.report().attempts().is_empty());
+}
+
+#[test]
+fn graph_conflicts_retain_extreme_finite_targets_without_derived_overflow() {
+    let group_id = GroupId::new("extreme-target-horizon");
+    let left = point(-1.0, 0.0, 0.5);
+    let right = point(1.0, 0.0, -0.5);
+    let mut horizon = HorizonBuilder::new(group_id.clone());
+    horizon
+        .add_member(SourceId::new("extreme/member-left"), left)
+        .unwrap();
+    horizon
+        .add_member(SourceId::new("extreme/member-right"), right)
+        .unwrap();
+    let mut builder = problem_builder();
+    builder.add(horizon.build().unwrap()).unwrap();
+    builder
+        .add(
+            FieldValueObservation::try_new(SourceId::new("extreme/value-left"), left, f64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
+    builder
+        .add(
+            FieldValueObservation::try_new(SourceId::new("extreme/value-right"), right, -f64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
+
+    let failure = builder
+        .build()
+        .unwrap()
+        .fit()
+        .expect_err("distinct extreme finite anchors must contradict pre-backend");
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    let conflict = failure
+        .report()
+        .relation_graph_conflict()
+        .expect("the conflict exposes the original finite targets");
+    assert_eq!(conflict.group_ids(), &[group_id]);
+    assert_eq!(conflict.first_absolute_target(), f64::MAX);
+    assert_eq!(conflict.second_absolute_target(), -f64::MAX);
+    assert!(conflict.first_absolute_target().is_finite());
+    assert!(conflict.second_absolute_target().is_finite());
     assert!(!conflict.backend_invoked());
     assert!(failure.report().attempts().is_empty());
 }

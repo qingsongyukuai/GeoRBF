@@ -48,15 +48,17 @@ No member is assigned a known value or selected as a semantic reference. Exact
 duplicate relations share a canonical row while retaining every caller-owned
 assessment. Member equations, true field-value observations, and the active
 gauge enter the KKT through a deterministic spanning forest of the
-group/point/absolute-reference incidence graph; cycle-closing equations stay in
-Canonical IR as verification-only relations. This avoids redundant KKT rows
-for coincident, partially overlapping, or absolutely observed groups without
-merging `GroupId` identity. The forest also carries exact value offsets, so a
+group/point incidence graph with finite absolute anchors; cycle-closing
+equations stay in Canonical IR as verification-only relations. This avoids
+redundant KKT rows for coincident, partially overlapping, or absolutely
+observed groups without merging `GroupId` identity. The forest retains original
+finite targets, so a
 cycle that proves incompatible absolute targets becomes `DirectInputConflict`
 before backend invocation instead of a numerical or recovery failure. Its
 graph-specific evidence reports the complete contradictory path of caller-owned
-`SourceId`s, every participating `GroupId`, and the implied and declared value
-differences; direct pairwise conflicts retain their separate two-source evidence.
+`SourceId`s, every participating `GroupId`, and both original finite absolute
+targets without overflow-prone derived arithmetic; direct pairwise conflicts
+retain their separate two-source evidence.
 
 If no true field-value observation exists, the first gauge in stable `SourceId`
 order supplies the one solver constraint that selects the additive constant.

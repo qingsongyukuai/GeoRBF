@@ -846,12 +846,12 @@ impl EqualityLowering {
         &mut self,
         outcome: &CanonicalValueEdgeOutcome,
         semantic_role: &SemanticRolePath,
-        declared_difference: f64,
     ) {
         let CanonicalValueEdgeOutcome::Conflict {
             proof_source_ids,
             proof_group_ids,
-            implied,
+            first_absolute,
+            second_absolute,
         } = outcome
         else {
             return;
@@ -861,8 +861,10 @@ impl EqualityLowering {
                 proof_source_ids.clone(),
                 proof_group_ids.clone(),
                 semantic_role.clone(),
-                *implied,
-                declared_difference,
+                first_absolute.source_id.clone(),
+                first_absolute.target,
+                second_absolute.source_id.clone(),
+                second_absolute.target,
             ));
         }
     }
@@ -904,17 +906,24 @@ struct CanonicalEqualityKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum CanonicalValueNode {
-    AbsoluteReference,
     Group(GroupId),
     Support([u64; 3]),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ComponentAbsoluteTarget {
+    node: usize,
+    source_id: SourceId,
+    target: f64,
+}
+
 #[derive(Debug, Default)]
+/// Equality components retain original absolute anchors, never derived offsets.
 struct CanonicalValueConstraintForest {
     node_index: BTreeMap<CanonicalValueNode, usize>,
     nodes: Vec<CanonicalValueNode>,
     parent: Vec<usize>,
-    value_minus_parent: Vec<f64>,
+    absolute_target: Vec<Option<ComponentAbsoluteTarget>>,
     adjacency: Vec<Vec<(usize, SourceId)>>,
 }
 
@@ -925,10 +934,9 @@ impl CanonicalValueConstraintForest {
         support: [f64; 3],
         source_id: &SourceId,
     ) -> CanonicalValueEdgeOutcome {
-        self.add_edge(
+        self.add_equality_edge(
             CanonicalValueNode::Group(group_id.clone()),
             CanonicalValueNode::Support(canonical_support_bits(support)),
-            0.0,
             source_id,
         )
     }
@@ -939,8 +947,7 @@ impl CanonicalValueConstraintForest {
         value: f64,
         source_id: &SourceId,
     ) -> CanonicalValueEdgeOutcome {
-        self.add_edge(
-            CanonicalValueNode::AbsoluteReference,
+        self.add_absolute_target(
             CanonicalValueNode::Support(canonical_support_bits(support)),
             value,
             source_id,
@@ -953,41 +960,84 @@ impl CanonicalValueConstraintForest {
         value: f64,
         source_id: &SourceId,
     ) -> CanonicalValueEdgeOutcome {
-        self.add_edge(
-            CanonicalValueNode::AbsoluteReference,
+        self.add_absolute_target(
             CanonicalValueNode::Group(group_id.clone()),
             value,
             source_id,
         )
     }
 
-    fn add_edge(
+    fn add_equality_edge(
         &mut self,
         left: CanonicalValueNode,
         right: CanonicalValueNode,
-        right_minus_left: f64,
         source_id: &SourceId,
     ) -> CanonicalValueEdgeOutcome {
         let left = self.intern(left);
         let right = self.intern(right);
-        let (left_root, left_minus_root) = self.root_and_offset(left);
-        let (right_root, right_minus_root) = self.root_and_offset(right);
+        let left_root = self.root(left);
+        let right_root = self.root(right);
         if left_root == right_root {
-            let implied = right_minus_root - left_minus_root;
-            return if implied == right_minus_left {
+            return CanonicalValueEdgeOutcome::Redundant;
+        }
+        let left_absolute = self.absolute_target[left_root].clone();
+        let right_absolute = self.absolute_target[right_root].clone();
+        let both_sides_anchored = left_absolute.is_some() && right_absolute.is_some();
+        if let (Some(left_absolute), Some(right_absolute)) = (&left_absolute, &right_absolute) {
+            if left_absolute.target != right_absolute.target {
+                return self.equality_conflict(
+                    left,
+                    right,
+                    source_id,
+                    left_absolute,
+                    right_absolute,
+                );
+            }
+        }
+        self.parent[right_root] = left_root;
+        self.absolute_target[left_root] = left_absolute.or(right_absolute);
+        self.absolute_target[right_root] = None;
+        self.adjacency[left].push((right, source_id.clone()));
+        self.adjacency[right].push((left, source_id.clone()));
+        if both_sides_anchored {
+            CanonicalValueEdgeOutcome::Redundant
+        } else {
+            CanonicalValueEdgeOutcome::Independent
+        }
+    }
+
+    fn add_absolute_target(
+        &mut self,
+        node: CanonicalValueNode,
+        target: f64,
+        source_id: &SourceId,
+    ) -> CanonicalValueEdgeOutcome {
+        let node = self.intern(node);
+        let root = self.root(node);
+        if let Some(existing) = &self.absolute_target[root] {
+            return if existing.target == target {
                 CanonicalValueEdgeOutcome::Redundant
             } else {
+                let first_absolute = existing.clone();
+                let second_absolute = ComponentAbsoluteTarget {
+                    node,
+                    source_id: source_id.clone(),
+                    target,
+                };
                 CanonicalValueEdgeOutcome::Conflict {
-                    proof_source_ids: self.proof_source_ids(left, right, source_id),
-                    proof_group_ids: self.proof_group_ids(left, right),
-                    implied,
+                    proof_source_ids: self
+                        .absolute_conflict_source_ids(&first_absolute, &second_absolute),
+                    proof_group_ids: self.proof_group_ids(first_absolute.node, node),
+                    first_absolute,
+                    second_absolute,
                 }
             };
         }
-        self.parent[right_root] = left_root;
-        self.value_minus_parent[right_root] = right_minus_left + left_minus_root - right_minus_root;
-        self.adjacency[left].push((right, source_id.clone()));
-        self.adjacency[right].push((left, source_id.clone()));
+        self.absolute_target[root] = Some(ComponentAbsoluteTarget {
+            node,
+            source_id: source_id.clone(),
+            target,
+        });
         CanonicalValueEdgeOutcome::Independent
     }
 
@@ -998,33 +1048,25 @@ impl CanonicalValueConstraintForest {
         let index = self.parent.len();
         self.nodes.push(node.clone());
         self.parent.push(index);
-        self.value_minus_parent.push(0.0);
+        self.absolute_target.push(None);
         self.adjacency.push(Vec::new());
         self.node_index.insert(node, index);
         index
     }
 
-    fn root_and_offset(&mut self, index: usize) -> (usize, f64) {
+    fn root(&mut self, index: usize) -> usize {
         let parent = self.parent[index];
         if parent == index {
-            return (index, 0.0);
+            return index;
         }
-        let local_offset = self.value_minus_parent[index];
-        let (root, parent_offset) = self.root_and_offset(parent);
+        let root = self.root(parent);
         self.parent[index] = root;
-        self.value_minus_parent[index] = local_offset + parent_offset;
-        (root, self.value_minus_parent[index])
+        root
     }
 
-    fn proof_source_ids(
-        &self,
-        start: usize,
-        end: usize,
-        closing_source: &SourceId,
-    ) -> Vec<SourceId> {
+    fn proof_source_ids(&self, start: usize, end: usize) -> Vec<SourceId> {
         let path = self.proof_path(start, end);
-        let mut sources = path
-            .windows(2)
+        path.windows(2)
             .map(|nodes| {
                 self.adjacency[nodes[0]]
                     .iter()
@@ -1033,14 +1075,50 @@ impl CanonicalValueConstraintForest {
                     .1
                     .clone()
             })
-            .collect::<Vec<_>>();
-        sources.push(closing_source.clone());
+            .collect()
+    }
+
+    fn absolute_conflict_source_ids(
+        &self,
+        first: &ComponentAbsoluteTarget,
+        second: &ComponentAbsoluteTarget,
+    ) -> Vec<SourceId> {
+        let mut sources = vec![first.source_id.clone()];
+        sources.extend(self.proof_source_ids(first.node, second.node));
+        sources.push(second.source_id.clone());
         sources
     }
 
+    fn equality_conflict(
+        &self,
+        left: usize,
+        right: usize,
+        closing_source: &SourceId,
+        left_absolute: &ComponentAbsoluteTarget,
+        right_absolute: &ComponentAbsoluteTarget,
+    ) -> CanonicalValueEdgeOutcome {
+        let mut proof_source_ids = vec![left_absolute.source_id.clone()];
+        proof_source_ids.extend(self.proof_source_ids(left_absolute.node, left));
+        proof_source_ids.push(closing_source.clone());
+        proof_source_ids.extend(self.proof_source_ids(right, right_absolute.node));
+        proof_source_ids.push(right_absolute.source_id.clone());
+
+        let mut proof_nodes = self.proof_path(left_absolute.node, left);
+        proof_nodes.extend(self.proof_path(right, right_absolute.node));
+        CanonicalValueEdgeOutcome::Conflict {
+            proof_source_ids,
+            proof_group_ids: self.group_ids(proof_nodes),
+            first_absolute: left_absolute.clone(),
+            second_absolute: right_absolute.clone(),
+        }
+    }
+
     fn proof_group_ids(&self, start: usize, end: usize) -> Vec<GroupId> {
-        let mut groups = self
-            .proof_path(start, end)
+        self.group_ids(self.proof_path(start, end))
+    }
+
+    fn group_ids(&self, nodes: Vec<usize>) -> Vec<GroupId> {
+        let mut groups = nodes
             .into_iter()
             .filter_map(|index| match &self.nodes[index] {
                 CanonicalValueNode::Group(group_id) => Some(group_id.clone()),
@@ -1085,7 +1163,8 @@ enum CanonicalValueEdgeOutcome {
     Conflict {
         proof_source_ids: Vec<SourceId>,
         proof_group_ids: Vec<GroupId>,
-        implied: f64,
+        first_absolute: ComponentAbsoluteTarget,
+        second_absolute: ComponentAbsoluteTarget,
     },
 }
 
@@ -1165,7 +1244,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             )
         });
         if let Some(edge) = &edge {
-            lowering.record_graph_conflict(edge, &observation.semantic_role, observation.target);
+            lowering.record_graph_conflict(edge, &observation.semantic_role);
         }
         let participation = if edge
             .as_ref()
@@ -1204,7 +1283,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 member.location().components(),
                 member.source_id(),
             );
-            lowering.record_graph_conflict(&edge, &role, 0.0);
+            lowering.record_graph_conflict(&edge, &role);
             let provenance = relation_provenance(
                 member.source_id().clone(),
                 Some(group.group_id().clone()),
@@ -1260,7 +1339,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     gauge.value(),
                     gauge.source_id(),
                 );
-                lowering.record_graph_conflict(&edge, &role, gauge.value());
+                lowering.record_graph_conflict(&edge, &role);
                 let participation = if participation
                     == CanonicalEqualityParticipation::SolverConstraint
                     && matches!(edge, CanonicalValueEdgeOutcome::Independent)
@@ -1288,7 +1367,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     gauge.value(),
                     gauge.source_id(),
                 );
-                lowering.record_graph_conflict(&edge, &role, gauge.value());
+                lowering.record_graph_conflict(&edge, &role);
                 let participation = if participation
                     == CanonicalEqualityParticipation::SolverConstraint
                     && matches!(edge, CanonicalValueEdgeOutcome::Independent)
