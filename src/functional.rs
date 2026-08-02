@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::fmt;
 
 use crate::math::canonical_zero;
 
@@ -138,21 +139,45 @@ pub(crate) enum FunctionalError {
     ZeroFunctional,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct SourceId(Box<str>);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceId(Box<str>);
 
 impl SourceId {
-    pub(crate) fn new(value: impl Into<Box<str>>) -> Self {
+    /// Owns a caller-supplied stable source identity.
+    pub fn new(value: impl Into<Box<str>>) -> Self {
         Self(value.into())
+    }
+
+    /// Returns the caller-supplied identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct GroupId(Box<str>);
+impl fmt::Display for SourceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GroupId(Box<str>);
 
 impl GroupId {
-    pub(crate) fn new(value: impl Into<Box<str>>) -> Self {
+    /// Owns a caller-supplied stable group identity.
+    pub fn new(value: impl Into<Box<str>>) -> Self {
         Self(value.into())
+    }
+
+    /// Returns the caller-supplied identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GroupId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -171,6 +196,10 @@ pub(crate) struct SemanticRolePath(Box<str>);
 impl SemanticRolePath {
     pub(crate) fn new(value: impl Into<Box<str>>) -> Self {
         Self(value.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

@@ -1047,7 +1047,7 @@ mod tests {
             evidence.analysis_settings.evd_settings_id,
             faer_backend::EVD_SETTINGS_ID
         );
-        assert_eq!(evidence.numerical_policy.0, "georbf-v1");
+        assert_eq!(evidence.numerical_policy.as_str(), "georbf-v1");
         assert_eq!(evidence.scaling.rounds.len(), 8);
         assert_eq!(evidence.rank.classification, RankClassification::FullRank);
         assert!(evidence.rank.rrqr_ratio > evidence.rank.accept_ratio);
@@ -1168,7 +1168,7 @@ mod tests {
                 reason,
             } => {
                 assert_eq!(reason, BackendContractViolationReason::NonFiniteCandidate);
-                assert_eq!(attempt_plan.numerical_policy.0, "georbf-v1");
+                assert_eq!(attempt_plan.numerical_policy.as_str(), "georbf-v1");
                 assert_eq!(attempts.len(), 2);
                 assert_eq!(attempts[0].kind, KktAttemptKind::BunchKaufmanRefinement);
                 assert_eq!(attempts[1].kind, KktAttemptKind::SvdRescue);

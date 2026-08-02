@@ -1,30 +1,35 @@
-//! GeoRBF product crate.
-//!
-//! Version 0.1.0 establishes the internal Cubic generalized-functional Equality
-//! core, versioned numerical policy, bounded KKT attempts, and physical Recover
-//! and Verify boundary. Domain inputs and fitting APIs are intentionally not
-//! public until they are complete.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
-// These modules are the v0.1.0 product spine. They remain crate-internal until
-// a later milestone can expose the complete domain-facing fit workflow.
+pub mod advanced;
 #[allow(dead_code)]
 mod capacity;
 #[allow(dead_code)]
 mod cubic;
 #[allow(dead_code)]
 mod cubic_equality;
+pub mod diagnostics;
 #[allow(dead_code)]
 mod faer_backend;
+pub mod fit;
 #[allow(dead_code)]
 mod functional;
+pub mod geometry;
+pub mod kernel;
 #[allow(dead_code)]
 mod kkt;
 #[allow(dead_code)]
 mod math;
+pub mod model;
 #[allow(dead_code)]
 mod numerical;
+pub mod observation;
+pub mod problem;
+pub mod relation;
+
+pub use geometry::{Point3, Vector3};
+pub use model::SolvedModel;
+pub use problem::{GroupId, ProblemBuilder, ProblemSnapshot, SourceId};
 
 #[cfg(test)]
 mod oracle_fixture;

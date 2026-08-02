@@ -3,7 +3,19 @@ use faer::MatRef;
 use crate::faer_backend::{self, DecompositionFailure, WorkspaceAllocationFailure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NumericalPolicyId(pub(crate) &'static str);
+pub struct NumericalPolicyId(&'static str);
+
+impl NumericalPolicyId {
+    /// Returns the only numerical policy supported by the public Equality path.
+    pub fn georbf_v1() -> Self {
+        EQUALITY_KKT_POLICY_V1.id
+    }
+
+    /// Returns the stable policy identifier.
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct EqualityKktNumericalPolicy {

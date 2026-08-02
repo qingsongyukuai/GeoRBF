@@ -8,6 +8,7 @@ license = "MIT"
 repository = "https://github.com/qingsongyukuai/GeoRBF"
 include = [
     "/src/**",
+    "/tests/**",
     "/Cargo.toml",
     "/Cargo.lock",
     "/LICENSE",
@@ -16,6 +17,7 @@ include = [
     "/docs/implementation/16-production-equality-spine.md",
     "/docs/implementation/17-cubic-equality-core.md",
     "/docs/implementation/18-cubic-equality-numerical-policy.md",
+    "/docs/implementation/19-public-absolute-field-tracer.md",
     "/validation/oracle/cubic-v1/**",
 ]
 
