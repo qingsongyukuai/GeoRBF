@@ -1,3 +1,4 @@
+use georbf::diagnostics::{SolveAttemptKind, SolveAttemptTermination};
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
 use georbf::kernel::KernelKind;
 use georbf::observation::{FieldValueObservation, GradientObservation};
@@ -118,6 +119,36 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
         attempt.backend_fingerprint().requested_threads() == 1
             && attempt.backend_fingerprint().actual_threads() == 1
     }));
+    let problem_size = report.problem_size();
+    assert_eq!(problem_size.input_observations(), 8);
+    assert_eq!(problem_size.scalar_hard_relations(), 14);
+    assert_eq!(problem_size.center_coefficients(), 14);
+    assert_eq!(problem_size.semantic_latents(), 0);
+    assert_eq!(problem_size.auxiliary_variables(), 0);
+    assert_eq!(problem_size.cone_blocks(), 0);
+    assert_eq!(problem_size.primal_variables(), 18);
+    assert_eq!(problem_size.equality_constraints(), 18);
+    assert_eq!(problem_size.kkt_dimension(), 36);
+    let accepted_attempt = report
+        .attempts()
+        .last()
+        .expect("a successful fit retains its accepted backend attempt");
+    assert_eq!(
+        accepted_attempt.kind(),
+        SolveAttemptKind::BunchKaufmanRefinement
+    );
+    assert_eq!(
+        accepted_attempt.termination(),
+        SolveAttemptTermination::AcceptedCandidate
+    );
+    assert_eq!(accepted_attempt.settings().kind(), accepted_attempt.kind());
+    assert_eq!(
+        accepted_attempt.scaling().method(),
+        "block-aware Ruiz max-norm diagonal congruence"
+    );
+    assert_eq!(accepted_attempt.scaling().rounds(), 8);
+    assert!(accepted_attempt.residual().is_some());
+    assert_eq!(accepted_attempt.failure_reason(), None);
     assert_close(report.field_energy().expect("fit succeeded"), 0.0);
     assert_eq!(report.hard_relations().len(), 14);
     assert!(report.hard_relations().iter().all(|relation| {

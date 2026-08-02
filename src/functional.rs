@@ -208,11 +208,29 @@ impl ResidualId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DerivedBlockId(Box<str>);
+
+impl DerivedBlockId {
+    pub(crate) fn from_residual(residual: &ResidualId) -> Self {
+        Self(format!("{}/derived/equality-block", residual.as_str()).into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct DerivedRowId(Box<str>);
 
 impl DerivedRowId {
     pub(crate) fn from_residual(residual: &ResidualId) -> Self {
         Self(format!("{}/derived/equality-row", residual.as_str()).into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DerivedColumnId(Box<str>);
+
+impl DerivedColumnId {
+    pub(crate) fn from_residual(residual: &ResidualId) -> Self {
+        Self(format!("{}/derived/representer-column", residual.as_str()).into())
     }
 }
 

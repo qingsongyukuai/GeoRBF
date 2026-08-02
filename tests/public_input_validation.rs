@@ -115,10 +115,42 @@ fn an_unidentified_field_returns_a_typed_failure_without_model_data() {
 
     let failure = snapshot.fit().expect_err("one value cannot identify Π₁");
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::UnidentifiedFieldMode);
-    assert_eq!(failure.report().problem_size().observations(), 1);
+    assert_eq!(failure.report().problem_size().input_observations(), 1);
     assert_eq!(failure.report().problem_size().scalar_hard_relations(), 1);
     assert_eq!(failure.report().field_energy(), None);
     assert_eq!(failure.report().total_objective(), None);
+}
+
+#[test]
+fn contradictory_hard_values_return_typed_source_evidence_without_solver_attempts() {
+    let location = Point3::try_new(0.0, 0.0, 0.0).unwrap();
+    let mut builder = ProblemBuilder::new(frame(), FieldUnitLabel::new("field-unit"));
+    builder
+        .add(FieldValueObservation::try_new(SourceId::new("source-b"), location, 2.0).unwrap())
+        .unwrap();
+    builder
+        .add(FieldValueObservation::try_new(SourceId::new("source-a"), location, 1.0).unwrap())
+        .unwrap();
+
+    let failure = builder
+        .build()
+        .unwrap()
+        .fit()
+        .expect_err("incompatible exact values at one location are infeasible");
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    assert!(failure.report().attempts().is_empty());
+    let conflict = failure
+        .report()
+        .direct_input_conflict()
+        .expect("the diagnosis carries stable source and target evidence");
+    assert_eq!(conflict.first_source().as_str(), "source-a");
+    assert_eq!(conflict.second_source().as_str(), "source-b");
+    assert_eq!(
+        conflict.semantic_role().as_str(),
+        "field-value-observation/value"
+    );
+    assert_eq!(conflict.first_target(), 1.0);
+    assert_eq!(conflict.second_target(), 2.0);
 }
 
 #[test]

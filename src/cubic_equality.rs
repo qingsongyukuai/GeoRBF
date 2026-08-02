@@ -10,8 +10,8 @@ use crate::capacity::{CapacityExceededEvidence, plan_equality_capacity};
 use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::faer_backend;
 use crate::functional::{
-    CanonicalFunctional, DerivedRowId, FunctionalDimension, FunctionalTerm, FunctionalUse,
-    ResidualId, UsageProvenance,
+    CanonicalFunctional, DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension,
+    FunctionalTerm, FunctionalUse, ResidualId, UsageProvenance,
 };
 use crate::kkt::{EqualityKktSystem, KktFailure, KktSolveEvidence, solve_equality_kkt};
 use crate::math::dot3;
@@ -886,8 +886,10 @@ struct AssembledHardEqualityRow {
     kkt_equality_row: usize,
     usage_index: usize,
     provenance: UsageProvenance,
+    derived_block: DerivedBlockId,
     residual: ResidualId,
     derived_row: DerivedRowId,
+    derived_column: DerivedColumnId,
     standard_jacobian_row: Vec<f64>,
     rhs: f64,
 }
@@ -1072,17 +1074,29 @@ pub(crate) struct CubicEqualitySolution {
     pub(crate) total_objective: f64,
 }
 
+/// A physical Recover-and-Verify rejection reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecoveryVerificationFailureReason {
+#[non_exhaustive]
+pub enum RecoveryVerificationFailureReason {
+    /// A stored coordinate or scaling recovery map was invalid.
     InvalidRecoveryMap,
+    /// Canonical usage provenance no longer matched assembly evidence.
     ProvenanceMismatch,
+    /// At least one recovered physical quantity was non-finite.
     NonFiniteRecoveredQuantity,
+    /// The recovered Cubic Π₁ side condition exceeded its tolerance.
     SideConditionViolation,
+    /// The side-condition recovery map exceeded its round-trip limit.
     SideConditionRoundTripViolation,
+    /// At least one recovered hard equality exceeded physical tolerance.
     HardEqualityViolation,
+    /// Polynomial recovery exceeded its round-trip limit.
     PolynomialRoundTripViolation,
+    /// Field-coefficient recovery exceeded its round-trip limit.
     FieldCoefficientRoundTripViolation,
+    /// FieldEnergy recovery exceeded its round-trip limit.
     FieldEnergyRoundTripViolation,
+    /// Relation-tolerance recovery exceeded its round-trip limit.
     ToleranceRoundTripViolation,
 }
 
@@ -1205,11 +1219,21 @@ fn solve_standard_form(
                 provenance: representation.fitting_uses[usage_index]
                     .provenance()
                     .clone(),
+                derived_block: DerivedBlockId::from_residual(
+                    representation.fitting_uses[usage_index]
+                        .provenance()
+                        .residual(),
+                ),
                 residual: representation.fitting_uses[usage_index]
                     .provenance()
                     .residual()
                     .clone(),
                 derived_row: DerivedRowId::from_residual(
+                    representation.fitting_uses[usage_index]
+                        .provenance()
+                        .residual(),
+                ),
+                derived_column: DerivedColumnId::from_residual(
                     representation.fitting_uses[usage_index]
                         .provenance()
                         .residual(),
@@ -1264,12 +1288,24 @@ fn verifies_assembled_provenance_and_rows(
             row.usage_index == usage_index
                 && row.kkt_equality_row == POLYNOMIAL_DIMENSION + usage_index
                 && row.provenance == *representation.fitting_uses[usage_index].provenance()
+                && row.derived_block
+                    == DerivedBlockId::from_residual(
+                        representation.fitting_uses[usage_index]
+                            .provenance()
+                            .residual(),
+                    )
                 && row.residual
                     == *representation.fitting_uses[usage_index]
                         .provenance()
                         .residual()
                 && row.derived_row
                     == DerivedRowId::from_residual(
+                        representation.fitting_uses[usage_index]
+                            .provenance()
+                            .residual(),
+                    )
+                && row.derived_column
+                    == DerivedColumnId::from_residual(
                         representation.fitting_uses[usage_index]
                             .provenance()
                             .residual(),

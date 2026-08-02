@@ -40,15 +40,22 @@ The success report restores one assessment per scalar hard component with its
 physical target, recovered value, residual, tolerance, SourceId, dimension,
 and semantic role. It also records resolved kernel and normalization,
 NumericalPolicyId, FieldEnergy, total objective, backend fingerprint, and
-bounded attempt terminations. Backend termination remains distinct from the
-problem diagnosis. Failed backend and recovery paths retain their available
-attempt fingerprints and physical rejection evidence in the same report type.
+independent input, scalar-relation, latent, auxiliary, cone, primal, equality,
+and KKT dimensions. Every bounded attempt retains its algorithm, complete
+settings, scaling summary, refinement count, residual evidence, certificate
+presence, rejection reason, and full backend fingerprint. Backend termination
+remains distinct from the problem diagnosis. Failed backend and recovery paths
+retain the same available attempt and physical rejection evidence. Directly
+contradictory exact values or gradient components at one point are diagnosed
+before backend execution with both stable SourceIds, the semantic component,
+and incompatible targets.
 
 Lowering derives stable internal RelationId and ResidualId values from each
-SourceId and semantic role. Equality assembly adds a stable derived-row
-identity alongside the backend row number, and Recover and Verify checks that
-the complete source → relation → residual → derived-row association survives
-assembly before a model can exist.
+SourceId and semantic role. Equality assembly adds stable derived block, row,
+and representer-column identities alongside backend indices, and Recover and
+Verify checks that the complete source → relation → residual → derived-artifact
+association survives assembly before a model can exist. Cone identity is not
+fabricated because this ticket admits no conic relation.
 
 `SolvedModel::evaluate` returns one coherent `FieldSample` containing scalar
 value and the complete gradient in the caller's declared input frame. The
@@ -63,8 +70,9 @@ cheaply cloneable and `Send + Sync` for repeated concurrent reads.
   and component role provenance.
 - T03 rejects non-finite coordinates, values, and gradient components; invalid
   frames; asymmetric, non-SPD, and non-det-one metrics; duplicate SourceIds;
-  and empty builds. It proves rejected adds are atomic and failed builds are
-  repairable.
+  empty builds; and unsupported exact thread counts. It proves rejected adds
+  are atomic, failed builds are repairable, and contradictory hard inputs
+  return typed source evidence without starting a solver attempt.
 - T04 is covered through public lowering and the recovered per-component
   provenance asserted by T01.
 - T11 fits a non-affine hard problem under a translated, uniformly scaled,
