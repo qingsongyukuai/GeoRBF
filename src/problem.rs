@@ -20,6 +20,9 @@ pub enum ThreadBudget {
     /// Let GeoRBF resolve the request under its numerical policy.
     Automatic,
     /// Request an exact, non-zero thread count.
+    ///
+    /// The current Cubic Equality path admits `Exact(1)`; a different exact
+    /// request is rejected by `ProblemBuilder::build` before fitting.
     Exact(NonZeroUsize),
 }
 
@@ -65,7 +68,7 @@ impl Default for FitConfiguration {
 
 /// Sealed marker implemented by domain inputs accepted by [`ProblemBuilder`].
 #[allow(private_bounds)]
-pub trait ProblemInput: private::Sealed {
+pub trait ProblemInput: private::Sealed + Sized {
     #[doc(hidden)]
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError>;
 }
@@ -122,10 +125,21 @@ impl ProblemBuilder {
 
     /// Validates cross-record state and creates an owning immutable snapshot.
     pub fn build(mut self) -> Result<ProblemSnapshot, BuildFailure> {
+        let mut errors = Vec::new();
         if self.observations.is_empty() {
+            errors.push(BuildError::NoObservations);
+        }
+        if let ThreadBudget::Exact(count) = self.fit_configuration.thread_budget {
+            if count.get() != 1 {
+                errors.push(BuildError::UnsupportedThreadBudget {
+                    requested: count.get(),
+                });
+            }
+        }
+        if !errors.is_empty() {
             return Err(BuildFailure {
                 builder: self,
-                errors: vec![BuildError::NoObservations],
+                errors,
             });
         }
         self.observations
@@ -265,6 +279,8 @@ impl Error for BuilderConfigurationError {}
 pub enum BuildError {
     /// The problem contains no observations.
     NoObservations,
+    /// The current public Cubic Equality path is intentionally sequential.
+    UnsupportedThreadBudget { requested: usize },
 }
 
 /// Failed snapshot construction, retaining the original builder for repair.

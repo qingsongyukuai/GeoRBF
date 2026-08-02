@@ -23,6 +23,9 @@ SourceIds; `build` owns and deterministically sorts the inputs, resolves the
 default Cubic kernel, all-hard FieldEnergy normalization `1`, and the explicit
 identity metric when no anisotropy was supplied. A failed build retains its
 builder, while a successful `ProblemSnapshot` is immutable and cheaply cloned.
+The admitted backend is sequential: `ThreadBudget::Exact(1)` is honored, while
+larger exact requests are rejected during build instead of being silently
+reported without changing execution.
 
 ## Fit, recovery, and model
 
@@ -38,7 +41,14 @@ physical target, recovered value, residual, tolerance, SourceId, dimension,
 and semantic role. It also records resolved kernel and normalization,
 NumericalPolicyId, FieldEnergy, total objective, backend fingerprint, and
 bounded attempt terminations. Backend termination remains distinct from the
-problem diagnosis.
+problem diagnosis. Failed backend and recovery paths retain their available
+attempt fingerprints and physical rejection evidence in the same report type.
+
+Lowering derives stable internal RelationId and ResidualId values from each
+SourceId and semantic role. Equality assembly adds a stable derived-row
+identity alongside the backend row number, and Recover and Verify checks that
+the complete source → relation → residual → derived-row association survives
+assembly before a model can exist.
 
 `SolvedModel::evaluate` returns one coherent `FieldSample` containing scalar
 value and the complete gradient in the caller's declared input frame. The

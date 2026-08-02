@@ -10,7 +10,8 @@ use crate::capacity::{CapacityExceededEvidence, plan_equality_capacity};
 use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::faer_backend;
 use crate::functional::{
-    CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, UsageProvenance,
+    CanonicalFunctional, DerivedRowId, FunctionalDimension, FunctionalTerm, FunctionalUse,
+    ResidualId, UsageProvenance,
 };
 use crate::kkt::{EqualityKktSystem, KktFailure, KktSolveEvidence, solve_equality_kkt};
 use crate::math::dot3;
@@ -885,6 +886,8 @@ struct AssembledHardEqualityRow {
     kkt_equality_row: usize,
     usage_index: usize,
     provenance: UsageProvenance,
+    residual: ResidualId,
+    derived_row: DerivedRowId,
     standard_jacobian_row: Vec<f64>,
     rhs: f64,
 }
@@ -1113,10 +1116,15 @@ impl RecoveryVerificationFailureEvidence {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CubicEqualityFailure {
     EmptyEqualitySet,
-    NonFiniteTarget { equality: usize },
+    NonFiniteTarget {
+        equality: usize,
+    },
     Representation(Box<RepresentationFailure>),
     Backend(Box<KktFailure>),
-    RecoveryVerification(Box<RecoveryVerificationFailureEvidence>),
+    RecoveryVerification {
+        evidence: Box<RecoveryVerificationFailureEvidence>,
+        backend: Box<KktSolveEvidence>,
+    },
 }
 
 pub(crate) struct CubicEqualityCore;
@@ -1197,6 +1205,15 @@ fn solve_standard_form(
                 provenance: representation.fitting_uses[usage_index]
                     .provenance()
                     .clone(),
+                residual: representation.fitting_uses[usage_index]
+                    .provenance()
+                    .residual()
+                    .clone(),
+                derived_row: DerivedRowId::from_residual(
+                    representation.fitting_uses[usage_index]
+                        .provenance()
+                        .residual(),
+                ),
                 standard_jacobian_row: (0..primal_variables)
                     .map(|column| equality_jacobian.get(kkt_equality_row, column))
                     .collect(),
@@ -1247,6 +1264,16 @@ fn verifies_assembled_provenance_and_rows(
             row.usage_index == usage_index
                 && row.kkt_equality_row == POLYNOMIAL_DIMENSION + usage_index
                 && row.provenance == *representation.fitting_uses[usage_index].provenance()
+                && row.residual
+                    == *representation.fitting_uses[usage_index]
+                        .provenance()
+                        .residual()
+                && row.derived_row
+                    == DerivedRowId::from_residual(
+                        representation.fitting_uses[usage_index]
+                            .provenance()
+                            .residual(),
+                    )
                 && row.rhs == targets[usage_index]
                 && row.standard_jacobian_row == expected
         })
@@ -1274,20 +1301,22 @@ fn recover_and_verify(
     backend: KktSolveEvidence,
 ) -> Result<CubicEqualitySolution, CubicEqualityFailure> {
     if !representation.coordinates.is_valid_recovery_map() {
-        return Err(CubicEqualityFailure::RecoveryVerification(Box::new(
-            RecoveryVerificationFailureEvidence::early(
+        return Err(CubicEqualityFailure::RecoveryVerification {
+            evidence: Box::new(RecoveryVerificationFailureEvidence::early(
                 RecoveryVerificationFailureReason::InvalidRecoveryMap,
-            ),
-        )));
+            )),
+            backend: Box::new(backend),
+        });
     }
     let provenance_verified =
         verifies_assembled_provenance_and_rows(&representation, &targets, &assembly, &backend);
     if !provenance_verified {
-        return Err(CubicEqualityFailure::RecoveryVerification(Box::new(
-            RecoveryVerificationFailureEvidence::early(
+        return Err(CubicEqualityFailure::RecoveryVerification {
+            evidence: Box::new(RecoveryVerificationFailureEvidence::early(
                 RecoveryVerificationFailureReason::ProvenanceMismatch,
-            ),
-        )));
+            )),
+            backend: Box::new(backend),
+        });
     }
 
     let coefficient_count = assembly.field_coefficients;
@@ -1460,8 +1489,8 @@ fn recover_and_verify(
         reasons.push(RecoveryVerificationFailureReason::ToleranceRoundTripViolation);
     }
     if !reasons.is_empty() {
-        return Err(CubicEqualityFailure::RecoveryVerification(Box::new(
-            RecoveryVerificationFailureEvidence {
+        return Err(CubicEqualityFailure::RecoveryVerification {
+            evidence: Box::new(RecoveryVerificationFailureEvidence {
                 reasons,
                 side_condition: Some(side_condition),
                 hard_equality_violations: Some(hard_equality_violations),
@@ -1470,8 +1499,9 @@ fn recover_and_verify(
                 field_energy_round_trip_error: Some(field_energy_round_trip_error),
                 tolerance_round_trip_error: Some(tolerance_round_trip_error),
                 no_model_produced: true,
-            },
-        )));
+            }),
+            backend: Box::new(backend),
+        });
     }
 
     Ok(CubicEqualitySolution {
@@ -1747,6 +1777,7 @@ mod tests {
                         SourceId::new(format!("issue-17-manufactured-{index}")),
                         Some(GroupId::new("issue-17-manufactured")),
                         RelationId::new(format!("equality-{index}")),
+                        ResidualId::new(format!("residual-{index}")),
                         SemanticRolePath::new(format!("hard-equality/{index}")),
                     ),
                 )
@@ -2089,6 +2120,7 @@ mod tests {
                     SourceId::new(format!("extreme-{index}")),
                     None,
                     RelationId::new(format!("extreme-relation-{index}")),
+                    ResidualId::new(format!("extreme-residual-{index}")),
                     SemanticRolePath::new(format!("hard-equality/{index}")),
                 ),
             )
@@ -2124,6 +2156,7 @@ mod tests {
                     SourceId::new(format!("overflow-{index}")),
                     None,
                     RelationId::new(format!("overflow-relation-{index}")),
+                    ResidualId::new(format!("overflow-residual-{index}")),
                     SemanticRolePath::new(format!("hard-equality/{index}")),
                 ),
             )
@@ -2260,12 +2293,16 @@ mod tests {
             .expect_err("an invalid inverse coordinate map must fail during recovery");
 
         match failure {
-            CubicEqualityFailure::RecoveryVerification(evidence) => {
+            CubicEqualityFailure::RecoveryVerification { evidence, backend } => {
                 assert_eq!(
                     evidence.reasons,
                     vec![RecoveryVerificationFailureReason::InvalidRecoveryMap]
                 );
                 assert!(evidence.no_model_produced);
+                assert!(!backend.attempts.is_empty());
+                assert!(backend.attempts.iter().any(|attempt| {
+                    attempt.termination == crate::kkt::SolveAttemptTermination::AcceptedCandidate
+                }));
             }
             other => panic!("unexpected failure: {other:?}"),
         }
@@ -2282,13 +2319,14 @@ mod tests {
             SourceId::new("corrupted-source"),
             None,
             RelationId::new("corrupted-relation"),
+            ResidualId::new("corrupted-residual"),
             SemanticRolePath::new("corrupted-role"),
         );
         let failure = recover_and_verify(representation, targets, assembly, backend)
             .expect_err("canonical provenance must round-trip before a model exists");
 
         match failure {
-            CubicEqualityFailure::RecoveryVerification(evidence) => {
+            CubicEqualityFailure::RecoveryVerification { evidence, .. } => {
                 assert_eq!(
                     evidence.reasons,
                     vec![RecoveryVerificationFailureReason::ProvenanceMismatch]
@@ -2311,7 +2349,7 @@ mod tests {
         let failure = recover_and_verify(representation, targets, assembly, backend)
             .expect_err("a KKT row/relation reassociation must not produce a model");
         match failure {
-            CubicEqualityFailure::RecoveryVerification(evidence) => {
+            CubicEqualityFailure::RecoveryVerification { evidence, .. } => {
                 assert_eq!(
                     evidence.reasons,
                     vec![RecoveryVerificationFailureReason::ProvenanceMismatch]

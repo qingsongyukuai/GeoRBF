@@ -188,12 +188,16 @@ impl RelationId {
     pub(crate) fn new(value: impl Into<Box<str>>) -> Self {
         Self(value.into())
     }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct SemanticRolePath(Box<str>);
+pub(crate) struct ResidualId(Box<str>);
 
-impl SemanticRolePath {
+impl ResidualId {
     pub(crate) fn new(value: impl Into<Box<str>>) -> Self {
         Self(value.into())
     }
@@ -203,11 +207,41 @@ impl SemanticRolePath {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DerivedRowId(Box<str>);
+
+impl DerivedRowId {
+    pub(crate) fn from_residual(residual: &ResidualId) -> Self {
+        Self(format!("{}/derived/equality-row", residual.as_str()).into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SemanticRolePath(Box<str>);
+
+impl SemanticRolePath {
+    pub(crate) fn new(value: impl Into<Box<str>>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the stable semantic component path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SemanticRolePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UsageProvenance {
     source: SourceId,
     group: Option<GroupId>,
     relation: RelationId,
+    residual: ResidualId,
     semantic_role: SemanticRolePath,
 }
 
@@ -216,12 +250,14 @@ impl UsageProvenance {
         source: SourceId,
         group: Option<GroupId>,
         relation: RelationId,
+        residual: ResidualId,
         semantic_role: SemanticRolePath,
     ) -> Self {
         Self {
             source,
             group,
             relation,
+            residual,
             semantic_role,
         }
     }
@@ -236,6 +272,10 @@ impl UsageProvenance {
 
     pub(crate) fn relation(&self) -> &RelationId {
         &self.relation
+    }
+
+    pub(crate) fn residual(&self) -> &ResidualId {
+        &self.residual
     }
 
     pub(crate) fn semantic_role(&self) -> &SemanticRolePath {
@@ -389,6 +429,7 @@ mod tests {
                 SourceId::new("source-a"),
                 Some(GroupId::new("group-a")),
                 RelationId::new("relation-a"),
+                ResidualId::new("residual-a"),
                 SemanticRolePath::new("hard-equality/left"),
             ),
         );
@@ -398,6 +439,7 @@ mod tests {
                 SourceId::new("source-b"),
                 Some(GroupId::new("group-b")),
                 RelationId::new("relation-b"),
+                ResidualId::new("residual-b"),
                 SemanticRolePath::new("hard-equality/right"),
             ),
         );
@@ -410,6 +452,10 @@ mod tests {
         assert_eq!(
             first.provenance().relation(),
             &RelationId::new("relation-a")
+        );
+        assert_eq!(
+            first.provenance().residual(),
+            &ResidualId::new("residual-a")
         );
         assert_eq!(
             first.provenance().semantic_role(),

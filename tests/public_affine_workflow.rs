@@ -1,7 +1,9 @@
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
 use georbf::kernel::KernelKind;
 use georbf::observation::{FieldValueObservation, GradientObservation};
+use georbf::problem::{FitConfiguration, ThreadBudget};
 use georbf::{Point3, ProblemBuilder, SourceId, Vector3};
+use std::num::NonZeroUsize;
 
 fn point(x: f64, y: f64, z: f64) -> Point3 {
     Point3::try_new(x, y, z).expect("the manufactured point is finite")
@@ -34,6 +36,10 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     .expect("the frame has three distinct axis labels");
     let field_unit = FieldUnitLabel::new("stratigraphic-coordinate");
     let mut builder = ProblemBuilder::new(frame.clone(), field_unit.clone());
+    builder.set_fit_configuration(
+        FitConfiguration::default()
+            .with_thread_budget(ThreadBudget::Exact(NonZeroUsize::new(1).unwrap())),
+    );
 
     for (index, location) in [
         point(-1.0, -1.0, -1.0),
@@ -99,19 +105,32 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     let report = success.report();
     assert_eq!(report.resolved_kernel().kind(), KernelKind::Cubic);
     assert_eq!(report.field_energy_normalization().factor(), 1.0);
+    assert_eq!(
+        report.requested_thread_budget(),
+        ThreadBudget::Exact(NonZeroUsize::new(1).unwrap())
+    );
+    let backend = report
+        .backend_fingerprint()
+        .expect("a successful fit records its selected backend");
+    assert_eq!(backend.requested_threads(), 1);
+    assert_eq!(backend.actual_threads(), 1);
+    assert!(report.attempts().iter().all(|attempt| {
+        attempt.backend_fingerprint().requested_threads() == 1
+            && attempt.backend_fingerprint().actual_threads() == 1
+    }));
     assert_close(report.field_energy().expect("fit succeeded"), 0.0);
     assert_eq!(report.hard_relations().len(), 14);
     assert!(report.hard_relations().iter().all(|relation| {
         relation.residual().abs() <= relation.tolerance()
             && !relation.source_id().as_str().is_empty()
-            && !relation.semantic_role().is_empty()
+            && !relation.semantic_role().as_str().is_empty()
     }));
     assert_eq!(
         report
             .hard_relations()
             .iter()
             .filter(|relation| relation.source_id().as_str() == "gradient-0")
-            .map(|relation| relation.semantic_role())
+            .map(|relation| relation.semantic_role().as_str())
             .collect::<Vec<_>>(),
         [
             "gradient-observation/component/0",

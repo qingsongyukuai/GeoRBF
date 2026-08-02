@@ -5,18 +5,22 @@ use std::fmt;
 
 use crate::cubic_equality::{
     CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, HardEquality,
+    RecoveryVerificationFailureEvidence, RecoveryVerificationFailureReason,
     ReducedPairingFailureClassification, RepresentationFailure,
 };
 use crate::diagnostics::{
-    BackendFingerprint, ProblemDiagnosis, ResidualDimension, SolveAttemptRecord,
-    SolveAttemptTermination,
+    BackendFingerprint, ProblemDiagnosis, RecoveryVerificationEvidence, RecoveryVerificationReason,
+    ResidualDimension, SolveAttemptRecord, SolveAttemptTermination,
 };
 use crate::functional::{
     CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, RelationId,
-    SemanticRolePath, SourceId, UsageProvenance,
+    ResidualId, SemanticRolePath, SourceId, UsageProvenance,
 };
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
-use crate::kkt::{KktFailure, SolveAttemptTermination as InternalTermination};
+use crate::kkt::{
+    BackendFingerprint as InternalBackendFingerprint, KktAttemptRecord, KktFailure,
+    SolveAttemptTermination as InternalTermination,
+};
 use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
 use crate::observation::ObservationInput;
@@ -96,7 +100,7 @@ impl ProblemSize {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HardRelationAssessment {
     source_id: SourceId,
-    semantic_role: Box<str>,
+    semantic_role: SemanticRolePath,
     dimension: ResidualDimension,
     target: f64,
     recovered_value: f64,
@@ -111,7 +115,7 @@ impl HardRelationAssessment {
     }
 
     /// Returns the stable semantic component path.
-    pub fn semantic_role(&self) -> &str {
+    pub fn semantic_role(&self) -> &SemanticRolePath {
         &self.semantic_role
     }
 
@@ -148,11 +152,13 @@ pub struct FitReport {
     resolved_kernel: KernelConfig,
     field_energy_normalization: FieldEnergyNormalization,
     numerical_policy: NumericalPolicyId,
+    requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
     field_energy: Option<f64>,
     total_objective: Option<f64>,
     backend_fingerprint: Option<BackendFingerprint>,
     attempts: Vec<SolveAttemptRecord>,
+    recovery_verification: Option<RecoveryVerificationEvidence>,
 }
 
 impl FitReport {
@@ -174,6 +180,11 @@ impl FitReport {
     /// Returns the versioned numerical policy identity.
     pub fn numerical_policy(&self) -> NumericalPolicyId {
         self.numerical_policy
+    }
+
+    /// Returns the caller's resource request stored in the snapshot.
+    pub fn requested_thread_budget(&self) -> ThreadBudget {
+        self.requested_thread_budget
     }
 
     /// Returns physical hard-relation recovery assessments in stable order.
@@ -200,6 +211,11 @@ impl FitReport {
     pub fn attempts(&self) -> &[SolveAttemptRecord] {
         &self.attempts
     }
+
+    /// Returns physical rejection evidence when Recover and Verify failed.
+    pub fn recovery_verification(&self) -> Option<&RecoveryVerificationEvidence> {
+        self.recovery_verification.as_ref()
+    }
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
@@ -213,11 +229,13 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         resolved_kernel: snapshot.inner.resolved_kernel.clone(),
         field_energy_normalization: snapshot.inner.field_energy_normalization,
         numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
+        requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
         field_energy: None,
         total_objective: None,
         backend_fingerprint: None,
         attempts: Vec::new(),
+        recovery_verification: None,
     };
     let solution = match CubicEqualityCore::solve(
         equalities,
@@ -227,7 +245,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         Err(failure) => {
             return Err(FitFailure {
                 diagnosis: diagnose(&failure),
-                report: Box::new(base_report()),
+                report: Box::new(failure_report(base_report(), &failure)),
             });
         }
     };
@@ -292,6 +310,7 @@ fn hard_equality(
     )
     .expect("checked public observations lower to a finite nonzero functional");
     let relation_id = RelationId::new(format!("{}:{semantic_role}", source_id.as_str()));
+    let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
     HardEquality::new(
         FunctionalUse::new(
             functional,
@@ -299,6 +318,7 @@ fn hard_equality(
                 source_id.clone(),
                 None,
                 relation_id,
+                residual_id,
                 SemanticRolePath::new(semantic_role),
             ),
         ),
@@ -317,7 +337,7 @@ fn success_report(
         .zip(&solution.relation_tolerances)
         .map(|(relation, tolerance)| HardRelationAssessment {
             source_id: relation.usage.provenance().source().clone(),
-            semantic_role: relation.usage.provenance().semantic_role().as_str().into(),
+            semantic_role: relation.usage.provenance().semantic_role().clone(),
             dimension: match relation.usage.functional().dimension() {
                 FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
                 FunctionalDimension::FieldValuePerLength => ResidualDimension::FieldValuePerLength,
@@ -328,20 +348,53 @@ fn success_report(
             tolerance: tolerance.physical_tolerance,
         })
         .collect();
-    let requested_threads = match snapshot.inner.fit_configuration.thread_budget() {
-        ThreadBudget::Automatic => solution.backend.backend.requested_threads,
-        ThreadBudget::Exact(count) => count.get(),
-    };
-    let backend_fingerprint = BackendFingerprint::new(
-        solution.backend.backend.crate_name,
-        solution.backend.backend.crate_version,
-        solution.backend.backend.algorithm,
-        requested_threads,
-        solution.backend.backend.actual_threads,
-    );
-    let attempts = solution
-        .backend
-        .attempts
+    let backend_fingerprint = public_backend_fingerprint(&solution.backend.backend);
+    let attempts = public_attempts(&solution.backend.attempts);
+    FitReport {
+        problem_size,
+        resolved_kernel: snapshot.inner.resolved_kernel.clone(),
+        field_energy_normalization: snapshot.inner.field_energy_normalization,
+        numerical_policy: solution.backend.numerical_policy,
+        requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
+        hard_relations,
+        field_energy: Some(solution.field_energy),
+        total_objective: Some(solution.total_objective),
+        backend_fingerprint: Some(backend_fingerprint),
+        attempts,
+        recovery_verification: None,
+    }
+}
+
+fn failure_report(mut report: FitReport, failure: &CubicEqualityFailure) -> FitReport {
+    match failure {
+        CubicEqualityFailure::Backend(failure) => {
+            report.attempts = public_attempts(kkt_failure_attempts(failure));
+        }
+        CubicEqualityFailure::Representation(failure) => {
+            if let RepresentationFailure::AffineReproductionBackend(failure) = failure.as_ref() {
+                report.attempts = public_attempts(kkt_failure_attempts(failure));
+            }
+        }
+        CubicEqualityFailure::RecoveryVerification { evidence, backend } => {
+            report.backend_fingerprint = Some(public_backend_fingerprint(&backend.backend));
+            report.attempts = public_attempts(&backend.attempts);
+            report.recovery_verification = Some(public_recovery_evidence(evidence));
+        }
+        CubicEqualityFailure::EmptyEqualitySet | CubicEqualityFailure::NonFiniteTarget { .. } => {}
+    }
+    report
+}
+
+fn kkt_failure_attempts(failure: &KktFailure) -> &[KktAttemptRecord] {
+    match failure {
+        KktFailure::BackendContractViolation { attempts, .. }
+        | KktFailure::NumericalFailure { attempts, .. } => attempts,
+        _ => &[],
+    }
+}
+
+fn public_attempts(attempts: &[KktAttemptRecord]) -> Vec<SolveAttemptRecord> {
+    attempts
         .iter()
         .map(|attempt| {
             SolveAttemptRecord::new(
@@ -358,20 +411,72 @@ fn success_report(
                 attempt
                     .residual
                     .map(|residual| residual.normalized_backward_error),
+                public_backend_fingerprint(&attempt.backend),
             )
         })
-        .collect();
-    FitReport {
-        problem_size,
-        resolved_kernel: snapshot.inner.resolved_kernel.clone(),
-        field_energy_normalization: snapshot.inner.field_energy_normalization,
-        numerical_policy: solution.backend.numerical_policy,
-        hard_relations,
-        field_energy: Some(solution.field_energy),
-        total_objective: Some(solution.total_objective),
-        backend_fingerprint: Some(backend_fingerprint),
-        attempts,
-    }
+        .collect()
+}
+
+fn public_backend_fingerprint(backend: &InternalBackendFingerprint) -> BackendFingerprint {
+    BackendFingerprint::new(
+        backend.crate_name,
+        backend.crate_version,
+        backend.algorithm,
+        backend.requested_threads,
+        backend.actual_threads,
+    )
+}
+
+fn public_recovery_evidence(
+    evidence: &RecoveryVerificationFailureEvidence,
+) -> RecoveryVerificationEvidence {
+    RecoveryVerificationEvidence::new(
+        evidence
+            .reasons
+            .iter()
+            .copied()
+            .map(|reason| match reason {
+                RecoveryVerificationFailureReason::InvalidRecoveryMap => {
+                    RecoveryVerificationReason::InvalidRecoveryMap
+                }
+                RecoveryVerificationFailureReason::ProvenanceMismatch => {
+                    RecoveryVerificationReason::ProvenanceMismatch
+                }
+                RecoveryVerificationFailureReason::NonFiniteRecoveredQuantity => {
+                    RecoveryVerificationReason::NonFiniteRecoveredQuantity
+                }
+                RecoveryVerificationFailureReason::SideConditionViolation => {
+                    RecoveryVerificationReason::SideConditionViolation
+                }
+                RecoveryVerificationFailureReason::SideConditionRoundTripViolation => {
+                    RecoveryVerificationReason::SideConditionRoundTripViolation
+                }
+                RecoveryVerificationFailureReason::HardEqualityViolation => {
+                    RecoveryVerificationReason::HardEqualityViolation
+                }
+                RecoveryVerificationFailureReason::PolynomialRoundTripViolation => {
+                    RecoveryVerificationReason::PolynomialRoundTripViolation
+                }
+                RecoveryVerificationFailureReason::FieldCoefficientRoundTripViolation => {
+                    RecoveryVerificationReason::FieldCoefficientRoundTripViolation
+                }
+                RecoveryVerificationFailureReason::FieldEnergyRoundTripViolation => {
+                    RecoveryVerificationReason::FieldEnergyRoundTripViolation
+                }
+                RecoveryVerificationFailureReason::ToleranceRoundTripViolation => {
+                    RecoveryVerificationReason::ToleranceRoundTripViolation
+                }
+            })
+            .collect(),
+        evidence
+            .hard_equality_violations
+            .map(|envelope| (envelope.field_value, envelope.field_value_per_length)),
+        evidence.polynomial_round_trip_error,
+        evidence.field_coefficient_round_trip_error,
+        evidence.field_energy_round_trip_error,
+        evidence.tolerance_round_trip_error,
+        evidence.no_model_produced,
+    )
 }
 
 fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
@@ -381,7 +486,7 @@ fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
         }
         CubicEqualityFailure::Representation(failure) => diagnose_representation(failure),
         CubicEqualityFailure::Backend(failure) => diagnose_kkt(failure),
-        CubicEqualityFailure::RecoveryVerification(_) => {
+        CubicEqualityFailure::RecoveryVerification { .. } => {
             ProblemDiagnosis::RecoveryVerificationFailure
         }
     }

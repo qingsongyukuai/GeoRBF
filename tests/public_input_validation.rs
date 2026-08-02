@@ -120,3 +120,28 @@ fn an_unidentified_field_returns_a_typed_failure_without_model_data() {
     assert_eq!(failure.report().field_energy(), None);
     assert_eq!(failure.report().total_objective(), None);
 }
+
+#[test]
+fn unsupported_exact_thread_requests_fail_before_snapshot_creation() {
+    use std::num::NonZeroUsize;
+
+    use georbf::problem::{FitConfiguration, ThreadBudget};
+
+    let location = Point3::try_new(0.0, 0.0, 0.0).unwrap();
+    let mut builder = ProblemBuilder::new(frame(), FieldUnitLabel::new("field-unit"));
+    builder
+        .add(FieldValueObservation::try_new(SourceId::new("value"), location, 1.0).unwrap())
+        .unwrap();
+    builder.set_fit_configuration(
+        FitConfiguration::default()
+            .with_thread_budget(ThreadBudget::Exact(NonZeroUsize::new(2).unwrap())),
+    );
+
+    let failure = builder
+        .build()
+        .expect_err("the admitted Cubic Equality adapter is sequential");
+    assert_eq!(
+        failure.errors(),
+        &[BuildError::UnsupportedThreadBudget { requested: 2 }]
+    );
+}
