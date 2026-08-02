@@ -58,9 +58,10 @@ canonical field concept. Cubic polynomial failure now handles rectangular
 pairings explicitly, obtains a deterministic right singular vector when an
 exact missing column is not enough, maps the mode through the solve-coordinate
 recovery, and independently checks its normalized canonical residual and
-round trip. Reduced Cubic rank failure likewise expands the right singular
-mode through the Householder quotient map and checks both reduced-pairing and
-complete `Pi1` side-condition residuals.
+round trip. A reduced-pairing rank loss is evidence about a derived numerical
+matrix only; until a physical field mode is independently constructed and
+evaluated through Canonical IR, it remains `NumericalFailure` rather than being
+given field semantics.
 
 Only a mode passing the unchanged `georbf-v1` recovery limit produces
 `InterpretableRankDeficiencyEvidence` and an `UnidentifiedFieldMode` diagnosis.
@@ -98,9 +99,9 @@ boundary. It verifies permutation-stable aggregate preflight evidence,
 diagnosis priority with retained secondary evidence, checked capacity before
 allocation, a nontrivial rectangular `Pi1` unidentified mode, and the separation
 between candidate termination and canonical acceptance. Test-only backend
-boundary injection verifies that rejected candidates map to backend-contract
-diagnosis while retaining `CandidateProduced`, and that uninterpreted KKT rank
-loss remains numerical.
+boundary injection runs through `ProblemSnapshot::fit` and verifies that a
+rejected candidate maps to backend-contract diagnosis while retaining
+`CandidateProduced`; an uninterpreted KKT rank loss remains numerical.
 
 The accumulated public/property corpus continues to cover exact duplicate
 multi-source retention, graph conflicts, additive gauge invariance, recovery

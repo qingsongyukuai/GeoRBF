@@ -99,10 +99,35 @@ pub(crate) struct EqualityCapacityPlan {
     pub(crate) peak_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EqualityCapacityShape {
+    pub(crate) primal_variables: usize,
+    pub(crate) equality_constraints: usize,
+    pub(crate) canonical_relations: usize,
+    pub(crate) report_relations: usize,
+}
+
 pub(crate) fn plan_equality_capacity(
     primal_variables: usize,
     equality_constraints: usize,
 ) -> Result<EqualityCapacityPlan, CapacityExceededEvidence> {
+    plan_equality_capacity_for(EqualityCapacityShape {
+        primal_variables,
+        equality_constraints,
+        canonical_relations: equality_constraints,
+        report_relations: 0,
+    })
+}
+
+pub(crate) fn plan_equality_capacity_for(
+    shape: EqualityCapacityShape,
+) -> Result<EqualityCapacityPlan, CapacityExceededEvidence> {
+    let EqualityCapacityShape {
+        primal_variables,
+        equality_constraints,
+        canonical_relations,
+        report_relations,
+    } = shape;
     let kkt_dimension = primal_variables
         .checked_add(equality_constraints)
         .ok_or_else(|| {
@@ -114,12 +139,15 @@ pub(crate) fn plan_equality_capacity(
             )
         })?;
     let variables = usize_as_u64(primal_variables, CapacityComponent::Canonical)?;
-    let equalities = usize_as_u64(equality_constraints, CapacityComponent::Canonical)?;
+    let canonical_relations = usize_as_u64(canonical_relations, CapacityComponent::Canonical)?;
+    let equalities = usize_as_u64(equality_constraints, CapacityComponent::EqualityDense)?;
+    let report_relations = usize_as_u64(report_relations, CapacityComponent::Report)?;
     let dimension = usize_as_u64(kkt_dimension, CapacityComponent::KktDimension)?;
     let scalar_bytes = size_of::<f64>() as u64;
     let index_bytes = size_of::<usize>() as u64;
 
-    let canonical_scalars = checked_add(CapacityComponent::Canonical, variables, equalities)?;
+    let canonical_scalars =
+        checked_add(CapacityComponent::Canonical, variables, canonical_relations)?;
     let canonical_bytes = checked_mul(
         CapacityComponent::Canonical,
         canonical_scalars,
@@ -211,7 +239,7 @@ pub(crate) fn plan_equality_capacity(
             CapacityComponent::Report,
             checked_mul(
                 CapacityComponent::Report,
-                dimension,
+                checked_add(CapacityComponent::Report, dimension, report_relations)?,
                 REPORT_SCALARS_PER_KKT_DIMENSION,
             )?,
             scalar_bytes,

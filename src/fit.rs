@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 
-use crate::capacity::{CapacityExceededEvidence, CapacityExceededReason, plan_equality_capacity};
+use crate::capacity::{
+    CapacityExceededEvidence, CapacityExceededReason, EqualityCapacityShape,
+    plan_equality_capacity, plan_equality_capacity_for,
+};
 use crate::cubic_equality::{
     AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
     CanonicalHardEquality, CanonicalRelationToleranceEvidence, CpdEvidence, CubicCanonicalProblem,
@@ -559,38 +562,33 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             UnidentifiedAdditiveGaugeEvidence::new(source_ids, group_ids, false),
         );
     }
-    if let Err(evidence) = plan_snapshot_capacity(
-        scalar_relation_count,
-        snapshot.inner.shared_level_sets.len(),
-    ) {
-        preflight_report.capacity = Some(public_capacity(&evidence));
-        return Err(FitFailure {
-            diagnosis: primary_preflight_diagnosis(&preflight_report)
-                .expect("capacity evidence always supplies a preflight diagnosis"),
-            report: Box::new(preflight_report),
-        });
-    }
     let lowering = lower_snapshot(snapshot);
-    let problem_size = ProblemSize::cubic_equality(
+    let exact_problem_size = ProblemSize::cubic_equality(
         snapshot.inner.observations.len(),
         scalar_relation_count,
         lowering.canonical_equalities.len(),
         lowering.fitting_functional_count(),
         lowering.semantic_latents.len(),
         lowering.solver_equality_count(),
-    )
-    .expect("the conservative snapshot capacity plan proved exact dimensions representable");
+    );
     preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
     preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
+    if let Err(evidence) = plan_snapshot_capacity(&lowering, scalar_relation_count) {
+        preflight_report.capacity = Some(public_capacity(&evidence));
+    }
     if let Some(diagnosis) = primary_preflight_diagnosis(&preflight_report) {
         if diagnosis == ProblemDiagnosis::DirectInputConflict {
-            preflight_report.problem_size = problem_size;
+            if let Some(problem_size) = exact_problem_size {
+                preflight_report.problem_size = problem_size;
+            }
         }
         return Err(FitFailure {
             diagnosis,
             report: Box::new(preflight_report),
         });
     }
+    let problem_size = exact_problem_size
+        .expect("the successful conservative capacity plan proves exact dimensions representable");
     preflight_report.problem_size = problem_size;
     let base_report = || preflight_report.clone();
     fit_snapshot_after_preflight(snapshot, lowering, problem_size, base_report)
@@ -694,21 +692,32 @@ fn conservative_problem_size(
 }
 
 fn plan_snapshot_capacity(
+    lowering: &EqualityLowering,
     scalar_relations: usize,
-    semantic_latents: usize,
 ) -> Result<(), CapacityExceededEvidence> {
-    let Some(primal_variables) = scalar_relations
+    let Some(primal_variables) = lowering
+        .fitting_functional_count()
         .checked_add(4)
-        .and_then(|value| value.checked_add(semantic_latents))
+        .and_then(|value| value.checked_add(lowering.semantic_latents.len()))
     else {
         return Err(plan_equality_capacity(usize::MAX, usize::MAX)
             .expect_err("maximal dimensions must overflow the capacity plan"));
     };
-    let Some(equality_constraints) = scalar_relations.checked_add(4) else {
+    let Some(equality_constraints) = lowering.solver_equality_count().checked_add(4) else {
         return Err(plan_equality_capacity(usize::MAX, usize::MAX)
             .expect_err("maximal dimensions must overflow the capacity plan"));
     };
-    plan_equality_capacity(primal_variables, equality_constraints).map(|_| ())
+    let Some(canonical_relations) = lowering.canonical_equalities.len().checked_add(4) else {
+        return Err(plan_equality_capacity(usize::MAX, usize::MAX)
+            .expect_err("maximal dimensions must overflow the capacity plan"));
+    };
+    plan_equality_capacity_for(EqualityCapacityShape {
+        primal_variables,
+        equality_constraints,
+        canonical_relations,
+        report_relations: scalar_relations,
+    })
+    .map(|_| ())
 }
 
 fn fit_snapshot_after_preflight(
@@ -1696,12 +1705,7 @@ fn retain_representation_failure(
                     backend_invoked: *solver_invoked,
                 });
         }
-        RepresentationFailure::PolynomialRankDeficient {
-            rank,
-            canonical_mode_residual,
-            solver_invoked,
-            hidden_regularization_applied,
-        } => {
+        RepresentationFailure::PolynomialRankDeficient { rank, mode } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
                 domain: RankEvidenceDomain::CubicPolynomialPairing,
                 dimension: 4,
@@ -1713,15 +1717,15 @@ fn retain_representation_failure(
                 reject_ratio: None,
                 accept_ratio: None,
                 decision: RankDecision::RankDeficient,
-                backend_invoked: *solver_invoked,
+                backend_invoked: mode.execution.solver_invoked,
             }));
             report.interpretable_rank_deficiency = Some(public_interpretable_rank_deficiency(
                 RankDeficiencyConcept::CubicPi1FieldMode,
                 RankEvidenceDomain::CubicPolynomialPairing,
                 source_relations,
-                *canonical_mode_residual,
-                *solver_invoked,
-                *hidden_regularization_applied,
+                mode.residual,
+                mode.execution.solver_invoked,
+                mode.execution.hidden_regularization_applied,
             ));
         }
         RepresentationFailure::PolynomialRankGrayZone { evidence } => {
@@ -1739,7 +1743,7 @@ fn retain_representation_failure(
                 backend_invoked: evidence.backend_invoked,
             }));
         }
-        RepresentationFailure::ReducedPairingGrayZone { solver_invoked, .. } => {
+        RepresentationFailure::ReducedPairingGrayZone(execution) => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
                 domain: RankEvidenceDomain::CubicReducedPairing,
                 dimension: reduced_dimension,
@@ -1751,15 +1755,13 @@ fn retain_representation_failure(
                 reject_ratio: None,
                 accept_ratio: None,
                 decision: RankDecision::NumericalDecisionGrayZone,
-                backend_invoked: *solver_invoked,
+                backend_invoked: execution.solver_invoked,
             }));
         }
         RepresentationFailure::ReducedPairingNotPositive {
             classification,
             rank,
-            solver_invoked,
-            hidden_regularization_applied,
-            canonical_mode_residual,
+            execution,
             ..
         } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
@@ -1780,21 +1782,8 @@ fn retain_representation_failure(
                         RankDecision::FullRank
                     }
                 },
-                backend_invoked: *solver_invoked,
+                backend_invoked: execution.solver_invoked,
             }));
-            if *classification == ReducedPairingFailureClassification::RankDeficient {
-                if let Some(canonical_mode_residual) = canonical_mode_residual {
-                    report.interpretable_rank_deficiency =
-                        Some(public_interpretable_rank_deficiency(
-                            RankDeficiencyConcept::CubicQuotientFieldMode,
-                            RankEvidenceDomain::CubicReducedPairing,
-                            source_relations,
-                            *canonical_mode_residual,
-                            *solver_invoked,
-                            *hidden_regularization_applied,
-                        ));
-                }
-            }
         }
         RepresentationFailure::AlgebraicAnalysisFailure {
             stage,
@@ -2370,21 +2359,9 @@ fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis 
         | RepresentationFailure::ReducedPairingGrayZone { .. } => {
             ProblemDiagnosis::NumericalDecisionGrayZone
         }
-        RepresentationFailure::ReducedPairingNotPositive {
-            classification,
-            canonical_mode_residual,
-            ..
-        } => match classification {
-            ReducedPairingFailureClassification::RankDeficient
-                if canonical_mode_residual.is_some() =>
-            {
-                ProblemDiagnosis::UnidentifiedFieldMode
-            }
-            ReducedPairingFailureClassification::RankDeficient
-            | ReducedPairingFailureClassification::NegativeCurvature => {
-                ProblemDiagnosis::NumericalFailure
-            }
-        },
+        RepresentationFailure::ReducedPairingNotPositive { .. } => {
+            ProblemDiagnosis::NumericalFailure
+        }
         RepresentationFailure::AffineReproductionBackend(failure) => diagnose_kkt(failure),
         _ => ProblemDiagnosis::NumericalFailure,
     }
@@ -2403,14 +2380,48 @@ fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cubic_equality::RecoveryVerificationFailureReason;
+    use crate::cubic_equality::{RecoveryVerificationFailureReason, inject_kkt_failure_once};
+    use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel};
     use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
+    use crate::observation::FieldValueObservation;
+    use crate::{Point3, ProblemBuilder};
+
+    fn injectable_snapshot() -> ProblemSnapshot {
+        let mut builder = ProblemBuilder::new(
+            InputCoordinateFrame::try_new(
+                ["x", "y", "z"],
+                Handedness::Right,
+                LengthUnitLabel::new("m"),
+            )
+            .unwrap(),
+            FieldUnitLabel::new("field"),
+        );
+        for (source, support, value) in [
+            ("origin", [0.0, 0.0, 0.0], 1.0),
+            ("east", [1.0, 0.0, 0.0], 2.0),
+            ("north", [0.0, 1.0, 0.0], 3.0),
+            ("up", [0.0, 0.0, 1.0], 4.0),
+        ] {
+            builder
+                .add(
+                    FieldValueObservation::try_new(
+                        SourceId::new(source),
+                        Point3::try_new(support[0], support[1], support[2]).unwrap(),
+                        value,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        builder.build().unwrap()
+    }
 
     #[test]
-    fn snapshot_capacity_preflight_covers_all_source_relations_before_lowering() {
-        assert!(plan_snapshot_capacity(2_000, 8).is_ok());
-        let evidence = plan_snapshot_capacity(10_000, 0)
-            .expect_err("all caller relations must count even if presolve could remove rows");
+    fn snapshot_capacity_counts_source_relations_as_linear_report_storage() {
+        let lowering = EqualityLowering::new();
+        assert!(plan_snapshot_capacity(&lowering, 10_000).is_ok());
+        let evidence = plan_snapshot_capacity(&lowering, usize::MAX)
+            .expect_err("report storage arithmetic remains checked before allocation");
         assert!(!evidence.large_allocation_attempted);
         assert!(!evidence.backend_invocation_attempted);
         assert!(ProblemSize::cubic_equality(0, 0, 0, usize::MAX, 1, 0).is_none());
@@ -2457,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_candidate_rejection_is_not_a_problem_diagnosis_from_termination() {
+    fn problem_snapshot_fit_maps_injected_backend_rejection_independently_of_termination() {
         let failure = solve_equality_kkt(&EqualityKktSystem {
             primal_variables: 1,
             equality_constraints: 0,
@@ -2472,7 +2483,16 @@ mod tests {
             diagnose_kkt(&failure),
             ProblemDiagnosis::BackendContractViolation
         );
-        let attempts = public_attempts(kkt_failure_attempts(&failure));
+        inject_kkt_failure_once(failure);
+        let fit_failure = injectable_snapshot()
+            .fit()
+            .expect_err("the injected backend rejection must prevent model publication");
+        assert_eq!(
+            fit_failure.diagnosis(),
+            ProblemDiagnosis::BackendContractViolation
+        );
+        assert!(fit_failure.report().canonical_acceptance().is_none());
+        let attempts = fit_failure.report().attempts();
         assert_eq!(attempts.len(), 2);
         assert!(attempts.iter().all(|attempt| {
             attempt.termination() == SolveAttemptTermination::CandidateProduced
@@ -2498,5 +2518,19 @@ mod tests {
         };
 
         assert_eq!(diagnose_kkt(&failure), ProblemDiagnosis::NumericalFailure);
+
+        let reduced_failure = RepresentationFailure::ReducedPairingNotPositive {
+            classification: ReducedPairingFailureClassification::RankDeficient,
+            rank: 1,
+            negative_pivots: 0,
+            execution: crate::cubic_equality::AnalysisExecutionEvidence {
+                solver_invoked: false,
+                hidden_regularization_applied: false,
+            },
+        };
+        assert_eq!(
+            diagnose_representation(&reduced_failure),
+            ProblemDiagnosis::NumericalFailure
+        );
     }
 }

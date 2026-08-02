@@ -397,8 +397,6 @@ pub enum RankEvidenceDomain {
 pub enum RankDeficiencyConcept {
     /// A mode in Cubic's complete affine polynomial space was not identified.
     CubicPi1FieldMode,
-    /// A mode in the Cubic quotient-space functional span was not identified.
-    CubicQuotientFieldMode,
 }
 
 /// Proof that a rank loss was interpreted in canonical field semantics.
