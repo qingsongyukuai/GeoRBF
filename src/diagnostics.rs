@@ -1135,7 +1135,8 @@ pub struct BackendFingerprint {
     schema_version: u32,
     crate_name: Box<str>,
     crate_version: Box<str>,
-    features: Box<[Box<str>]>,
+    legacy_feature_slots: [Box<str>; 2],
+    enabled_features: Box<[Box<str>]>,
     algorithm: Box<str>,
     target_arch: Box<str>,
     target_os: Box<str>,
@@ -1157,11 +1158,16 @@ pub(crate) struct BackendFingerprintParts {
 
 impl BackendFingerprint {
     pub(crate) fn new(parts: BackendFingerprintParts) -> Self {
+        let legacy_feature_slots = [
+            parts.features.first().copied().unwrap_or_default().into(),
+            parts.features.get(1).copied().unwrap_or_default().into(),
+        ];
         Self {
             schema_version: parts.schema_version,
             crate_name: parts.crate_name.into(),
             crate_version: parts.crate_version.into(),
-            features: parts.features.into_iter().map(Into::into).collect(),
+            legacy_feature_slots,
+            enabled_features: parts.features.into_iter().map(Into::into).collect(),
             algorithm: parts.algorithm.into(),
             target_arch: parts.target_arch.into(),
             target_os: parts.target_os.into(),
@@ -1185,9 +1191,20 @@ impl BackendFingerprint {
         &self.crate_version
     }
 
-    /// Returns the exact enabled backend features.
-    pub fn features(&self) -> &[Box<str>] {
-        &self.features
+    /// Returns the two legacy backend feature slots.
+    ///
+    /// This fixed-width view is retained for v0.1 source compatibility. A
+    /// backend with fewer than two enabled features leaves trailing slots
+    /// empty; use [`Self::enabled_features`] for the exact feature set.
+    pub fn features(&self) -> [&str; 2] {
+        self.legacy_feature_slots
+            .each_ref()
+            .map(|feature| feature.as_ref())
+    }
+
+    /// Iterates over the exact enabled backend features.
+    pub fn enabled_features(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+        self.enabled_features.iter().map(|feature| feature.as_ref())
     }
 
     /// Returns the resolved backend algorithm.

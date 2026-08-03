@@ -124,6 +124,12 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     let backend = report
         .backend_fingerprint()
         .expect("a successful fit records its selected backend");
+    let legacy_features: [&str; 2] = backend.features();
+    assert_eq!(legacy_features, ["linalg", "std"]);
+    assert_eq!(
+        backend.enabled_features().collect::<Vec<_>>(),
+        ["linalg", "std"]
+    );
     assert_eq!(backend.requested_threads(), 1);
     assert_eq!(backend.actual_threads(), 1);
     assert!(report.attempts().iter().all(|attempt| {
