@@ -18,14 +18,14 @@ axis labels, input order, names, or `GroupId` ordering.
 `MinimumFieldSeparation` accepts only finite, strictly positive values in the
 problem's field-value units. `YoungerThan` and `OlderThan` always carry one.
 `FieldLevelOrder` is a separate non-strict relation whose declared lower and
-upper shared levels may recover equal values. Each relation offers only hard,
+upper Shared Level Sets may recover equal values. Each relation offers only hard,
 quadratic-violation, and linear-violation constructors; soft relations require
 the snapshot's explicit `FieldEnergyNormalization`.
 
 All three inputs retain a caller-owned `SourceId` and two stable `GroupId`
 roles. They can be inserted before their groups. Build aggregates unresolved
 references in deterministic `SourceId`/`GroupId` order and retains the builder
-for repair. A referenced singleton shared level is informative because its
+for repair. A referenced singleton Shared Level Set is informative because its
 semantic latent now participates in a relation.
 
 ## Relation graph preflight
@@ -35,13 +35,16 @@ orientation. Age edges carry their positive minimum separation; Field Level
 Order edges carry zero. Preflight rejects hard self-relations and every cycle
 containing a strict edge, including direct reverse contradictions and chains
 closed by a non-strict order. Stable evidence retains every constituent
-`SourceId`, `GroupId`, semantic role, and the fact that no backend ran.
+`SourceId`, `GroupId`, semantic role, and the fact that no backend ran. Each
+source is paired with its own original group roles, so callers can reconstruct
+the proof rather than infer associations from flat identifier lists.
 
 The same graph accumulates minimum separations along hard chains. When its end
 groups have absolute representatives supplied through a gauge, a field-value
-observation, or the existing shared-level equality forest, an incompatible
-finite difference is proved before lowering reaches a backend. Soft edges do
-not participate in conflict proofs and remain independent violation evidence.
+observation, or the existing Shared Level Set equality forest, an incompatible
+finite difference is proved in graph preflight before complete canonical
+snapshot lowering. Soft edges do not participate in conflict proofs and remain
+independent violation evidence.
 
 ## Canonical lowering and Cubic QP recovery
 
@@ -57,10 +60,11 @@ violation variables and objective terms.
 
 Recover and Verify independently restores both shared values, their oriented
 field separation, physical slack or violation, tolerance, active state, loss,
-and complete relation provenance. `FitReport::shared_level_relations` is sorted
-by `SourceId` and reports the original relation kind and group roles together
-with the resolved field direction. `SolvedModel::shared_level_value` and normal
-single or batch queries use the same accepted field and snapshot.
+and complete relation provenance. `FitReport::shared_level_set_relations` is
+sorted by `SourceId` and reports the original relation kind and role-named
+groups together with the resolved field direction.
+`SolvedModel::shared_level_value` and normal single or batch queries use the
+same accepted field and snapshot.
 
 ## Conformance evidence
 

@@ -308,23 +308,75 @@ impl RelationGraphConflictEvidence {
     }
 }
 
-/// Complete provenance for an impossible hard shared-level relation cycle.
+/// One caller-owned source and its role in a shared-level-set conflict proof.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SharedLevelRelationConflictEvidence {
+pub struct SharedLevelSetConflictSourceEvidence {
+    source_id: SourceId,
+    group_ids: Box<[GroupId]>,
+    semantic_role: SemanticRolePath,
+}
+
+impl SharedLevelSetConflictSourceEvidence {
+    pub(crate) fn new(
+        source_id: SourceId,
+        mut group_ids: Vec<GroupId>,
+        semantic_role: SemanticRolePath,
+    ) -> Self {
+        group_ids.sort();
+        group_ids.dedup();
+        Self {
+            source_id,
+            group_ids: group_ids.into(),
+            semantic_role,
+        }
+    }
+
+    /// Returns the caller-owned source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the shared level sets connected to this source in the proof.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Returns this source's original semantic role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+}
+
+/// Complete provenance for an impossible hard shared-level-set relation proof.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedLevelSetRelationConflictEvidence {
+    source_provenance: Box<[SharedLevelSetConflictSourceEvidence]>,
     source_ids: Box<[SourceId]>,
     group_ids: Box<[GroupId]>,
     semantic_roles: Box<[SemanticRolePath]>,
     backend_invoked: bool,
 }
 
-impl SharedLevelRelationConflictEvidence {
-    pub(crate) fn new(
-        source_ids: Vec<SourceId>,
-        group_ids: Vec<GroupId>,
-        semantic_roles: Vec<SemanticRolePath>,
-    ) -> Self {
-        debug_assert_eq!(source_ids.len(), semantic_roles.len());
+impl SharedLevelSetRelationConflictEvidence {
+    pub(crate) fn new(mut source_provenance: Vec<SharedLevelSetConflictSourceEvidence>) -> Self {
+        source_provenance.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        source_provenance.dedup_by(|left, right| left.source_id == right.source_id);
+        let source_ids = source_provenance
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect::<Vec<_>>();
+        let semantic_roles = source_provenance
+            .iter()
+            .map(|source| source.semantic_role.clone())
+            .collect::<Vec<_>>();
+        let mut group_ids = source_provenance
+            .iter()
+            .flat_map(|source| source.group_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        group_ids.sort();
+        group_ids.dedup();
         Self {
+            source_provenance: source_provenance.into(),
             source_ids: source_ids.into(),
             group_ids: group_ids.into(),
             semantic_roles: semantic_roles.into(),
@@ -332,12 +384,17 @@ impl SharedLevelRelationConflictEvidence {
         }
     }
 
+    /// Returns source/group/role associations for the complete proof.
+    pub fn source_provenance(&self) -> &[SharedLevelSetConflictSourceEvidence] {
+        &self.source_provenance
+    }
+
     /// Returns every caller-owned relation source in stable order.
     pub fn source_ids(&self) -> &[SourceId] {
         &self.source_ids
     }
 
-    /// Returns every shared level participating in the proof in stable order.
+    /// Returns every shared level set participating in the proof in stable order.
     pub fn group_ids(&self) -> &[GroupId] {
         &self.group_ids
     }

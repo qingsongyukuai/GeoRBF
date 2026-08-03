@@ -5,7 +5,7 @@ use georbf::observation::{FieldValueObservation, GradientObservation, QuadraticP
 use georbf::problem::{BuildError, BuilderConfigurationError};
 use georbf::relation::{
     AdditiveFieldGauge, FieldLevelOrder, FieldValueBound, HorizonBuilder, LinearViolationPenalty,
-    MinimumFieldSeparation, MinimumFieldSeparationError, OlderThan, SharedLevelRelationKind,
+    MinimumFieldSeparation, MinimumFieldSeparationError, OlderThan, SharedLevelSetRelationKind,
     StratigraphicFieldDirection, YoungerThan,
 };
 use georbf::{GroupId, Point3, ProblemBuilder, SourceId, Vector3};
@@ -104,7 +104,7 @@ fn age_relations_require_one_explicit_atomic_field_direction_but_order_does_not(
 }
 
 #[test]
-fn all_level_relations_allow_forward_references_and_sort_dangling_groups() {
+fn shared_level_set_relations_allow_forward_references_and_sort_dangling_groups() {
     let separation = MinimumFieldSeparation::try_new(1.0).unwrap();
     let mut problem = builder();
     problem
@@ -126,6 +126,16 @@ fn all_level_relations_allow_forward_references_and_sort_dangling_groups() {
         ))
         .unwrap();
     problem
+        .add(
+            AdditiveFieldGauge::at_level_set(
+                SourceId::new("z-gauge"),
+                GroupId::new("missing-gauge"),
+                0.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    problem
         .add(horizon("present", "present/member", 0.0))
         .unwrap();
 
@@ -140,6 +150,10 @@ fn all_level_relations_allow_forward_references_and_sort_dangling_groups() {
             BuildError::UnknownGroupReference {
                 source_id: SourceId::new("b-relation"),
                 group_id: GroupId::new("missing-z"),
+            },
+            BuildError::UnknownGroupReference {
+                source_id: SourceId::new("z-gauge"),
+                group_id: GroupId::new("missing-gauge"),
             },
         ]
     );
@@ -233,7 +247,7 @@ fn hard_self_reverse_and_strict_cycles_are_direct_input_conflicts() {
         );
         let evidence = failure
             .report()
-            .shared_level_relation_conflict()
+            .shared_level_set_relation_conflict()
             .expect("the graph proof is retained");
         assert!(!evidence.source_ids().is_empty());
         assert_eq!(evidence.source_ids().len(), evidence.semantic_roles().len());
@@ -290,7 +304,10 @@ fn a_strict_chain_conflicting_with_non_strict_field_order_retains_the_full_proof
         failure.diagnosis(),
         georbf::diagnostics::ProblemDiagnosis::DirectInputConflict
     );
-    let evidence = failure.report().shared_level_relation_conflict().unwrap();
+    let evidence = failure
+        .report()
+        .shared_level_set_relation_conflict()
+        .unwrap();
     assert_eq!(
         evidence
             .source_ids()
@@ -368,11 +385,17 @@ fn younger_than_fits_and_recovers_physical_observables_in_both_field_directions(
         assert!((query.value() - gradient_z).abs() <= 1.0e-7);
         assert!((query.gradient().components()[2] - gradient_z).abs() <= 1.0e-7);
 
-        let assessment = &success.report().shared_level_relations()[0];
+        let assessment = &success.report().shared_level_set_relations()[0];
         assert_eq!(assessment.source_id().as_str(), "age");
-        assert_eq!(assessment.kind(), SharedLevelRelationKind::YoungerThan);
-        assert_eq!(assessment.first_group_id().as_str(), "younger");
-        assert_eq!(assessment.second_group_id().as_str(), "older");
+        assert_eq!(assessment.kind(), SharedLevelSetRelationKind::YoungerThan);
+        assert_eq!(assessment.younger_group_id().unwrap().as_str(), "younger");
+        assert_eq!(assessment.older_group_id().unwrap().as_str(), "older");
+        assert_eq!(assessment.lower_group_id(), None);
+        assert_eq!(assessment.upper_group_id(), None);
+        assert!((assessment.recovered_younger_value().unwrap() - younger).abs() <= 1.0e-7);
+        assert!((assessment.recovered_older_value().unwrap() - older).abs() <= 1.0e-7);
+        assert_eq!(assessment.recovered_lower_value(), None);
+        assert_eq!(assessment.recovered_upper_value(), None);
         assert_eq!(assessment.field_direction(), Some(direction));
         assert_eq!(assessment.minimum_separation().unwrap().value(), 1.0);
         assert!((assessment.recovered_field_separation() - 2.0).abs() <= 1.0e-7);
@@ -411,10 +434,21 @@ fn field_level_order_is_non_strict_and_allows_equal_shared_values_without_age_di
         .unwrap();
 
     let success = problem.build().unwrap().fit().unwrap();
-    let assessment = &success.report().shared_level_relations()[0];
-    assert_eq!(assessment.kind(), SharedLevelRelationKind::FieldLevelOrder);
+    let assessment = &success.report().shared_level_set_relations()[0];
+    assert_eq!(
+        assessment.kind(),
+        SharedLevelSetRelationKind::FieldLevelOrder
+    );
     assert_eq!(assessment.field_direction(), None);
     assert_eq!(assessment.minimum_separation(), None);
+    assert_eq!(assessment.younger_group_id(), None);
+    assert_eq!(assessment.older_group_id(), None);
+    assert_eq!(assessment.lower_group_id().unwrap().as_str(), "a");
+    assert_eq!(assessment.upper_group_id().unwrap().as_str(), "b");
+    assert!((assessment.recovered_lower_value().unwrap() - 3.0).abs() <= 1.0e-8);
+    assert!((assessment.recovered_upper_value().unwrap() - 3.0).abs() <= 1.0e-8);
+    assert_eq!(assessment.recovered_younger_value(), None);
+    assert_eq!(assessment.recovered_older_value(), None);
     assert!(assessment.recovered_field_separation().abs() <= 1.0e-8);
     assert!(assessment.slack() <= assessment.tolerance());
     assert_eq!(assessment.active_state(), BoundActiveState::Active);
@@ -467,7 +501,7 @@ fn soft_age_duplicates_keep_independent_quadratic_and_linear_violations() {
         .unwrap();
 
     let success = problem.build().unwrap().fit().unwrap();
-    let assessments = success.report().shared_level_relations();
+    let assessments = success.report().shared_level_set_relations();
     assert_eq!(assessments.len(), 2);
     assert_eq!(assessments[0].source_id().as_str(), "linear-age");
     assert_eq!(assessments[1].source_id().as_str(), "quadratic-age");
@@ -522,7 +556,7 @@ fn duplicate_hard_age_relations_share_canonical_math_and_keep_both_sources() {
     }
 
     let success = problem.build().unwrap().fit().unwrap();
-    assert_eq!(success.report().shared_level_relations().len(), 2);
+    assert_eq!(success.report().shared_level_set_relations().len(), 2);
     assert_eq!(
         success
             .report()
@@ -578,7 +612,10 @@ fn accumulated_age_separation_conflicting_with_absolute_gauges_is_preflight_evid
         failure.diagnosis(),
         georbf::diagnostics::ProblemDiagnosis::DirectInputConflict
     );
-    let evidence = failure.report().shared_level_relation_conflict().unwrap();
+    let evidence = failure
+        .report()
+        .shared_level_set_relation_conflict()
+        .unwrap();
     assert_eq!(
         evidence
             .source_ids()
@@ -595,6 +632,106 @@ fn accumulated_age_separation_conflicting_with_absolute_gauges_is_preflight_evid
             .collect::<Vec<_>>(),
         ["a", "b", "c"]
     );
+    let provenance = evidence.source_provenance();
+    assert_eq!(provenance.len(), 4);
+    assert_eq!(provenance[0].source_id().as_str(), "a-gauge");
+    assert_eq!(
+        provenance[0].semantic_role().as_str(),
+        "additive-field-gauge/level-set"
+    );
+    assert_eq!(
+        provenance[0]
+            .group_ids()
+            .iter()
+            .map(GroupId::as_str)
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    assert_eq!(provenance[1].source_id().as_str(), "a-to-b");
+    assert_eq!(
+        provenance[1]
+            .group_ids()
+            .iter()
+            .map(GroupId::as_str)
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(
+        provenance[1].semantic_role().as_str(),
+        "younger-than/minimum-field-separation"
+    );
+    assert_eq!(provenance[3].source_id().as_str(), "c-gauge");
+    assert_eq!(
+        provenance[3].semantic_role().as_str(),
+        "additive-field-gauge/level-set"
+    );
+    assert!(failure.report().attempts().is_empty());
+}
+
+#[test]
+fn absolute_field_value_conflict_retains_observation_and_member_roles() {
+    let mut problem = builder();
+    problem
+        .set_stratigraphic_field_direction(StratigraphicFieldDirection::TowardYounger)
+        .unwrap();
+    problem.add(horizon("a", "a-member", 0.0)).unwrap();
+    problem.add(horizon("b", "b-member", 1.0)).unwrap();
+    problem
+        .add(
+            FieldValueObservation::try_new(SourceId::new("a-absolute"), point(0.0, 0.0, 0.0), 0.0)
+                .unwrap(),
+        )
+        .unwrap();
+    problem
+        .add(
+            AdditiveFieldGauge::at_level_set(SourceId::new("b-gauge"), GroupId::new("b"), 1.0)
+                .unwrap(),
+        )
+        .unwrap();
+    problem
+        .add(YoungerThan::hard(
+            SourceId::new("relation"),
+            GroupId::new("b"),
+            GroupId::new("a"),
+            MinimumFieldSeparation::try_new(2.0).unwrap(),
+        ))
+        .unwrap();
+
+    let failure = problem.build().unwrap().fit().unwrap_err();
+    assert_eq!(
+        failure.diagnosis(),
+        georbf::diagnostics::ProblemDiagnosis::DirectInputConflict
+    );
+    let evidence = failure
+        .report()
+        .shared_level_set_relation_conflict()
+        .unwrap();
+    let source = |source_id: &str| {
+        evidence
+            .source_provenance()
+            .iter()
+            .find(|source| source.source_id().as_str() == source_id)
+            .unwrap()
+    };
+    assert_eq!(
+        source("a-absolute").semantic_role().as_str(),
+        "field-value-observation/value"
+    );
+    assert!(source("a-absolute").group_ids().is_empty());
+    assert_eq!(
+        source("a-member").semantic_role().as_str(),
+        "shared-level-set/member/value"
+    );
+    assert_eq!(source("a-member").group_ids(), &[GroupId::new("a")]);
+    assert_eq!(
+        source("relation").semantic_role().as_str(),
+        "younger-than/minimum-field-separation"
+    );
+    assert_eq!(
+        source("relation").group_ids(),
+        &[GroupId::new("a"), GroupId::new("b")]
+    );
+    assert!(!evidence.backend_invoked());
     assert!(failure.report().attempts().is_empty());
 }
 
@@ -686,8 +823,8 @@ fn explicit_direction_alone_controls_age_semantics_across_ids_input_order_and_fr
         let query = success.model().evaluate(point(0.0, 0.0, 1.0)).unwrap();
         assert!((query.value() - 10.0).abs() <= 1.0e-6);
         assert!((query.gradient().components()[2] - 10.0).abs() <= 1.0e-6);
-        let relation = &success.report().shared_level_relations()[0];
-        assert_eq!(relation.kind(), SharedLevelRelationKind::OlderThan);
+        let relation = &success.report().shared_level_set_relations()[0];
+        assert_eq!(relation.kind(), SharedLevelSetRelationKind::OlderThan);
         assert!((relation.recovered_field_separation() - 20.0).abs() <= 1.0e-6);
         assert_eq!(
             relation.field_direction(),

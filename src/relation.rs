@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use crate::functional::{GroupId, SourceId};
+use crate::functional::{GroupId, SemanticRolePath, SourceId};
 use crate::geometry::{Point3, Vector3, normalize_direction};
 use crate::observation::QuadraticPenalty;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
@@ -84,7 +84,7 @@ pub enum StratigraphicFieldDirection {
     TowardOlder,
 }
 
-/// A finite, strictly positive shared-level difference in field-value units.
+/// A finite, strictly positive shared-level-set difference in field-value units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MinimumFieldSeparation {
     value: f64,
@@ -129,10 +129,10 @@ impl fmt::Display for MinimumFieldSeparationError {
 
 impl Error for MinimumFieldSeparationError {}
 
-/// The caller-declared semantic kind of a relation between shared levels.
+/// The caller-declared semantic kind of a relation between shared level sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum SharedLevelRelationKind {
+pub enum SharedLevelSetRelationKind {
     /// One named level is geologically younger than another.
     YoungerThan,
     /// One named level is geologically older than another.
@@ -142,82 +142,269 @@ pub enum SharedLevelRelationKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SharedLevelRelationInput {
-    source_id: SourceId,
-    first_group_id: GroupId,
-    second_group_id: GroupId,
-    kind: SharedLevelRelationKind,
-    minimum_separation: Option<MinimumFieldSeparation>,
-    configuration: AffineBoundConfiguration,
+pub(crate) enum SharedLevelSetRelationInput {
+    YoungerThan {
+        source_id: SourceId,
+        younger_group_id: GroupId,
+        older_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        configuration: AffineBoundConfiguration,
+    },
+    OlderThan {
+        source_id: SourceId,
+        older_group_id: GroupId,
+        younger_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        configuration: AffineBoundConfiguration,
+    },
+    FieldLevelOrder {
+        source_id: SourceId,
+        lower_group_id: GroupId,
+        upper_group_id: GroupId,
+        configuration: AffineBoundConfiguration,
+    },
 }
 
-impl SharedLevelRelationInput {
-    fn age(
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SharedLevelSetRelationOrientation {
+    pub(crate) lower_field_group_id: GroupId,
+    pub(crate) upper_field_group_id: GroupId,
+    pub(crate) field_direction: Option<StratigraphicFieldDirection>,
+    pub(crate) minimum_separation: Option<MinimumFieldSeparation>,
+}
+
+impl SharedLevelSetRelationOrientation {
+    pub(crate) fn required_difference(&self) -> f64 {
+        self.minimum_separation
+            .map(MinimumFieldSeparation::value)
+            .unwrap_or(0.0)
+    }
+}
+
+impl SharedLevelSetRelationInput {
+    fn younger_than(
         source_id: SourceId,
-        first_group_id: GroupId,
-        second_group_id: GroupId,
-        kind: SharedLevelRelationKind,
+        younger_group_id: GroupId,
+        older_group_id: GroupId,
         minimum_separation: MinimumFieldSeparation,
         configuration: AffineBoundConfiguration,
     ) -> Self {
-        Self {
+        Self::YoungerThan {
             source_id,
-            first_group_id,
-            second_group_id,
-            kind,
-            minimum_separation: Some(minimum_separation),
+            younger_group_id,
+            older_group_id,
+            minimum_separation,
             configuration,
         }
     }
 
-    fn order(
+    fn older_than(
+        source_id: SourceId,
+        older_group_id: GroupId,
+        younger_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        configuration: AffineBoundConfiguration,
+    ) -> Self {
+        Self::OlderThan {
+            source_id,
+            older_group_id,
+            younger_group_id,
+            minimum_separation,
+            configuration,
+        }
+    }
+
+    fn field_level_order(
         source_id: SourceId,
         lower_group_id: GroupId,
         upper_group_id: GroupId,
         configuration: AffineBoundConfiguration,
     ) -> Self {
-        Self {
+        Self::FieldLevelOrder {
             source_id,
-            first_group_id: lower_group_id,
-            second_group_id: upper_group_id,
-            kind: SharedLevelRelationKind::FieldLevelOrder,
-            minimum_separation: None,
+            lower_group_id,
+            upper_group_id,
             configuration,
         }
     }
 
     pub(crate) fn source_id(&self) -> &SourceId {
-        &self.source_id
+        match self {
+            Self::YoungerThan { source_id, .. }
+            | Self::OlderThan { source_id, .. }
+            | Self::FieldLevelOrder { source_id, .. } => source_id,
+        }
     }
 
-    pub(crate) fn first_group_id(&self) -> &GroupId {
-        &self.first_group_id
+    pub(crate) fn declared_group_ids(&self) -> [&GroupId; 2] {
+        match self {
+            Self::YoungerThan {
+                younger_group_id,
+                older_group_id,
+                ..
+            } => [younger_group_id, older_group_id],
+            Self::OlderThan {
+                older_group_id,
+                younger_group_id,
+                ..
+            } => [older_group_id, younger_group_id],
+            Self::FieldLevelOrder {
+                lower_group_id,
+                upper_group_id,
+                ..
+            } => [lower_group_id, upper_group_id],
+        }
     }
 
-    pub(crate) fn second_group_id(&self) -> &GroupId {
-        &self.second_group_id
+    pub(crate) fn kind(&self) -> SharedLevelSetRelationKind {
+        match self {
+            Self::YoungerThan { .. } => SharedLevelSetRelationKind::YoungerThan,
+            Self::OlderThan { .. } => SharedLevelSetRelationKind::OlderThan,
+            Self::FieldLevelOrder { .. } => SharedLevelSetRelationKind::FieldLevelOrder,
+        }
     }
 
-    pub(crate) fn kind(&self) -> SharedLevelRelationKind {
-        self.kind
+    pub(crate) fn younger_group_id(&self) -> Option<&GroupId> {
+        match self {
+            Self::YoungerThan {
+                younger_group_id, ..
+            }
+            | Self::OlderThan {
+                younger_group_id, ..
+            } => Some(younger_group_id),
+            Self::FieldLevelOrder { .. } => None,
+        }
+    }
+
+    pub(crate) fn older_group_id(&self) -> Option<&GroupId> {
+        match self {
+            Self::YoungerThan { older_group_id, .. } | Self::OlderThan { older_group_id, .. } => {
+                Some(older_group_id)
+            }
+            Self::FieldLevelOrder { .. } => None,
+        }
+    }
+
+    pub(crate) fn lower_group_id(&self) -> Option<&GroupId> {
+        match self {
+            Self::FieldLevelOrder { lower_group_id, .. } => Some(lower_group_id),
+            Self::YoungerThan { .. } | Self::OlderThan { .. } => None,
+        }
+    }
+
+    pub(crate) fn upper_group_id(&self) -> Option<&GroupId> {
+        match self {
+            Self::FieldLevelOrder { upper_group_id, .. } => Some(upper_group_id),
+            Self::YoungerThan { .. } | Self::OlderThan { .. } => None,
+        }
     }
 
     pub(crate) fn minimum_separation(&self) -> Option<MinimumFieldSeparation> {
-        self.minimum_separation
+        match self {
+            Self::YoungerThan {
+                minimum_separation, ..
+            }
+            | Self::OlderThan {
+                minimum_separation, ..
+            } => Some(*minimum_separation),
+            Self::FieldLevelOrder { .. } => None,
+        }
     }
 
     pub(crate) fn configuration(&self) -> AffineBoundConfiguration {
-        self.configuration
+        match self {
+            Self::YoungerThan { configuration, .. }
+            | Self::OlderThan { configuration, .. }
+            | Self::FieldLevelOrder { configuration, .. } => *configuration,
+        }
     }
 
     pub(crate) fn is_soft(&self) -> bool {
-        self.configuration.is_soft()
+        self.configuration().is_soft()
+    }
+
+    pub(crate) fn is_stratigraphic_age_relation(&self) -> bool {
+        matches!(self, Self::YoungerThan { .. } | Self::OlderThan { .. })
+    }
+
+    pub(crate) fn is_field_level_order(&self) -> bool {
+        matches!(self, Self::FieldLevelOrder { .. })
+    }
+
+    pub(crate) fn semantic_role(&self) -> SemanticRolePath {
+        match self {
+            Self::YoungerThan { .. } => {
+                SemanticRolePath::new("younger-than/minimum-field-separation")
+            }
+            Self::OlderThan { .. } => SemanticRolePath::new("older-than/minimum-field-separation"),
+            Self::FieldLevelOrder { .. } => SemanticRolePath::new("field-level-order/non-strict"),
+        }
+    }
+
+    pub(crate) fn orientation(
+        &self,
+        direction: Option<StratigraphicFieldDirection>,
+    ) -> SharedLevelSetRelationOrientation {
+        let age_direction =
+            || direction.expect("build requires a field direction for every age relation");
+        match self {
+            Self::FieldLevelOrder {
+                lower_group_id,
+                upper_group_id,
+                ..
+            } => SharedLevelSetRelationOrientation {
+                lower_field_group_id: lower_group_id.clone(),
+                upper_field_group_id: upper_group_id.clone(),
+                field_direction: None,
+                minimum_separation: None,
+            },
+            Self::YoungerThan {
+                younger_group_id,
+                older_group_id,
+                minimum_separation,
+                ..
+            } => {
+                let direction = age_direction();
+                let (lower, upper) = match direction {
+                    StratigraphicFieldDirection::TowardYounger => {
+                        (older_group_id, younger_group_id)
+                    }
+                    StratigraphicFieldDirection::TowardOlder => (younger_group_id, older_group_id),
+                };
+                SharedLevelSetRelationOrientation {
+                    lower_field_group_id: lower.clone(),
+                    upper_field_group_id: upper.clone(),
+                    field_direction: Some(direction),
+                    minimum_separation: Some(*minimum_separation),
+                }
+            }
+            Self::OlderThan {
+                older_group_id,
+                younger_group_id,
+                minimum_separation,
+                ..
+            } => {
+                let direction = age_direction();
+                let (lower, upper) = match direction {
+                    StratigraphicFieldDirection::TowardYounger => {
+                        (older_group_id, younger_group_id)
+                    }
+                    StratigraphicFieldDirection::TowardOlder => (younger_group_id, older_group_id),
+                };
+                SharedLevelSetRelationOrientation {
+                    lower_field_group_id: lower.clone(),
+                    upper_field_group_id: upper.clone(),
+                    field_direction: Some(direction),
+                    minimum_separation: Some(*minimum_separation),
+                }
+            }
+        }
     }
 }
 
 /// A strict stratigraphic statement that one horizon is younger than another.
 #[derive(Debug, Clone, PartialEq)]
-pub struct YoungerThan(SharedLevelRelationInput);
+pub struct YoungerThan(SharedLevelSetRelationInput);
 
 impl YoungerThan {
     /// Creates one hard younger-than relation.
@@ -227,11 +414,10 @@ impl YoungerThan {
         older_group_id: GroupId,
         minimum_separation: MinimumFieldSeparation,
     ) -> Self {
-        Self(SharedLevelRelationInput::age(
+        Self(SharedLevelSetRelationInput::younger_than(
             source_id,
             younger_group_id,
             older_group_id,
-            SharedLevelRelationKind::YoungerThan,
             minimum_separation,
             AffineBoundConfiguration::Hard,
         ))
@@ -245,11 +431,10 @@ impl YoungerThan {
         minimum_separation: MinimumFieldSeparation,
         penalty: QuadraticPenalty,
     ) -> Self {
-        Self(SharedLevelRelationInput::age(
+        Self(SharedLevelSetRelationInput::younger_than(
             source_id,
             younger_group_id,
             older_group_id,
-            SharedLevelRelationKind::YoungerThan,
             minimum_separation,
             AffineBoundConfiguration::QuadraticPenalty(penalty),
         ))
@@ -263,11 +448,10 @@ impl YoungerThan {
         minimum_separation: MinimumFieldSeparation,
         penalty: LinearViolationPenalty,
     ) -> Self {
-        Self(SharedLevelRelationInput::age(
+        Self(SharedLevelSetRelationInput::younger_than(
             source_id,
             younger_group_id,
             older_group_id,
-            SharedLevelRelationKind::YoungerThan,
             minimum_separation,
             AffineBoundConfiguration::LinearViolationPenalty(penalty),
         ))
@@ -278,14 +462,18 @@ impl YoungerThan {
         self.0.source_id()
     }
 
-    /// Returns the geologically younger shared level.
+    /// Returns the geologically younger shared level set.
     pub fn younger_group_id(&self) -> &GroupId {
-        self.0.first_group_id()
+        self.0
+            .younger_group_id()
+            .expect("YoungerThan always owns a younger group")
     }
 
-    /// Returns the geologically older shared level.
+    /// Returns the geologically older shared level set.
     pub fn older_group_id(&self) -> &GroupId {
-        self.0.second_group_id()
+        self.0
+            .older_group_id()
+            .expect("YoungerThan always owns an older group")
     }
 
     /// Returns the required strict field-value difference.
@@ -303,7 +491,7 @@ impl YoungerThan {
 
 /// A strict stratigraphic statement that one horizon is older than another.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OlderThan(SharedLevelRelationInput);
+pub struct OlderThan(SharedLevelSetRelationInput);
 
 impl OlderThan {
     /// Creates one hard older-than relation.
@@ -313,11 +501,10 @@ impl OlderThan {
         younger_group_id: GroupId,
         minimum_separation: MinimumFieldSeparation,
     ) -> Self {
-        Self(SharedLevelRelationInput::age(
+        Self(SharedLevelSetRelationInput::older_than(
             source_id,
             older_group_id,
             younger_group_id,
-            SharedLevelRelationKind::OlderThan,
             minimum_separation,
             AffineBoundConfiguration::Hard,
         ))
@@ -331,11 +518,10 @@ impl OlderThan {
         minimum_separation: MinimumFieldSeparation,
         penalty: QuadraticPenalty,
     ) -> Self {
-        Self(SharedLevelRelationInput::age(
+        Self(SharedLevelSetRelationInput::older_than(
             source_id,
             older_group_id,
             younger_group_id,
-            SharedLevelRelationKind::OlderThan,
             minimum_separation,
             AffineBoundConfiguration::QuadraticPenalty(penalty),
         ))
@@ -349,11 +535,10 @@ impl OlderThan {
         minimum_separation: MinimumFieldSeparation,
         penalty: LinearViolationPenalty,
     ) -> Self {
-        Self(SharedLevelRelationInput::age(
+        Self(SharedLevelSetRelationInput::older_than(
             source_id,
             older_group_id,
             younger_group_id,
-            SharedLevelRelationKind::OlderThan,
             minimum_separation,
             AffineBoundConfiguration::LinearViolationPenalty(penalty),
         ))
@@ -364,14 +549,18 @@ impl OlderThan {
         self.0.source_id()
     }
 
-    /// Returns the geologically older shared level.
+    /// Returns the geologically older shared level set.
     pub fn older_group_id(&self) -> &GroupId {
-        self.0.first_group_id()
+        self.0
+            .older_group_id()
+            .expect("OlderThan always owns an older group")
     }
 
-    /// Returns the geologically younger shared level.
+    /// Returns the geologically younger shared level set.
     pub fn younger_group_id(&self) -> &GroupId {
-        self.0.second_group_id()
+        self.0
+            .younger_group_id()
+            .expect("OlderThan always owns a younger group")
     }
 
     /// Returns the required strict field-value difference.
@@ -389,12 +578,12 @@ impl OlderThan {
 
 /// A non-strict direct ordering of two shared scalar-field levels.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FieldLevelOrder(SharedLevelRelationInput);
+pub struct FieldLevelOrder(SharedLevelSetRelationInput);
 
 impl FieldLevelOrder {
     /// Creates the hard relation `lower_group <= upper_group`.
     pub fn hard(source_id: SourceId, lower_group_id: GroupId, upper_group_id: GroupId) -> Self {
-        Self(SharedLevelRelationInput::order(
+        Self(SharedLevelSetRelationInput::field_level_order(
             source_id,
             lower_group_id,
             upper_group_id,
@@ -409,7 +598,7 @@ impl FieldLevelOrder {
         upper_group_id: GroupId,
         penalty: QuadraticPenalty,
     ) -> Self {
-        Self(SharedLevelRelationInput::order(
+        Self(SharedLevelSetRelationInput::field_level_order(
             source_id,
             lower_group_id,
             upper_group_id,
@@ -424,7 +613,7 @@ impl FieldLevelOrder {
         upper_group_id: GroupId,
         penalty: LinearViolationPenalty,
     ) -> Self {
-        Self(SharedLevelRelationInput::order(
+        Self(SharedLevelSetRelationInput::field_level_order(
             source_id,
             lower_group_id,
             upper_group_id,
@@ -437,14 +626,18 @@ impl FieldLevelOrder {
         self.0.source_id()
     }
 
-    /// Returns the shared level constrained to have the lower-or-equal value.
+    /// Returns the shared level set constrained to have the lower-or-equal value.
     pub fn lower_group_id(&self) -> &GroupId {
-        self.0.first_group_id()
+        self.0
+            .lower_group_id()
+            .expect("FieldLevelOrder always owns a lower group")
     }
 
-    /// Returns the shared level constrained to have the upper-or-equal value.
+    /// Returns the shared level set constrained to have the upper-or-equal value.
     pub fn upper_group_id(&self) -> &GroupId {
-        self.0.second_group_id()
+        self.0
+            .upper_group_id()
+            .expect("FieldLevelOrder always owns an upper group")
     }
 
     /// Reports whether this relation owns an explicit violation channel.
@@ -1456,7 +1649,7 @@ impl private::Sealed for YoungerThan {}
 
 impl ProblemInput for YoungerThan {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
-        builder.add_shared_level_relation(self.0)
+        builder.add_shared_level_set_relation(self.0)
     }
 }
 
@@ -1464,7 +1657,7 @@ impl private::Sealed for OlderThan {}
 
 impl ProblemInput for OlderThan {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
-        builder.add_shared_level_relation(self.0)
+        builder.add_shared_level_set_relation(self.0)
     }
 }
 
@@ -1472,6 +1665,6 @@ impl private::Sealed for FieldLevelOrder {}
 
 impl ProblemInput for FieldLevelOrder {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
-        builder.add_shared_level_relation(self.0)
+        builder.add_shared_level_set_relation(self.0)
     }
 }

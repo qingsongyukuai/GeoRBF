@@ -15,7 +15,7 @@ use crate::observation::{CovarianceGroup, ObservationInput};
 pub use crate::relation::StratigraphicFieldDirection;
 use crate::relation::{
     AdditiveFieldGauge, AdditiveFieldGaugeReference, DirectionalDerivativeInterval,
-    FieldValueBound, SharedLevelRelationInput, SharedLevelRelationKind, SharedLevelSetInput,
+    FieldValueBound, SharedLevelSetInput, SharedLevelSetRelationInput,
 };
 
 /// Resource request for a synchronous fit.
@@ -93,7 +93,7 @@ pub struct ProblemBuilder {
     additive_field_gauges: Vec<AdditiveFieldGauge>,
     field_value_bounds: Vec<FieldValueBound>,
     directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
-    shared_level_relations: Vec<SharedLevelRelationInput>,
+    shared_level_set_relations: Vec<SharedLevelSetRelationInput>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
     shared_level_group_ids: BTreeSet<GroupId>,
@@ -115,7 +115,7 @@ impl ProblemBuilder {
             additive_field_gauges: Vec::new(),
             field_value_bounds: Vec::new(),
             directional_derivative_intervals: Vec::new(),
-            shared_level_relations: Vec::new(),
+            shared_level_set_relations: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
             shared_level_group_ids: BTreeSet::new(),
@@ -180,9 +180,9 @@ impl ProblemBuilder {
         }
         let has_soft_relation = !self.covariance_groups.is_empty()
             || self
-                .shared_level_relations
+                .shared_level_set_relations
                 .iter()
-                .any(SharedLevelRelationInput::is_soft)
+                .any(SharedLevelSetRelationInput::is_soft)
             || self.field_value_bounds.iter().any(FieldValueBound::is_soft)
             || self
                 .directional_derivative_intervals
@@ -202,12 +202,10 @@ impl ProblemBuilder {
             errors.push(BuildError::MissingFieldEnergyNormalization);
         }
         if self.stratigraphic_field_direction.is_none()
-            && self.shared_level_relations.iter().any(|relation| {
-                matches!(
-                    relation.kind(),
-                    SharedLevelRelationKind::YoungerThan | SharedLevelRelationKind::OlderThan
-                )
-            })
+            && self
+                .shared_level_set_relations
+                .iter()
+                .any(SharedLevelSetRelationInput::is_stratigraphic_age_relation)
         {
             errors.push(BuildError::MissingStratigraphicFieldDirection);
         }
@@ -223,30 +221,18 @@ impl ProblemBuilder {
                 }
                 AdditiveFieldGaugeReference::LevelSet(_) => None,
             })
-            .collect::<Vec<_>>();
-        dangling_references.sort();
-        errors.extend(
-            dangling_references
-                .into_iter()
-                .map(|(source_id, group_id)| BuildError::UnknownGroupReference {
-                    source_id,
-                    group_id,
-                }),
-        );
-        let mut dangling_relation_references = self
-            .shared_level_relations
-            .iter()
-            .flat_map(|relation| {
-                [relation.first_group_id(), relation.second_group_id()]
+            .chain(self.shared_level_set_relations.iter().flat_map(|relation| {
+                relation
+                    .declared_group_ids()
                     .into_iter()
                     .filter(|group_id| !self.shared_level_group_ids.contains(*group_id))
                     .map(|group_id| (relation.source_id().clone(), group_id.clone()))
-            })
+            }))
             .collect::<Vec<_>>();
-        dangling_relation_references.sort();
-        dangling_relation_references.dedup();
+        dangling_references.sort();
+        dangling_references.dedup();
         errors.extend(
-            dangling_relation_references
+            dangling_references
                 .into_iter()
                 .map(|(source_id, group_id)| BuildError::UnknownGroupReference {
                     source_id,
@@ -278,7 +264,7 @@ impl ProblemBuilder {
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.directional_derivative_intervals
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
-        self.shared_level_relations
+        self.shared_level_set_relations
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
             input_coordinate_frame: self.input_coordinate_frame,
@@ -289,7 +275,7 @@ impl ProblemBuilder {
             additive_field_gauges: self.additive_field_gauges,
             field_value_bounds: self.field_value_bounds,
             directional_derivative_intervals: self.directional_derivative_intervals,
-            shared_level_relations: self.shared_level_relations,
+            shared_level_set_relations: self.shared_level_set_relations,
             source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
             field_energy_normalization: self
@@ -409,16 +395,16 @@ impl ProblemBuilder {
         Ok(())
     }
 
-    pub(crate) fn add_shared_level_relation(
+    pub(crate) fn add_shared_level_set_relation(
         &mut self,
-        relation: SharedLevelRelationInput,
+        relation: SharedLevelSetRelationInput,
     ) -> Result<(), AddError> {
         let source_id = relation.source_id().clone();
         if self.source_ids.contains(&source_id) {
             return Err(AddError::DuplicateSourceId { source_id });
         }
         self.source_ids.insert(source_id);
-        self.shared_level_relations.push(relation);
+        self.shared_level_set_relations.push(relation);
         Ok(())
     }
 }
@@ -511,23 +497,18 @@ impl ProblemSnapshot {
     /// Returns the number of caller-owned Younger Than and Older Than relations.
     pub fn stratigraphic_age_relation_count(&self) -> usize {
         self.inner
-            .shared_level_relations
+            .shared_level_set_relations
             .iter()
-            .filter(|relation| {
-                matches!(
-                    relation.kind(),
-                    SharedLevelRelationKind::YoungerThan | SharedLevelRelationKind::OlderThan
-                )
-            })
+            .filter(|relation| relation.is_stratigraphic_age_relation())
             .count()
     }
 
     /// Returns the number of caller-owned non-strict Field Level Order relations.
     pub fn field_level_order_count(&self) -> usize {
         self.inner
-            .shared_level_relations
+            .shared_level_set_relations
             .iter()
-            .filter(|relation| relation.kind() == SharedLevelRelationKind::FieldLevelOrder)
+            .filter(|relation| relation.is_field_level_order())
             .count()
     }
 
@@ -547,7 +528,7 @@ pub(crate) struct ProblemData {
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
     pub(crate) field_value_bounds: Vec<FieldValueBound>,
     pub(crate) directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
-    pub(crate) shared_level_relations: Vec<SharedLevelRelationInput>,
+    pub(crate) shared_level_set_relations: Vec<SharedLevelSetRelationInput>,
     pub(crate) source_count: usize,
     pub(crate) resolved_kernel: KernelConfig,
     pub(crate) field_energy_normalization: FieldEnergyNormalization,
