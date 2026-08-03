@@ -183,8 +183,15 @@ pub(crate) fn plan_convex_qp_capacity(
     let scalar_bytes = size_of::<f64>() as u64;
     let index_bytes = size_of::<usize>() as u64;
 
-    let canonical_scalars =
-        checked_add(CapacityComponent::Canonical, variables_u64, relations_u64)?;
+    let canonical_quadratic_scalars = checked_mul(
+        CapacityComponent::Canonical,
+        checked_mul(CapacityComponent::Canonical, relations_u64, relations_u64)?,
+        4,
+    )?;
+    let canonical_scalars = checked_sum(
+        CapacityComponent::Canonical,
+        &[variables_u64, relations_u64, canonical_quadratic_scalars],
+    )?;
     let canonical_bytes = checked_add(
         CapacityComponent::Canonical,
         checked_mul(
@@ -209,20 +216,68 @@ pub(crate) fn plan_convex_qp_capacity(
         constraints_u64,
         variables_u64,
     )?;
-    let dense_vector_scalars = checked_sum(
+    let two_form_matrix_scalars = checked_mul(
         CapacityComponent::ConvexQpDense,
-        &[
-            checked_mul(CapacityComponent::ConvexQpDense, variables_u64, 2)?,
-            checked_mul(CapacityComponent::ConvexQpDense, constraints_u64, 3)?,
-        ],
+        checked_add(
+            CapacityComponent::ConvexQpDense,
+            hessian_scalars,
+            constraint_scalars,
+        )?,
+        2,
     )?;
-    let dense_form_bytes = checked_mul(
+    let two_form_vector_scalars = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        checked_add(
+            CapacityComponent::ConvexQpDense,
+            variables_u64,
+            constraints_u64,
+        )?,
+        2,
+    )?;
+    let canonical_row_map_scalars = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        relations_u64,
+        variables_u64,
+    )?;
+    let objective_transform_scalars = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        checked_mul(
+            CapacityComponent::ConvexQpDense,
+            relations_u64,
+            relations_u64,
+        )?,
+        3,
+    )?;
+    let dense_f64_bytes = checked_mul(
         CapacityComponent::ConvexQpDense,
         checked_sum(
             CapacityComponent::ConvexQpDense,
-            &[hessian_scalars, constraint_scalars, dense_vector_scalars],
+            &[
+                two_form_matrix_scalars,
+                two_form_vector_scalars,
+                canonical_row_map_scalars,
+                objective_transform_scalars,
+            ],
         )?,
         scalar_bytes,
+    )?;
+    let scaling_exponents = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        checked_add(
+            CapacityComponent::ConvexQpDense,
+            variables_u64,
+            constraints_u64,
+        )?,
+        9,
+    )?;
+    let dense_form_bytes = checked_add(
+        CapacityComponent::ConvexQpDense,
+        dense_f64_bytes,
+        checked_mul(
+            CapacityComponent::ConvexQpDense,
+            scaling_exponents,
+            size_of::<i32>() as u64,
+        )?,
     )?;
 
     let upper_hessian_entries = checked_mul(
@@ -243,7 +298,11 @@ pub(crate) fn plan_convex_qp_capacity(
     let csc_entry_bytes = checked_add(CapacityComponent::ConvexQpCsc, scalar_bytes, index_bytes)?;
     let column_pointers = checked_mul(
         CapacityComponent::ConvexQpCsc,
-        checked_mul(CapacityComponent::ConvexQpCsc, variables_u64, 2)?,
+        checked_mul(
+            CapacityComponent::ConvexQpCsc,
+            checked_add(CapacityComponent::ConvexQpCsc, variables_u64, 1)?,
+            2,
+        )?,
         index_bytes,
     )?;
     let csc_realization_bytes = checked_add(
@@ -756,7 +815,12 @@ mod tests {
         assert_eq!(plan.constraints, 11);
         assert_eq!(plan.canonical_relations, 12);
         assert!(plan.components.canonical_bytes > 0);
-        assert!(plan.components.dense_form_bytes > 0);
+        let one_dense_matrix_pair = (10 * 10 + 11 * 10) * size_of::<f64>();
+        assert!(
+            plan.components.dense_form_bytes
+                > u64::try_from(2 * one_dense_matrix_pair)
+                    .expect("the manufactured byte count fits u64")
+        );
         assert!(plan.components.csc_realization_bytes > 0);
         assert!(plan.components.factor_workspace_bytes > 0);
         assert!(plan.components.recovery_bytes > 0);

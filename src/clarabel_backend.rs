@@ -30,6 +30,22 @@ pub(crate) struct ClarabelSettingsFingerprint {
     pub(crate) iterative_refinement_enabled: bool,
     pub(crate) iterative_refinement_max_iterations: u32,
     pub(crate) presolve_enabled: bool,
+    pub(crate) all_settings: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClarabelBackendFingerprint {
+    pub(crate) crate_name: &'static str,
+    pub(crate) crate_version: &'static str,
+    pub(crate) features: [&'static str; FEATURES.len()],
+    pub(crate) direct_solver: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ClarabelCertificateEvidence {
+    pub(crate) primal_infeasibility_residual: f64,
+    pub(crate) dual_infeasibility_residual: f64,
+    pub(crate) kappa_tau_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +96,7 @@ impl From<SolverStatus> for ClarabelTermination {
 pub(crate) struct ClarabelAttemptEvidence {
     pub(crate) sequence: usize,
     pub(crate) profile: ClarabelAttemptProfile,
+    pub(crate) backend: ClarabelBackendFingerprint,
     pub(crate) termination: ClarabelTermination,
     pub(crate) settings: ClarabelSettingsFingerprint,
     pub(crate) requested_threads: usize,
@@ -89,6 +106,7 @@ pub(crate) struct ClarabelAttemptEvidence {
     pub(crate) reported_dual_residual: f64,
     pub(crate) reported_absolute_gap: f64,
     pub(crate) reported_relative_gap: f64,
+    pub(crate) certificate: ClarabelCertificateEvidence,
     pub(crate) linear_solver: String,
     pub(crate) internal_scaling: ClarabelInternalScalingEvidence,
 }
@@ -149,22 +167,8 @@ pub(crate) fn solve_qp(
         });
     }
 
-    let hessian_rows = (0..input.variables)
-        .map(|row| {
-            (0..input.variables)
-                .map(|column| input.hessian[row * input.variables + column])
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let constraint_rows = (0..input.constraints)
-        .map(|row| {
-            (0..input.variables)
-                .map(|column| input.constraint_matrix[row * input.variables + column])
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let hessian = CscMatrix::from(&hessian_rows).to_triu();
-    let constraints = CscMatrix::from(&constraint_rows);
+    let hessian = upper_csc(input.variables, input.hessian);
+    let constraints = dense_csc(input.constraints, input.variables, input.constraint_matrix);
     let mut cones = Vec::<SupportedConeT<f64>>::new();
     if input.equality_constraints > 0 {
         cones.push(SupportedConeT::ZeroConeT(input.equality_constraints));
@@ -199,6 +203,12 @@ pub(crate) fn solve_qp(
         attempt: ClarabelAttemptEvidence {
             sequence,
             profile,
+            backend: ClarabelBackendFingerprint {
+                crate_name: CRATE_NAME,
+                crate_version: CRATE_VERSION,
+                features: FEATURES,
+                direct_solver: DIRECT_SOLVER,
+            },
             termination: solver.solution.status.into(),
             settings: settings_fingerprint,
             requested_threads: REQUESTED_THREADS,
@@ -208,6 +218,11 @@ pub(crate) fn solve_qp(
             reported_dual_residual: solver.info.res_dual,
             reported_absolute_gap: solver.info.gap_abs,
             reported_relative_gap: solver.info.gap_rel,
+            certificate: ClarabelCertificateEvidence {
+                primal_infeasibility_residual: solver.info.res_primal_inf,
+                dual_infeasibility_residual: solver.info.res_dual_inf,
+                kappa_tau_ratio: solver.info.ktratio,
+            },
             linear_solver: solver.info.linsolver.name.clone(),
             internal_scaling: ClarabelInternalScalingEvidence {
                 variable: solver.data.equilibration.d.clone(),
@@ -218,6 +233,37 @@ pub(crate) fn solve_qp(
             },
         },
     })
+}
+
+fn upper_csc(dimension: usize, row_major: &[f64]) -> CscMatrix<f64> {
+    let entries = dimension * (dimension + 1) / 2;
+    let mut column_pointers = Vec::with_capacity(dimension + 1);
+    let mut row_indices = Vec::with_capacity(entries);
+    let mut values = Vec::with_capacity(entries);
+    column_pointers.push(0);
+    for column in 0..dimension {
+        for row in 0..=column {
+            row_indices.push(row);
+            values.push(row_major[row * dimension + column]);
+        }
+        column_pointers.push(values.len());
+    }
+    CscMatrix::new(dimension, dimension, column_pointers, row_indices, values)
+}
+
+fn dense_csc(rows: usize, columns: usize, row_major: &[f64]) -> CscMatrix<f64> {
+    let mut column_pointers = Vec::with_capacity(columns + 1);
+    let mut row_indices = Vec::with_capacity(rows * columns);
+    let mut values = Vec::with_capacity(rows * columns);
+    column_pointers.push(0);
+    for column in 0..columns {
+        for row in 0..rows {
+            row_indices.push(row);
+            values.push(row_major[row * columns + column]);
+        }
+        column_pointers.push(values.len());
+    }
+    CscMatrix::new(rows, columns, column_pointers, row_indices, values)
 }
 
 fn resolved_settings(profile: ClarabelAttemptProfile) -> DefaultSettings<f64> {
@@ -268,6 +314,11 @@ fn resolved_settings(profile: ClarabelAttemptProfile) -> DefaultSettings<f64> {
     }
 }
 
+pub(crate) fn expected_settings(profile: ClarabelAttemptProfile) -> ClarabelSettingsFingerprint {
+    let settings = resolved_settings(profile);
+    settings_fingerprint(profile, &settings)
+}
+
 fn settings_fingerprint(
     profile: ClarabelAttemptProfile,
     settings: &DefaultSettings<f64>,
@@ -288,5 +339,6 @@ fn settings_fingerprint(
         iterative_refinement_enabled: settings.iterative_refinement_enable,
         iterative_refinement_max_iterations: settings.iterative_refinement_max_iter,
         presolve_enabled: settings.presolve_enable,
+        all_settings: format!("{settings:?}"),
     }
 }

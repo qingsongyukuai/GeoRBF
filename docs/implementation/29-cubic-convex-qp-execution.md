@@ -9,8 +9,9 @@ NUM-003–NUM-015; DIA-001, DIA-003, DIA-005; VAL-005, VAL-013, VAL-015
 
 ## Capability-driven execution
 
-The existing physical `CubicCanonicalProblem` is the only domain model. A
-crate-private algebraic planner chooses the symmetric Equality KKT when its
+The existing physical `CubicCanonicalProblem` is the only domain model. The
+crate-private executor is the production entry point used by today's public
+Equality fit, and its algebraic planner chooses the symmetric Equality KKT when its
 relations are affine equalities and chooses Convex QP only when the same
 canonical problem contains an affine inequality. The plan records form family
 and relation counts but owns no faer, Clarabel, sparse-layout, or raw backend
@@ -54,10 +55,12 @@ direct linear solver and one thread is required and checked.
 
 Checked capacity planning completes before representation/form allocation or
 backend entry. Its conservative peak includes physical canonical storage,
-dense QP assembly, upper-Hessian and constraint CSC realization, qdldl factor
-workspace, recovery, and report storage. Arithmetic overflow and a peak above
-8 GiB return structured evidence with both allocation and backend-entry flags
-false.
+both simultaneously live solver-independent dense QP forms, canonical row and
+objective-transform maps, scaling evidence, upper-Hessian and constraint CSC
+realization, qdldl factor workspace, recovery, and report storage. The adapter
+constructs CSC columns directly from the row-major form without an intermediate
+dense row copy. Arithmetic overflow and a peak above 8 GiB return structured
+evidence with both allocation and backend-entry flags false.
 
 GeoRBF applies exactly eight deterministic Ruiz-style rounds. Every row and
 variable factor is an exact power of two, each round is clamped to exponent
@@ -70,9 +73,10 @@ The immutable attempt plan is Standard then Robust, at most once each. Both
 profiles fix the full settings fingerprint, qdldl, and one thread. A later
 attempt changes only numerical settings: canonical tolerances, objective,
 constraints, and QP form family remain unchanged. Every attempt records status,
-settings, threads, iterations, backend reports, internal scaling, and
-independently recomputed primal, dual, stationarity, complementarity, and gap
-residuals. A backend status alone never accepts a candidate.
+complete settings, crate/version/features, threads, iterations, certificate
+residuals, GeoRBF and backend-internal scaling, backend reports, and independently
+recomputed primal, dual, stationarity, complementarity, and gap residuals. A
+backend status alone never accepts a candidate.
 
 ## Recover and Verify
 
@@ -82,7 +86,7 @@ checks:
 
 - backend standard-form rows and nonnegative inequality slack;
 - physical hard-equality and affine-inequality violations by dimension;
-- canonical row/provenance association;
+- complete source/relation/residual/derived-block/row/column association;
 - scaling, reduction, polynomial, coefficient, FieldEnergy, whitening, and
   objective round trips;
 - Cubic side conditions, finite recovered quantities, and total objective
@@ -90,6 +94,8 @@ checks:
 
 Injected provenance, GeoRBF scaling, Householder recovery, backend-residual, and
 objective corruptions each produce structured failure evidence and no model.
+An independently damaged recovered backend equation is classified as a Backend
+Contract Violation rather than a canonical recovery failure.
 An injected unverified Standard attempt proves the single deterministic Robust
 retry. A flattened manufactured `Pi1` proves a missing affine mode is reported
 before Clarabel entry.

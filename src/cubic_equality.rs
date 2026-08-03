@@ -419,12 +419,6 @@ impl CubicRepresentation {
         if fitting_uses.is_empty() {
             return Err(RepresentationFailure::EmptyRepresenterSpan);
         }
-        let augmented_dimension = fitting_uses
-            .len()
-            .checked_add(POLYNOMIAL_DIMENSION)
-            .unwrap_or(usize::MAX);
-        plan_equality_capacity(augmented_dimension, augmented_dimension)
-            .map_err(|failure| RepresentationFailure::Capacity(Box::new(failure)))?;
         let functionals = fitting_uses
             .iter()
             .map(|usage| usage.functional().clone())
@@ -2017,6 +2011,7 @@ impl RecoveryVerificationFailureEvidence {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CubicEqualityFailure {
     EmptyEqualitySet,
+    AffineInequalityRequiresConvexQp,
     NonFiniteTarget {
         equality: usize,
     },
@@ -2079,6 +2074,9 @@ impl CubicEqualityCore {
         problem: CubicCanonicalProblem,
         metric: GlobalAnisotropyMetric,
     ) -> Result<CubicEqualitySolution, CubicEqualityFailure> {
+        if !problem.affine_inequalities.is_empty() {
+            return Err(CubicEqualityFailure::AffineInequalityRequiresConvexQp);
+        }
         if problem.equalities.is_empty() && problem.soft_equalities.is_empty() {
             return Err(CubicEqualityFailure::EmptyEqualitySet);
         }
@@ -2123,6 +2121,25 @@ impl CubicEqualityCore {
             &problem.soft_equalities,
             &problem.affine_inequalities,
         );
+        let primal_variables = fitting_uses
+            .len()
+            .checked_add(POLYNOMIAL_DIMENSION)
+            .and_then(|count| count.checked_add(problem.semantic_latents.len()))
+            .unwrap_or(usize::MAX);
+        let equality_constraints = problem
+            .equalities
+            .iter()
+            .filter(|equality| {
+                equality.participation == CanonicalEqualityParticipation::SolverConstraint
+            })
+            .count()
+            .checked_add(POLYNOMIAL_DIMENSION)
+            .unwrap_or(usize::MAX);
+        plan_equality_capacity(primal_variables, equality_constraints).map_err(|failure| {
+            CubicEqualityFailure::Representation(Box::new(RepresentationFailure::Capacity(
+                Box::new(failure),
+            )))
+        })?;
         let mut representation = CubicRepresentation::new(fitting_uses, metric)
             .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
         representation.set_field_energy_normalization(problem.field_energy_normalization);
@@ -2602,9 +2619,14 @@ fn recover_and_verify(
                 .map(|index| soft_equalities[*index].residual)
                 .collect::<Vec<_>>();
             let dimension = residual.len();
-            let whitened_residual = matrix_vector_product(&block.whitening, dimension, &residual);
-            let recovered_residual =
-                matrix_vector_product(&block.inverse_whitening, dimension, &whitened_residual);
+            let whitened_residual =
+                dense_matrix_vector_product(&block.whitening, dimension, dimension, &residual);
+            let recovered_residual = dense_matrix_vector_product(
+                &block.inverse_whitening,
+                dimension,
+                dimension,
+                &whitened_residual,
+            );
             let whitening_round_trip_error = relative_slice_error(&recovered_residual, &residual);
             RecoveredSoftObjective {
                 canonical_indices: block.canonical_indices.clone(),
@@ -2706,8 +2728,12 @@ fn recover_and_verify(
                         - target
                 })
                 .collect::<Vec<_>>();
-            let weighted =
-                matrix_vector_product(&objective.standard_precision, dimension, &residual);
+            let weighted = dense_matrix_vector_product(
+                &objective.standard_precision,
+                dimension,
+                dimension,
+                &residual,
+            );
             0.5 * residual
                 .iter()
                 .zip(weighted)
@@ -3014,7 +3040,10 @@ fn tolerance_scales_for_dimension(
     }
 }
 
-fn canonical_gauge_offset(problem: &CubicCanonicalProblem, dimension: FunctionalDimension) -> f64 {
+pub(crate) fn canonical_gauge_offset(
+    problem: &CubicCanonicalProblem,
+    dimension: FunctionalDimension,
+) -> f64 {
     let response_targets = problem
         .equalities
         .iter()
@@ -3026,6 +3055,13 @@ fn canonical_gauge_offset(problem: &CubicCanonicalProblem, dimension: Functional
                 .iter()
                 .filter(|equality| equality.dimension == dimension)
                 .map(|equality| (equality.constant_shift_response(), equality.target)),
+        )
+        .chain(
+            problem
+                .affine_inequalities
+                .iter()
+                .filter(|inequality| inequality.dimension == dimension)
+                .map(|inequality| (inequality.constant_shift_response(), inequality.upper_bound)),
         )
         .collect::<Vec<_>>();
     let response_scale = response_targets
@@ -3050,7 +3086,7 @@ fn canonical_gauge_offset(problem: &CubicCanonicalProblem, dimension: Functional
     target_scale / response_scale * numerator / denominator
 }
 
-fn relative_slice_error(actual: &[f64], expected: &[f64]) -> f64 {
+pub(crate) fn relative_slice_error(actual: &[f64], expected: &[f64]) -> f64 {
     actual
         .iter()
         .zip(expected)
@@ -3058,13 +3094,18 @@ fn relative_slice_error(actual: &[f64], expected: &[f64]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-fn matrix_vector_product(matrix: &[f64], dimension: usize, vector: &[f64]) -> Vec<f64> {
-    debug_assert_eq!(matrix.len(), dimension * dimension);
-    debug_assert_eq!(vector.len(), dimension);
-    (0..dimension)
+pub(crate) fn dense_matrix_vector_product(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+    vector: &[f64],
+) -> Vec<f64> {
+    debug_assert_eq!(matrix.len(), rows * columns);
+    debug_assert_eq!(vector.len(), columns);
+    (0..rows)
         .map(|row| {
-            (0..dimension)
-                .map(|column| matrix[row * dimension + column] * vector[column])
+            (0..columns)
+                .map(|column| matrix[row * columns + column] * vector[column])
                 .sum()
         })
         .collect()
@@ -3093,7 +3134,7 @@ fn stable_norm(vector: [f64; 3]) -> f64 {
     }
 }
 
-fn dot_product(left: &[f64], right: &[f64]) -> f64 {
+pub(crate) fn dot_product(left: &[f64], right: &[f64]) -> f64 {
     left.iter()
         .zip(right)
         .map(|(left, right)| left * right)

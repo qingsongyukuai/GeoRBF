@@ -12,13 +12,14 @@ use crate::cubic_equality::{
     AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
     CanonicalHardEquality, CanonicalRelationToleranceEvidence, CanonicalSoftEquality,
     CanonicalSoftLoss, CanonicalSoftObjective, CanonicalSoftResidualBlockKind,
-    CanonicalSoftResidualMemberKind, CpdEvidence, CubicCanonicalProblem, CubicEqualityCore,
-    CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
-    RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
-    RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
+    CanonicalSoftResidualMemberKind, CpdEvidence, CubicCanonicalProblem, CubicEqualityFailure,
+    CubicEqualitySolution, PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
+    ReducedPairingFailureClassification, RepresentationFailure, SemanticLatentCoefficient,
+    SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
     canonical_fitting_uses, preflight_polynomial_analysis_failure,
 };
+use crate::cubic_execution::CubicExecutionCore;
 use crate::diagnostics::{
     AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
@@ -1285,7 +1286,7 @@ fn fit_snapshot_after_preflight(
     problem_size: ProblemSize,
     base_report: impl Fn() -> FitReport,
 ) -> Result<FitSuccess, FitFailure> {
-    let solution = match CubicEqualityCore::solve_canonical(
+    let solution = match CubicExecutionCore::solve_equality_production(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
             affine_inequalities: Vec::new(),
@@ -2739,7 +2740,9 @@ fn failure_report(
                 .sort_by(|left, right| left.group_id.cmp(&right.group_id));
             report.recovery_verification = Some(public_recovery_evidence(evidence));
         }
-        CubicEqualityFailure::EmptyEqualitySet | CubicEqualityFailure::NonFiniteTarget { .. } => {}
+        CubicEqualityFailure::EmptyEqualitySet
+        | CubicEqualityFailure::AffineInequalityRequiresConvexQp
+        | CubicEqualityFailure::NonFiniteTarget { .. } => {}
     }
     report
 }
@@ -3421,9 +3424,9 @@ fn public_recovery_evidence(
 
 fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
     match failure {
-        CubicEqualityFailure::EmptyEqualitySet | CubicEqualityFailure::NonFiniteTarget { .. } => {
-            ProblemDiagnosis::InvalidProblem
-        }
+        CubicEqualityFailure::EmptyEqualitySet
+        | CubicEqualityFailure::AffineInequalityRequiresConvexQp
+        | CubicEqualityFailure::NonFiniteTarget { .. } => ProblemDiagnosis::InvalidProblem,
         CubicEqualityFailure::Representation(failure) => diagnose_representation(failure),
         CubicEqualityFailure::Backend { failure, .. } => diagnose_kkt(failure),
         CubicEqualityFailure::RecoveryVerification { .. } => {
