@@ -553,15 +553,20 @@ fn validate_qp_problem(problem: &CubicCanonicalProblem) -> Result<(), CubicExecu
             || equality.latent_coefficients().iter().any(|term| {
                 !term.coefficient.is_finite() || term.latent >= problem.semantic_latents.len()
             })
-    }) || problem.affine_inequalities.iter().any(|inequality| {
-        !inequality.bound().is_finite()
-            || inequality.latent_coefficients().iter().any(|term| {
-                !term.coefficient.is_finite() || term.latent >= problem.semantic_latents.len()
-            })
-            || inequality
-                .violation_channel()
-                .is_some_and(|channel| !channel.loss().is_valid())
-    }) {
+    }) || problem
+        .hard_residual_blocks
+        .iter()
+        .any(|block| !block.is_valid(problem.equalities.len()))
+        || problem.affine_inequalities.iter().any(|inequality| {
+            !inequality.bound().is_finite()
+                || inequality.latent_coefficients().iter().any(|term| {
+                    !term.coefficient.is_finite() || term.latent >= problem.semantic_latents.len()
+                })
+                || inequality
+                    .violation_channel()
+                    .is_some_and(|channel| !channel.loss().is_valid())
+        })
+    {
         return Err(CubicExecutionFailure::Assembly(
             QpAssemblyFailureReason::InvalidCanonicalProblem,
         ));
@@ -897,29 +902,16 @@ fn reduced_affine_row(
     let reduced_dimension = representation.null_space().reduced_dimension();
     let mut row = vec![0.0; reduced_dimension + POLYNOMIAL_DIMENSION];
     if let Some(field) = field {
-        let functional_index = representation
-            .fitting_uses()
-            .iter()
-            .position(|usage| usage.functional() == field.functional())
-            .ok_or(QpAssemblyFailureReason::InvalidCanonicalProblem)
-            .map_err(CubicExecutionFailure::Assembly)?;
-        let ambient = (0..representation.kernel_pairing().shape().1)
-            .map(|column| {
-                representation
-                    .kernel_pairing()
-                    .get(functional_index, column)
-            })
-            .collect::<Vec<_>>();
+        let (ambient, polynomial_row) = representation
+            .standard_functional_row(field.functional())
+            .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
         let reduced = representation
             .null_space()
             .project(&ambient)
             .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
         row[..reduced_dimension].copy_from_slice(&reduced);
-        for polynomial in 0..POLYNOMIAL_DIMENSION {
-            row[reduced_dimension + polynomial] = representation
-                .polynomial_pairing()
-                .get(functional_index, polynomial);
-        }
+        row[reduced_dimension..reduced_dimension + POLYNOMIAL_DIMENSION]
+            .copy_from_slice(&polynomial_row);
     }
     row.extend(std::iter::repeat_n(0.0, problem.semantic_latents.len()));
     for term in latent_coefficients {
@@ -2014,11 +2006,7 @@ fn recover_and_verify_qp(
     if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::SideConditionRoundTripViolation);
     }
-    if hard_equalities
-        .iter()
-        .zip(&hard_relation_tolerances)
-        .any(|(relation, tolerance)| relation.residual.abs() > tolerance.physical_tolerance)
-    {
+    if !hard_residuals_within_tolerance(&problem, &hard_equalities, &hard_relation_tolerances) {
         reasons.push(QpRecoveryFailureReason::HardEqualityViolation);
     }
     if affine_inequalities.iter().any(|relation| {
@@ -2105,6 +2093,48 @@ fn recover_and_verify_qp(
             provenance_verified,
         }),
     })
+}
+
+fn hard_residuals_within_tolerance(
+    problem: &CubicCanonicalProblem,
+    recovered: &[RecoveredHardEquality],
+    tolerances: &[CanonicalRelationToleranceEvidence],
+) -> bool {
+    let mut block_membership = vec![false; recovered.len()];
+    for block in &problem.hard_residual_blocks {
+        for index in block.canonical_indices() {
+            block_membership[*index] = true;
+        }
+        let scale = block
+            .canonical_indices()
+            .iter()
+            .map(|index| recovered[*index].residual.abs())
+            .fold(0.0_f64, f64::max);
+        let residual_norm = if scale == 0.0 {
+            0.0
+        } else {
+            scale
+                * block
+                    .canonical_indices()
+                    .iter()
+                    .map(|index| (recovered[*index].residual / scale).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+        };
+        let tolerance = block
+            .canonical_indices()
+            .iter()
+            .map(|index| tolerances[*index].physical_tolerance)
+            .fold(0.0_f64, f64::max);
+        if residual_norm > tolerance {
+            return false;
+        }
+    }
+    recovered.iter().zip(tolerances).zip(block_membership).all(
+        |((relation, tolerance), in_block)| {
+            in_block || relation.residual.abs() <= tolerance.physical_tolerance
+        },
+    )
 }
 
 fn verifies_qp_form_provenance(
@@ -2469,12 +2499,74 @@ mod tests {
     fn equality_problem() -> CubicCanonicalProblem {
         CubicCanonicalProblem {
             equalities: vec![equality(usage("value", [0.0; 3]), 0.0)],
+            hard_residual_blocks: Vec::new(),
             affine_inequalities: Vec::new(),
             soft_equalities: Vec::new(),
             soft_objectives: Vec::new(),
             semantic_latents: Vec::new(),
             field_energy_normalization: FieldEnergyNormalization::all_hard(),
         }
+    }
+
+    #[test]
+    fn hard_normal_projection_acceptance_uses_the_block_norm_under_rotation() {
+        let mut problem = equality_problem();
+        problem
+            .equalities
+            .push(equality(usage("value-rotated", [1.0, 0.0, 0.0]), 0.0));
+        problem
+            .hard_residual_blocks
+            .push(crate::cubic_equality::CanonicalHardResidualBlock::normal_projection(vec![0, 1]));
+        let tolerances = problem
+            .equalities
+            .iter()
+            .map(|_| CanonicalRelationToleranceEvidence {
+                dimension: FunctionalDimension::FieldValuePerLength,
+                characteristic_scale: 1.0,
+                relation_reference_scale: 0.0,
+                physical_tolerance: 1.0,
+                standard_tolerance: 1.0,
+                scaled_kkt_tolerance: None,
+                recovered_physical_tolerance: 1.0,
+                round_trip_error: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let recovered = |residuals: [f64; 2]| {
+            problem
+                .equalities
+                .iter()
+                .zip(residuals)
+                .map(|(equality, residual)| RecoveredHardEquality {
+                    provenance: equality.provenance().clone(),
+                    dimension: FunctionalDimension::FieldValuePerLength,
+                    target: 0.0,
+                    value: residual,
+                    residual,
+                })
+                .collect::<Vec<_>>()
+        };
+        let forty_five_degrees = std::f64::consts::FRAC_1_SQRT_2;
+
+        assert!(!hard_residuals_within_tolerance(
+            &problem,
+            &recovered([0.9, 0.9]),
+            &tolerances,
+        ));
+        assert!(!hard_residuals_within_tolerance(
+            &problem,
+            &recovered([1.8 * forty_five_degrees, 0.0]),
+            &tolerances,
+        ));
+        assert!(hard_residuals_within_tolerance(
+            &problem,
+            &recovered([0.6, 0.6]),
+            &tolerances,
+        ));
+        assert!(hard_residuals_within_tolerance(
+            &problem,
+            &recovered([1.2 * forty_five_degrees, 0.0]),
+            &tolerances,
+        ));
     }
 
     fn manufactured_usage(
@@ -2522,6 +2614,7 @@ mod tests {
                 .zip(MANUFACTURED_TARGETS)
                 .map(|(usage, target)| equality(usage, target))
                 .collect(),
+            hard_residual_blocks: Vec::new(),
             affine_inequalities: Vec::new(),
             soft_equalities: Vec::new(),
             soft_objectives: Vec::new(),
@@ -2674,6 +2767,7 @@ mod tests {
             .clone();
         CubicCanonicalProblem {
             equalities: flattened_equalities,
+            hard_residual_blocks: Vec::new(),
             affine_inequalities: vec![CanonicalAffineInequality::upper_bound(
                 Some(bound_use.clone()),
                 Vec::new(),

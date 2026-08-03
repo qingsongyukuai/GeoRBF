@@ -1,4 +1,4 @@
-//! Supported field-value, complete-gradient, and tangent-direction observations.
+//! Supported field-value, gradient, tangent, and normal-direction observations.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -8,6 +8,7 @@ use crate::functional::{GroupId, SourceId};
 use crate::geometry::{Point3, Vector3, normalize_direction};
 use crate::math::canonical_zero;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
+use crate::relation::LinearViolationPenalty;
 
 /// A finite, exactly symmetric, strictly positive-definite covariance matrix.
 ///
@@ -564,6 +565,383 @@ impl fmt::Display for StandardDeviationError {
 
 impl Error for StandardDeviationError {}
 
+/// A finite, strictly positive lower bound on the directed normal slope.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimumNormalSlope {
+    value: f64,
+}
+
+impl MinimumNormalSlope {
+    /// Creates a checked slope in field-value-per-length units.
+    pub fn try_new(value: f64) -> Result<Self, MinimumNormalSlopeError> {
+        if !value.is_finite() {
+            return Err(MinimumNormalSlopeError::NotFinite);
+        }
+        if value <= 0.0 {
+            return Err(MinimumNormalSlopeError::NotPositive);
+        }
+        Ok(Self { value })
+    }
+
+    /// Returns the strictly positive slope in physical input units.
+    pub fn value(self) -> f64 {
+        self.value
+    }
+}
+
+/// A rejected minimum normal slope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MinimumNormalSlopeError {
+    /// The slope was NaN or infinite.
+    NotFinite,
+    /// The slope was zero or negative.
+    NotPositive,
+}
+
+impl fmt::Display for MinimumNormalSlopeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => formatter.write_str("minimum normal slope is not finite"),
+            Self::NotPositive => formatter.write_str("minimum normal slope is not positive"),
+        }
+    }
+}
+
+impl Error for MinimumNormalSlopeError {}
+
+/// Legal enforcement for the rotation-invariant normal-direction residual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NormalDirectionEnforcement {
+    configuration: NormalDirectionConfiguration,
+}
+
+impl NormalDirectionEnforcement {
+    /// Requires an exact zero tangential projection residual.
+    pub fn hard() -> Self {
+        Self {
+            configuration: NormalDirectionConfiguration::Hard,
+        }
+    }
+
+    /// Applies one Euclidean quadratic loss to the projection residual vector.
+    pub fn with_quadratic_penalty(penalty: QuadraticPenalty) -> Self {
+        Self {
+            configuration: NormalDirectionConfiguration::QuadraticPenalty(penalty),
+        }
+    }
+
+    /// Applies one isotropic statistical scale to the projection residual vector.
+    pub fn with_standard_deviation(standard_deviation: StandardDeviation) -> Self {
+        Self {
+            configuration: NormalDirectionConfiguration::StandardDeviation(standard_deviation),
+        }
+    }
+
+    /// Reports whether the direction channel contributes a soft loss.
+    pub fn is_soft(self) -> bool {
+        !matches!(self.configuration, NormalDirectionConfiguration::Hard)
+    }
+
+    /// Returns the configured non-statistical vector penalty when present.
+    pub fn quadratic_penalty(self) -> Option<QuadraticPenalty> {
+        match self.configuration {
+            NormalDirectionConfiguration::QuadraticPenalty(penalty) => Some(penalty),
+            NormalDirectionConfiguration::Hard
+            | NormalDirectionConfiguration::StandardDeviation(_) => None,
+        }
+    }
+
+    /// Returns the configured isotropic statistical scale when present.
+    pub fn standard_deviation(self) -> Option<StandardDeviation> {
+        match self.configuration {
+            NormalDirectionConfiguration::StandardDeviation(standard_deviation) => {
+                Some(standard_deviation)
+            }
+            NormalDirectionConfiguration::Hard
+            | NormalDirectionConfiguration::QuadraticPenalty(_) => None,
+        }
+    }
+
+    pub(crate) fn configuration(self) -> NormalDirectionConfiguration {
+        self.configuration
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum NormalDirectionConfiguration {
+    Hard,
+    QuadraticPenalty(QuadraticPenalty),
+    StandardDeviation(StandardDeviation),
+}
+
+/// Legal enforcement for the independent minimum-slope violation channel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimumNormalSlopeEnforcement {
+    configuration: MinimumNormalSlopeConfiguration,
+}
+
+impl MinimumNormalSlopeEnforcement {
+    /// Requires the minimum slope as a hard affine bound.
+    pub fn hard() -> Self {
+        Self {
+            configuration: MinimumNormalSlopeConfiguration::Hard,
+        }
+    }
+
+    /// Applies a quadratic loss to the nonnegative slope violation.
+    pub fn with_quadratic_penalty(penalty: QuadraticPenalty) -> Self {
+        Self {
+            configuration: MinimumNormalSlopeConfiguration::QuadraticPenalty(penalty),
+        }
+    }
+
+    /// Applies a linear loss to the nonnegative slope violation.
+    pub fn with_linear_violation_penalty(penalty: LinearViolationPenalty) -> Self {
+        Self {
+            configuration: MinimumNormalSlopeConfiguration::LinearViolationPenalty(penalty),
+        }
+    }
+
+    /// Reports whether the slope channel contributes a soft loss.
+    pub fn is_soft(self) -> bool {
+        !matches!(self.configuration, MinimumNormalSlopeConfiguration::Hard)
+    }
+
+    /// Returns the configured quadratic violation penalty when present.
+    pub fn quadratic_penalty(self) -> Option<QuadraticPenalty> {
+        match self.configuration {
+            MinimumNormalSlopeConfiguration::QuadraticPenalty(penalty) => Some(penalty),
+            MinimumNormalSlopeConfiguration::Hard
+            | MinimumNormalSlopeConfiguration::LinearViolationPenalty(_) => None,
+        }
+    }
+
+    /// Returns the configured linear violation penalty when present.
+    pub fn linear_violation_penalty(self) -> Option<LinearViolationPenalty> {
+        match self.configuration {
+            MinimumNormalSlopeConfiguration::LinearViolationPenalty(penalty) => Some(penalty),
+            MinimumNormalSlopeConfiguration::Hard
+            | MinimumNormalSlopeConfiguration::QuadraticPenalty(_) => None,
+        }
+    }
+
+    pub(crate) fn configuration(self) -> MinimumNormalSlopeConfiguration {
+        self.configuration
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MinimumNormalSlopeConfiguration {
+    Hard,
+    QuadraticPenalty(QuadraticPenalty),
+    LinearViolationPenalty(LinearViolationPenalty),
+}
+
+/// A directed geometric normal with independent direction and slope channels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectedNormalObservation {
+    source_id: SourceId,
+    location: Point3,
+    direction: Vector3,
+    direction_enforcement: NormalDirectionEnforcement,
+    minimum_slope: MinimumNormalSlope,
+    minimum_slope_enforcement: MinimumNormalSlopeEnforcement,
+}
+
+impl DirectedNormalObservation {
+    /// Creates a hard directed normal with exact direction and hard minimum slope.
+    pub fn try_new(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        minimum_slope: MinimumNormalSlope,
+    ) -> Result<Self, NormalObservationError> {
+        Self::try_with_enforcement(
+            source_id,
+            location,
+            direction,
+            NormalDirectionEnforcement::hard(),
+            minimum_slope,
+            MinimumNormalSlopeEnforcement::hard(),
+        )
+    }
+
+    /// Creates a directed normal with separately configured legal channels.
+    pub fn try_with_enforcement(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        direction_enforcement: NormalDirectionEnforcement,
+        minimum_slope: MinimumNormalSlope,
+        minimum_slope_enforcement: MinimumNormalSlopeEnforcement,
+    ) -> Result<Self, NormalObservationError> {
+        let direction =
+            normalize_direction(direction).ok_or(NormalObservationError::ZeroDirection)?;
+        Ok(Self {
+            source_id,
+            location,
+            direction,
+            direction_enforcement,
+            minimum_slope,
+            minimum_slope_enforcement,
+        })
+    }
+
+    /// Returns the stable caller-owned observation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the finite observation location.
+    pub fn location(&self) -> Point3 {
+        self.location
+    }
+
+    /// Returns the oriented physical unit direction.
+    pub fn direction(&self) -> Vector3 {
+        self.direction
+    }
+
+    /// Returns the rotation-invariant direction-channel enforcement.
+    pub fn direction_enforcement(&self) -> NormalDirectionEnforcement {
+        self.direction_enforcement
+    }
+
+    /// Returns the finite positive physical slope lower bound.
+    pub fn minimum_slope(&self) -> MinimumNormalSlope {
+        self.minimum_slope
+    }
+
+    /// Returns the independent slope-channel enforcement.
+    pub fn minimum_slope_enforcement(&self) -> MinimumNormalSlopeEnforcement {
+        self.minimum_slope_enforcement
+    }
+
+    pub(crate) fn is_soft(&self) -> bool {
+        self.direction_enforcement.is_soft() || self.minimum_slope_enforcement.is_soft()
+    }
+}
+
+/// An unoriented normal axis awaiting an explicit polarity resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxialNormalObservation {
+    source_id: SourceId,
+    location: Point3,
+    input_axis: Vector3,
+    axis: Vector3,
+    direction_enforcement: NormalDirectionEnforcement,
+    minimum_slope: MinimumNormalSlope,
+    minimum_slope_enforcement: MinimumNormalSlopeEnforcement,
+}
+
+impl AxialNormalObservation {
+    /// Creates a hard axial normal while preserving the normalized input orientation.
+    pub fn try_new(
+        source_id: SourceId,
+        location: Point3,
+        axis: Vector3,
+        minimum_slope: MinimumNormalSlope,
+    ) -> Result<Self, NormalObservationError> {
+        Self::try_with_enforcement(
+            source_id,
+            location,
+            axis,
+            NormalDirectionEnforcement::hard(),
+            minimum_slope,
+            MinimumNormalSlopeEnforcement::hard(),
+        )
+    }
+
+    /// Creates an axial normal with separately configured legal channels.
+    pub fn try_with_enforcement(
+        source_id: SourceId,
+        location: Point3,
+        axis: Vector3,
+        direction_enforcement: NormalDirectionEnforcement,
+        minimum_slope: MinimumNormalSlope,
+        minimum_slope_enforcement: MinimumNormalSlopeEnforcement,
+    ) -> Result<Self, NormalObservationError> {
+        let input_axis = normalize_direction(axis).ok_or(NormalObservationError::ZeroDirection)?;
+        let mut canonical = input_axis.components();
+        if canonical
+            .iter()
+            .find(|component| **component != 0.0)
+            .is_some_and(|component| component.is_sign_negative())
+        {
+            canonical = canonical.map(|component| canonical_zero(-component));
+        }
+        let axis = Vector3::try_new(canonical[0], canonical[1], canonical[2])
+            .expect("canonicalizing a finite unit axis keeps it finite");
+        Ok(Self {
+            source_id,
+            location,
+            input_axis,
+            axis,
+            direction_enforcement,
+            minimum_slope,
+            minimum_slope_enforcement,
+        })
+    }
+
+    /// Returns the stable caller-owned observation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the finite observation location.
+    pub fn location(&self) -> Point3 {
+        self.location
+    }
+
+    /// Returns the normalized axis with the orientation supplied by the caller.
+    pub fn input_axis(&self) -> Vector3 {
+        self.input_axis
+    }
+
+    /// Returns the canonical identity shared by both signs of the axis.
+    pub fn axis(&self) -> Vector3 {
+        self.axis
+    }
+
+    /// Returns the rotation-invariant direction-channel enforcement.
+    pub fn direction_enforcement(&self) -> NormalDirectionEnforcement {
+        self.direction_enforcement
+    }
+
+    /// Returns the finite positive physical slope lower bound.
+    pub fn minimum_slope(&self) -> MinimumNormalSlope {
+        self.minimum_slope
+    }
+
+    /// Returns the independent slope-channel enforcement.
+    pub fn minimum_slope_enforcement(&self) -> MinimumNormalSlopeEnforcement {
+        self.minimum_slope_enforcement
+    }
+
+    pub(crate) fn is_soft(&self) -> bool {
+        self.direction_enforcement.is_soft() || self.minimum_slope_enforcement.is_soft()
+    }
+}
+
+/// A rejected normal-direction observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NormalObservationError {
+    /// Every physical direction component was zero.
+    ZeroDirection,
+}
+
+impl fmt::Display for NormalObservationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroDirection => formatter.write_str("normal direction is zero"),
+        }
+    }
+}
+
+impl Error for NormalObservationError {}
+
 /// A hard or explicitly weighted soft observation of an absolute field value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldValueObservation {
@@ -779,9 +1157,9 @@ impl GradientConfiguration {
 /// permits a zero gradient and therefore does not assert a regular level set,
 /// a normal polarity, or a gradient magnitude. Use [`GradientObservation`]
 /// when the complete gradient vector is observed. Normal-direction semantics
-/// would additionally constrain gradient alignment, polarity or axial
-/// equivalence, and nonzero slope; no normal observation is public in this
-/// milestone.
+/// additionally constrain gradient alignment, polarity or axial equivalence,
+/// and nonzero slope; use [`DirectedNormalObservation`] or
+/// [`AxialNormalObservation`] for those semantics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TangentDirectionObservation {
     source_id: SourceId,
@@ -960,6 +1338,22 @@ impl private::Sealed for TangentDirectionObservation {}
 impl ProblemInput for TangentDirectionObservation {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
         builder.add_observation(ObservationInput::TangentDirection(self))
+    }
+}
+
+impl private::Sealed for DirectedNormalObservation {}
+
+impl ProblemInput for DirectedNormalObservation {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_directed_normal(self)
+    }
+}
+
+impl private::Sealed for AxialNormalObservation {}
+
+impl ProblemInput for AxialNormalObservation {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_axial_normal(self)
     }
 }
 

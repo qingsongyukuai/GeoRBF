@@ -33,6 +33,7 @@ include = [
     "/docs/implementation/31-directional-derivative-intervals.md",
     "/docs/implementation/32-stratigraphic-level-relations.md",
     "/docs/implementation/33-level-set-affine-relations.md",
+    "/docs/implementation/34-normal-direction-workflow.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/v0.1.0/**",
 ]

@@ -54,6 +54,54 @@ impl fmt::Display for LinearViolationPenaltyError {
 
 impl Error for LinearViolationPenaltyError {}
 
+/// The explicit orientation selected for one caller-supplied axial normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PolaritySelection {
+    /// Use the normalized orientation retained from the axial input.
+    AlongInputAxis,
+    /// Use the direction opposite the retained axial input orientation.
+    AgainstInputAxis,
+}
+
+/// An independently sourced resolution of one axial normal's polarity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolarityResolution {
+    source_id: SourceId,
+    axial_normal_source_id: SourceId,
+    selection: PolaritySelection,
+}
+
+impl PolarityResolution {
+    /// Creates an explicit resolution that may forward-reference its axial input.
+    pub fn new(
+        source_id: SourceId,
+        axial_normal_source_id: SourceId,
+        selection: PolaritySelection,
+    ) -> Self {
+        Self {
+            source_id,
+            axial_normal_source_id,
+            selection,
+        }
+    }
+
+    /// Returns the independent provenance of this semantic decision.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the referenced axial observation identity.
+    pub fn axial_normal_source_id(&self) -> &SourceId {
+        &self.axial_normal_source_id
+    }
+
+    /// Returns the caller-selected input-axis orientation.
+    pub fn selection(&self) -> PolaritySelection {
+        self.selection
+    }
+}
+
 /// One legal positive loss applied to a nonnegative field-value violation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
@@ -1728,6 +1776,14 @@ impl fmt::Display for DirectionalDerivativeIntervalError {
 }
 
 impl Error for DirectionalDerivativeIntervalError {}
+
+impl private::Sealed for PolarityResolution {}
+
+impl ProblemInput for PolarityResolution {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_polarity_resolution(self)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AffineBoundSide {

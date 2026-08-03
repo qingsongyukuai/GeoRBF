@@ -332,6 +332,13 @@ impl UsageProvenance {
 pub(crate) struct FunctionalUse {
     functional: CanonicalFunctional,
     provenance: UsageProvenance,
+    representer_span: FunctionalRepresenterSpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FunctionalRepresenterSpan {
+    Native,
+    CompleteGradientAtSupport,
 }
 
 impl FunctionalUse {
@@ -339,6 +346,19 @@ impl FunctionalUse {
         Self {
             functional,
             provenance,
+            representer_span: FunctionalRepresenterSpan::Native,
+        }
+    }
+
+    pub(crate) fn with_representer_span(
+        functional: CanonicalFunctional,
+        provenance: UsageProvenance,
+        representer_span: FunctionalRepresenterSpan,
+    ) -> Self {
+        Self {
+            functional,
+            provenance,
+            representer_span,
         }
     }
 
@@ -348,6 +368,10 @@ impl FunctionalUse {
 
     pub(crate) fn provenance(&self) -> &UsageProvenance {
         &self.provenance
+    }
+
+    pub(crate) fn representer_span(&self) -> FunctionalRepresenterSpan {
+        self.representer_span
     }
 }
 

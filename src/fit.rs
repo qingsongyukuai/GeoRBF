@@ -13,13 +13,14 @@ use crate::clarabel_backend::{
 };
 use crate::cubic_equality::{
     AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalAffineInequality,
-    CanonicalEqualityParticipation, CanonicalHardEquality, CanonicalInequalitySense,
-    CanonicalRelationToleranceEvidence, CanonicalSoftEquality, CanonicalSoftLoss,
-    CanonicalSoftObjective, CanonicalSoftResidualBlockKind, CanonicalSoftResidualMemberKind,
-    CanonicalViolationChannel, CanonicalViolationLoss, CpdEvidence, CubicCanonicalProblem,
-    CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
-    RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
-    RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
+    CanonicalEqualityParticipation, CanonicalHardEquality, CanonicalHardResidualBlock,
+    CanonicalInequalitySense, CanonicalRelationToleranceEvidence, CanonicalSoftEquality,
+    CanonicalSoftLoss, CanonicalSoftObjective, CanonicalSoftResidualBlockKind,
+    CanonicalSoftResidualMemberKind, CanonicalViolationChannel, CanonicalViolationLoss,
+    CpdEvidence, CubicCanonicalProblem, CubicEqualityFailure, CubicEqualitySolution,
+    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
+    ReducedPairingFailureClassification, RepresentationFailure, SemanticLatentCoefficient,
+    SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
     canonical_fitting_uses, preflight_polynomial_analysis_failure,
 };
@@ -43,11 +44,11 @@ use crate::diagnostics::{
     SharedLevelSetRelationConflictEvidence, SideConditionEvidence, SolveAttemptKind,
     SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
     SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
-    UninformativeSharedLevelSetEvidence,
+    UninformativeSharedLevelSetEvidence, UnresolvedAxialNormalEvidence,
 };
 use crate::functional::{
-    CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, GroupId, RelationId,
-    ResidualId, SemanticRolePath, SourceId, UsageProvenance,
+    CanonicalFunctional, FunctionalDimension, FunctionalRepresenterSpan, FunctionalTerm,
+    FunctionalUse, GroupId, RelationId, ResidualId, SemanticRolePath, SourceId, UsageProvenance,
 };
 use crate::geometry::{FieldUnitLabel, Point3, Vector3};
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
@@ -66,13 +67,15 @@ use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
 use crate::observation::{
     CovarianceGroupMember, CovarianceMatrix, FieldValueConfiguration, GradientConfiguration,
-    ObservationInput, QuadraticPenalty, StandardDeviation, TangentConfiguration,
+    MinimumNormalSlope, MinimumNormalSlopeConfiguration, MinimumNormalSlopeEnforcement,
+    NormalDirectionConfiguration, NormalDirectionEnforcement, ObservationInput, QuadraticPenalty,
+    StandardDeviation, TangentConfiguration,
 };
 use crate::problem::{ProblemSnapshot, ThreadBudget};
 use crate::relation::{
     AdditiveFieldGaugeReference, AffineBoundConfiguration, AffineBoundSide,
     FieldSeparationInterval, LinearViolationPenalty, MinimumFieldOffset, MinimumFieldSeparation,
-    PointToLevelSetRelation, PointToLevelSetSide, SharedLevelSetRelationInput,
+    PointToLevelSetRelation, PointToLevelSetSide, PolaritySelection, SharedLevelSetRelationInput,
     SharedLevelSetRelationKind, SharedLevelSetRelationOrientation, StratigraphicFieldDirection,
 };
 
@@ -983,6 +986,149 @@ impl SoftGradientAssessment {
     }
 }
 
+/// Recovered physical observables for one Directed Normal semantic relation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectedNormalAssessment {
+    source_id: SourceId,
+    direction_semantic_role: SemanticRolePath,
+    slope_semantic_role: SemanticRolePath,
+    direction: Vector3,
+    recovered_gradient: Vector3,
+    projection_residual: Vector3,
+    projection_residual_norm: f64,
+    recovered_slope: f64,
+    minimum_slope: MinimumNormalSlope,
+    slope_slack: f64,
+    slope_violation: f64,
+    direction_tolerance: Option<f64>,
+    slope_tolerance: f64,
+    slope_active_state: BoundActiveState,
+    direction_enforcement: NormalDirectionEnforcement,
+    minimum_slope_enforcement: MinimumNormalSlopeEnforcement,
+    direction_loss: Option<f64>,
+    slope_loss: Option<f64>,
+    input_axis: Option<Vector3>,
+    polarity_resolution_source_id: Option<SourceId>,
+    polarity_selection: Option<PolaritySelection>,
+}
+
+impl DirectedNormalAssessment {
+    /// Returns the caller identity of the Directed or resolved Axial input.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable rotation-invariant direction-channel role.
+    pub fn direction_semantic_role(&self) -> &SemanticRolePath {
+        &self.direction_semantic_role
+    }
+
+    /// Returns the stable independent minimum-slope channel role.
+    pub fn slope_semantic_role(&self) -> &SemanticRolePath {
+        &self.slope_semantic_role
+    }
+
+    /// Returns the resolved oriented physical unit normal.
+    pub fn direction(&self) -> Vector3 {
+        self.direction
+    }
+
+    /// Returns the complete recovered gradient in physical input units.
+    pub fn recovered_gradient(&self) -> Vector3 {
+        self.recovered_gradient
+    }
+
+    /// Returns `(I - n n^T) grad(f)` in physical derivative units.
+    pub fn projection_residual(&self) -> Vector3 {
+        self.projection_residual
+    }
+
+    /// Returns the Euclidean norm of the rotation-invariant projection residual.
+    pub fn projection_residual_norm(&self) -> f64 {
+        self.projection_residual_norm
+    }
+
+    /// Returns `n^T grad(f)` in physical derivative units.
+    pub fn recovered_slope(&self) -> f64 {
+        self.recovered_slope
+    }
+
+    /// Returns the caller's finite positive minimum normal slope.
+    pub fn minimum_slope(&self) -> MinimumNormalSlope {
+        self.minimum_slope
+    }
+
+    /// Returns nonnegative physical satisfaction slack for the slope lower bound.
+    pub fn slope_slack(&self) -> f64 {
+        self.slope_slack
+    }
+
+    /// Returns nonnegative physical violation of the minimum slope.
+    pub fn slope_violation(&self) -> f64 {
+        self.slope_violation
+    }
+
+    /// Returns the hard projection tolerance, or `None` for a soft direction channel.
+    pub fn direction_tolerance(&self) -> Option<f64> {
+        self.direction_tolerance
+    }
+
+    /// Returns the physical acceptance tolerance for the slope relation.
+    pub fn slope_tolerance(&self) -> f64 {
+        self.slope_tolerance
+    }
+
+    /// Returns the stable active state of the minimum-slope lower bound.
+    pub fn slope_active_state(&self) -> BoundActiveState {
+        self.slope_active_state
+    }
+
+    /// Returns the direction channel's Euclidean quadratic penalty when present.
+    pub fn direction_quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.direction_enforcement.quadratic_penalty()
+    }
+
+    /// Returns the direction channel's isotropic statistical scale when present.
+    pub fn direction_standard_deviation(&self) -> Option<StandardDeviation> {
+        self.direction_enforcement.standard_deviation()
+    }
+
+    /// Returns the slope channel's quadratic violation penalty when present.
+    pub fn slope_quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.minimum_slope_enforcement.quadratic_penalty()
+    }
+
+    /// Returns the slope channel's linear violation penalty when present.
+    pub fn slope_linear_violation_penalty(&self) -> Option<LinearViolationPenalty> {
+        self.minimum_slope_enforcement.linear_violation_penalty()
+    }
+
+    /// Returns the direction channel's independent objective contribution.
+    pub fn direction_loss(&self) -> Option<f64> {
+        self.direction_loss
+    }
+
+    /// Returns the slope channel's independent objective contribution.
+    pub fn slope_loss(&self) -> Option<f64> {
+        self.slope_loss
+    }
+
+    /// Returns the retained normalized Axial input orientation, when applicable.
+    pub fn input_axis(&self) -> Option<Vector3> {
+        self.input_axis
+    }
+
+    /// Returns independent Polarity Resolution provenance for a resolved Axial input.
+    pub fn polarity_resolution_source_id(&self) -> Option<&SourceId> {
+        self.polarity_resolution_source_id.as_ref()
+    }
+
+    /// Returns the explicit Axial polarity selection, when applicable.
+    pub fn polarity_selection(&self) -> Option<PolaritySelection> {
+        self.polarity_selection
+    }
+}
+
 /// Recovered scalar directional-derivative residual for one soft Tangent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SoftTangentAssessment {
@@ -1244,6 +1390,7 @@ pub struct FitReport {
     shared_level_set_relations: Vec<SharedLevelSetRelationAssessment>,
     soft_field_values: Vec<SoftFieldValueAssessment>,
     soft_gradients: Vec<SoftGradientAssessment>,
+    directed_normals: Vec<DirectedNormalAssessment>,
     soft_tangents: Vec<SoftTangentAssessment>,
     covariance_groups: Vec<CovarianceGroupAssessment>,
     shared_level_values: Vec<SharedLevelValue>,
@@ -1266,6 +1413,7 @@ pub struct FitReport {
     infeasibility_certificate: Option<InfeasibilityCertificateEvidence>,
     unidentified_additive_gauge: Option<UnidentifiedAdditiveGaugeEvidence>,
     uninformative_shared_level_sets: Vec<UninformativeSharedLevelSetEvidence>,
+    unresolved_axial_normals: Vec<UnresolvedAxialNormalEvidence>,
 }
 
 impl FitReport {
@@ -1332,6 +1480,11 @@ impl FitReport {
     /// Returns complete soft Gradient assessments in stable SourceId order.
     pub fn soft_gradients(&self) -> &[SoftGradientAssessment] {
         &self.soft_gradients
+    }
+
+    /// Returns Directed and explicitly resolved Axial Normal assessments.
+    pub fn directed_normals(&self) -> &[DirectedNormalAssessment] {
+        &self.directed_normals
     }
 
     /// Returns soft Tangent assessments in stable SourceId order.
@@ -1472,6 +1625,11 @@ impl FitReport {
     pub fn uninformative_shared_level_sets(&self) -> &[UninformativeSharedLevelSetEvidence] {
         &self.uninformative_shared_level_sets
     }
+
+    /// Returns every unresolved Axial Normal in stable SourceId order.
+    pub fn unresolved_axial_normals(&self) -> &[UnresolvedAxialNormalEvidence] {
+        &self.unresolved_axial_normals
+    }
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
@@ -1486,7 +1644,10 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         .inner
         .observations
         .len()
-        .checked_add(snapshot.inner.field_value_bounds.len())
+        .checked_add(snapshot.inner.directed_normals.len())
+        .and_then(|count| count.checked_add(snapshot.inner.axial_normals.len()))
+        .and_then(|count| count.checked_add(snapshot.inner.polarity_resolutions.len()))
+        .and_then(|count| count.checked_add(snapshot.inner.field_value_bounds.len()))
         .and_then(|count| count.checked_add(snapshot.inner.directional_derivative_intervals.len()))
         .and_then(|count| count.checked_add(snapshot.inner.field_separation_intervals.len()))
         .and_then(|count| count.checked_add(snapshot.inner.point_to_level_set_relations.len()))
@@ -1528,9 +1689,28 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                 1_usize,
                 snapshot.inner.shared_level_set_relations.len(),
             ))
+            .chain(std::iter::repeat_n(
+                1_usize,
+                snapshot.inner.directed_normals.len() + snapshot.inner.axial_normals.len(),
+            ))
             .sum(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
+    let resolved_axial_sources = snapshot
+        .inner
+        .polarity_resolutions
+        .iter()
+        .map(|resolution| resolution.axial_normal_source_id())
+        .collect::<std::collections::BTreeSet<_>>();
+    preflight_report.unresolved_axial_normals = snapshot
+        .inner
+        .axial_normals
+        .iter()
+        .filter(|normal| !resolved_axial_sources.contains(normal.source_id()))
+        .map(|normal| {
+            UnresolvedAxialNormalEvidence::new(normal.source_id().clone(), normal.input_axis())
+        })
+        .collect();
     let source_lifecycle_capacity =
         plan_source_lifecycle_capacity(scalar_relation_count, source_identifier_bytes);
     let source_preflight_capacity =
@@ -1619,6 +1799,27 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                     .shared_level_set_relations
                     .iter()
                     .map(|relation| relation.source_id().clone()),
+            )
+            .chain(
+                snapshot
+                    .inner
+                    .directed_normals
+                    .iter()
+                    .map(|normal| normal.source_id().clone()),
+            )
+            .chain(
+                snapshot
+                    .inner
+                    .axial_normals
+                    .iter()
+                    .map(|normal| normal.source_id().clone()),
+            )
+            .chain(
+                snapshot
+                    .inner
+                    .polarity_resolutions
+                    .iter()
+                    .map(|resolution| resolution.source_id().clone()),
             )
             .collect::<Vec<_>>();
         source_ids.sort();
@@ -1745,6 +1946,9 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
 }
 
 fn primary_preflight_diagnosis(report: &FitReport) -> Option<ProblemDiagnosis> {
+    if !report.unresolved_axial_normals.is_empty() {
+        return Some(ProblemDiagnosis::UnresolvedSemantics);
+    }
     if !report.uninformative_shared_level_sets.is_empty() {
         return Some(ProblemDiagnosis::UninformativeSharedLevelSet);
     }
@@ -1781,6 +1985,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         shared_level_set_relations: Vec::new(),
         soft_field_values: Vec::new(),
         soft_gradients: Vec::new(),
+        directed_normals: Vec::new(),
         soft_tangents: Vec::new(),
         covariance_groups: Vec::new(),
         shared_level_values: Vec::new(),
@@ -1803,6 +2008,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         infeasibility_certificate: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
+        unresolved_axial_normals: Vec::new(),
     }
 }
 
@@ -1851,6 +2057,40 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
         .try_fold(0_usize, |count, group| {
             count.checked_add(group.scalar_residual_count())
         })?;
+    let (normal_hard, normal_soft) = snapshot
+        .inner
+        .directed_normals
+        .iter()
+        .map(|normal| {
+            (
+                normal.direction(),
+                normal.direction_enforcement(),
+                normal.minimum_slope_enforcement(),
+            )
+        })
+        .chain(snapshot.inner.axial_normals.iter().map(|normal| {
+            (
+                normal.axis(),
+                normal.direction_enforcement(),
+                normal.minimum_slope_enforcement(),
+            )
+        }))
+        .try_fold(
+            (0_usize, 0_usize),
+            |(hard, soft), (normal, direction, slope)| {
+                let projection_components = normal_projection_component_count(normal);
+                let (hard, soft) = if direction.is_soft() {
+                    (hard, soft.checked_add(projection_components)?)
+                } else {
+                    (hard.checked_add(projection_components)?, soft)
+                };
+                if slope.is_soft() {
+                    Some((hard, soft.checked_add(1)?))
+                } else {
+                    Some((hard.checked_add(1)?, soft))
+                }
+            },
+        )?;
     let (bound_hard, bound_soft) =
         affine_bound_sides(snapshot).try_fold((0_usize, 0_usize), |(hard, soft), side| {
             if side.configuration.is_soft() {
@@ -1887,12 +2127,14 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
             .checked_add(snapshot.inner.additive_field_gauges.len())?
             .checked_add(bound_hard)?
             .checked_add(point_relation_hard)?
-            .checked_add(level_relation_hard)?,
+            .checked_add(level_relation_hard)?
+            .checked_add(normal_hard)?,
         soft: observation_soft
             .checked_add(covariance_group_soft)?
             .checked_add(bound_soft)?
             .checked_add(point_relation_soft)?
-            .checked_add(level_relation_soft)?,
+            .checked_add(level_relation_soft)?
+            .checked_add(normal_soft)?,
     })
 }
 
@@ -1937,11 +2179,35 @@ fn quadratic_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
             )
         })
         .count();
+    let normal_terms = snapshot
+        .inner
+        .directed_normals
+        .iter()
+        .map(|normal| {
+            usize::from(normal.direction_enforcement().is_soft())
+                + usize::from(
+                    normal
+                        .minimum_slope_enforcement()
+                        .quadratic_penalty()
+                        .is_some(),
+                )
+        })
+        .chain(snapshot.inner.axial_normals.iter().map(|normal| {
+            usize::from(normal.direction_enforcement().is_soft())
+                + usize::from(
+                    normal
+                        .minimum_slope_enforcement()
+                        .quadratic_penalty()
+                        .is_some(),
+                )
+        }))
+        .try_fold(0_usize, usize::checked_add)?;
     independent
         .checked_add(snapshot.inner.covariance_groups.len())?
         .checked_add(bound_terms)?
         .checked_add(point_relation_terms)?
-        .checked_add(level_relation_terms)
+        .checked_add(level_relation_terms)?
+        .checked_add(normal_terms)
 }
 
 fn linear_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
@@ -1953,6 +2219,30 @@ fn linear_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
             )
         })
         .count();
+    let normal_slope_terms = snapshot
+        .inner
+        .directed_normals
+        .iter()
+        .filter(|normal| {
+            normal
+                .minimum_slope_enforcement()
+                .linear_violation_penalty()
+                .is_some()
+        })
+        .count()
+        .checked_add(
+            snapshot
+                .inner
+                .axial_normals
+                .iter()
+                .filter(|normal| {
+                    normal
+                        .minimum_slope_enforcement()
+                        .linear_violation_penalty()
+                        .is_some()
+                })
+                .count(),
+        )?;
     bound_terms
         .checked_add(
             snapshot
@@ -1979,7 +2269,8 @@ fn linear_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
                     )
                 })
                 .count(),
-        )
+        )?
+        .checked_add(normal_slope_terms)
 }
 
 fn affine_bound_sides(snapshot: &ProblemSnapshot) -> impl Iterator<Item = &AffineBoundSide> {
@@ -2130,6 +2421,35 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
                 .checked_add(relation.source_id().as_str().len())?
                 .checked_add(relation.group_id().as_str().len())
         })?;
+    let normal_bytes = snapshot
+        .inner
+        .directed_normals
+        .iter()
+        .map(|normal| normal.source_id())
+        .chain(
+            snapshot
+                .inner
+                .axial_normals
+                .iter()
+                .map(|normal| normal.source_id()),
+        )
+        .try_fold(0_usize, |bytes, source_id| {
+            source_id
+                .as_str()
+                .len()
+                .checked_mul(4)
+                .and_then(|source_bytes| bytes.checked_add(source_bytes))
+        })?;
+    let polarity_resolution_bytes =
+        snapshot
+            .inner
+            .polarity_resolutions
+            .iter()
+            .try_fold(0_usize, |bytes, resolution| {
+                bytes
+                    .checked_add(resolution.source_id().as_str().len())?
+                    .checked_add(resolution.axial_normal_source_id().as_str().len())
+            })?;
     observation_bytes
         .checked_add(shared_level_bytes)?
         .checked_add(covariance_group_bytes)?
@@ -2138,7 +2458,9 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
         .checked_add(derivative_interval_bytes)?
         .checked_add(field_separation_bytes)?
         .checked_add(point_to_level_set_bytes)?
-        .checked_add(shared_level_set_relation_bytes)
+        .checked_add(shared_level_set_relation_bytes)?
+        .checked_add(normal_bytes)?
+        .checked_add(polarity_resolution_bytes)
 }
 
 fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> bool {
@@ -2284,6 +2606,7 @@ fn fit_snapshot_after_preflight(
     let solution = match CubicExecutionCore::solve_equality_production(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
+            hard_residual_blocks: lowering.canonical_hard_residual_blocks.clone(),
             affine_inequalities: Vec::new(),
             soft_equalities: lowering.canonical_soft_equalities.clone(),
             soft_objectives: lowering.canonical_soft_objectives.clone(),
@@ -2341,6 +2664,7 @@ fn fit_snapshot_after_preflight_qp(
     let solution = match CubicExecutionCore::solve(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
+            hard_residual_blocks: lowering.canonical_hard_residual_blocks.clone(),
             affine_inequalities: lowering.canonical_affine_inequalities.clone(),
             soft_equalities: lowering.canonical_soft_equalities.clone(),
             soft_objectives: lowering.canonical_soft_objectives.clone(),
@@ -2374,6 +2698,7 @@ fn fit_snapshot_after_preflight_qp(
         &solution,
         &lowering.source_relations,
         &lowering.source_bound_relations,
+        &lowering.resolved_normals,
         &shared_level_values,
     );
     let model = SolvedModel::new(
@@ -2401,7 +2726,67 @@ struct ScalarObservation {
 struct ObservationResidualBlock {
     components: Vec<ScalarObservation>,
     configuration: ResidualBlockConfiguration,
-    kind: CanonicalSoftResidualMemberKind,
+    kind: CanonicalSoftResidualBlockKind,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedNormalInput {
+    source_id: SourceId,
+    location: Point3,
+    direction: Vector3,
+    direction_enforcement: NormalDirectionEnforcement,
+    minimum_slope: MinimumNormalSlope,
+    minimum_slope_enforcement: MinimumNormalSlopeEnforcement,
+    input_axis: Option<Vector3>,
+    polarity_resolution_source_id: Option<SourceId>,
+    polarity_selection: Option<PolaritySelection>,
+}
+
+fn resolved_normal_inputs(snapshot: &ProblemSnapshot) -> Vec<ResolvedNormalInput> {
+    let mut normals = snapshot
+        .inner
+        .directed_normals
+        .iter()
+        .map(|normal| ResolvedNormalInput {
+            source_id: normal.source_id().clone(),
+            location: normal.location(),
+            direction: normal.direction(),
+            direction_enforcement: normal.direction_enforcement(),
+            minimum_slope: normal.minimum_slope(),
+            minimum_slope_enforcement: normal.minimum_slope_enforcement(),
+            input_axis: None,
+            polarity_resolution_source_id: None,
+            polarity_selection: None,
+        })
+        .collect::<Vec<_>>();
+    normals.extend(snapshot.inner.axial_normals.iter().filter_map(|normal| {
+        let resolution = snapshot
+            .inner
+            .polarity_resolutions
+            .iter()
+            .find(|resolution| resolution.axial_normal_source_id() == normal.source_id())?;
+        let direction = match resolution.selection() {
+            PolaritySelection::AlongInputAxis => normal.input_axis(),
+            PolaritySelection::AgainstInputAxis => {
+                let [x, y, z] = normal.input_axis().components();
+                Vector3::try_new(-x, -y, -z)
+                    .expect("reversing a finite unit normal keeps it finite")
+            }
+        };
+        Some(ResolvedNormalInput {
+            source_id: normal.source_id().clone(),
+            location: normal.location(),
+            direction,
+            direction_enforcement: normal.direction_enforcement(),
+            minimum_slope: normal.minimum_slope(),
+            minimum_slope_enforcement: normal.minimum_slope_enforcement(),
+            input_axis: Some(normal.input_axis()),
+            polarity_resolution_source_id: Some(resolution.source_id().clone()),
+            polarity_selection: Some(resolution.selection()),
+        })
+    }));
+    normals.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    normals
 }
 
 #[derive(Debug, Clone)]
@@ -2471,7 +2856,9 @@ fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<Observa
                         ResidualBlockConfiguration::StandardDeviation(standard_deviation)
                     }
                 },
-                kind: CanonicalSoftResidualMemberKind::FieldValue,
+                kind: CanonicalSoftResidualBlockKind::Independent(
+                    CanonicalSoftResidualMemberKind::FieldValue,
+                ),
             },
             ObservationInput::Gradient(observation) => ObservationResidualBlock {
                 components: observation
@@ -2502,7 +2889,9 @@ fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<Observa
                         ResidualBlockConfiguration::Covariance(covariance.clone())
                     }
                 },
-                kind: CanonicalSoftResidualMemberKind::Gradient,
+                kind: CanonicalSoftResidualBlockKind::Independent(
+                    CanonicalSoftResidualMemberKind::Gradient,
+                ),
             },
             ObservationInput::TangentDirection(observation) => ObservationResidualBlock {
                 components: vec![ScalarObservation {
@@ -2526,10 +2915,57 @@ fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<Observa
                         ResidualBlockConfiguration::StandardDeviation(standard_deviation)
                     }
                 },
-                kind: CanonicalSoftResidualMemberKind::Tangent,
+                kind: CanonicalSoftResidualBlockKind::Independent(
+                    CanonicalSoftResidualMemberKind::Tangent,
+                ),
             },
         })
         .collect()
+}
+
+fn normal_projection_components(normal: &ResolvedNormalInput) -> Vec<(usize, ScalarObservation)> {
+    let direction = normal.direction.components();
+    (0..3)
+        .filter_map(|axis| {
+            let coefficients = std::array::from_fn(|component| {
+                let identity = if component == axis { 1.0 } else { 0.0 };
+                crate::math::canonical_zero(identity - direction[axis] * direction[component])
+            });
+            coefficients
+                .iter()
+                .any(|coefficient| *coefficient != 0.0)
+                .then(|| {
+                    (
+                        axis,
+                        ScalarObservation {
+                            source_id: normal.source_id.clone(),
+                            group_id: None,
+                            support: normal.location.components(),
+                            functional: ScalarFunctionalDescriptor::directional_derivative(
+                                coefficients,
+                            ),
+                            semantic_role: SemanticRolePath::new(format!(
+                                "directed-normal/direction-projection/component/{axis}"
+                            )),
+                            target: 0.0,
+                        },
+                    )
+                })
+        })
+        .collect()
+}
+
+fn normal_projection_component_count(direction: Vector3) -> usize {
+    let direction = direction.components();
+    (0..3)
+        .filter(|axis| {
+            (0..3).any(|component| {
+                let identity = if component == *axis { 1.0 } else { 0.0 };
+                crate::math::canonical_zero(identity - direction[*axis] * direction[component])
+                    != 0.0
+            })
+        })
+        .count()
 }
 
 fn covariance_group_components(
@@ -2596,6 +3032,13 @@ fn covariance_group_member_kinds(
 struct SourceHardRelation {
     equality: CanonicalHardEquality,
     canonical_index: usize,
+    kind: SourceHardRelationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceHardRelationKind {
+    Scalar,
+    NormalProjection { normal_index: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -2621,6 +3064,9 @@ enum SourceBoundKind {
         relation: SharedLevelSetRelationInput,
         orientation: SharedLevelSetRelationOrientation,
     },
+    NormalSlope {
+        normal_index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2628,6 +3074,7 @@ struct EqualityLowering {
     source_relations: Vec<SourceHardRelation>,
     source_bound_relations: Vec<SourceBoundRelation>,
     canonical_equalities: Vec<CanonicalHardEquality>,
+    canonical_hard_residual_blocks: Vec<CanonicalHardResidualBlock>,
     canonical_affine_inequalities: Vec<CanonicalAffineInequality>,
     canonical_soft_equalities: Vec<CanonicalSoftEquality>,
     canonical_soft_objectives: Vec<CanonicalSoftObjective>,
@@ -2636,14 +3083,16 @@ struct EqualityLowering {
     direct_input_conflicts: Vec<DirectInputConflictEvidence>,
     relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
     semantic_latents: Vec<SemanticLatentDefinition>,
+    resolved_normals: Vec<ResolvedNormalInput>,
 }
 
 impl EqualityLowering {
-    fn new() -> Self {
+    fn new(resolved_normals: Vec<ResolvedNormalInput>) -> Self {
         Self {
             source_relations: Vec::new(),
             source_bound_relations: Vec::new(),
             canonical_equalities: Vec::new(),
+            canonical_hard_residual_blocks: Vec::new(),
             canonical_affine_inequalities: Vec::new(),
             canonical_soft_equalities: Vec::new(),
             canonical_soft_objectives: Vec::new(),
@@ -2652,6 +3101,7 @@ impl EqualityLowering {
             direct_input_conflicts: Vec::new(),
             relation_graph_conflicts: Vec::new(),
             semantic_latents: Vec::new(),
+            resolved_normals,
         }
     }
 
@@ -2676,6 +3126,14 @@ impl EqualityLowering {
     }
 
     fn push_source(&mut self, equality: CanonicalHardEquality) {
+        self.push_source_with_kind(equality, SourceHardRelationKind::Scalar);
+    }
+
+    fn push_source_with_kind(
+        &mut self,
+        equality: CanonicalHardEquality,
+        kind: SourceHardRelationKind,
+    ) -> usize {
         let (key, normalized_target) = normalized_equality_key(&equality);
         let canonical_index =
             if let Some((index, first_target)) = self.canonical_index_by_key.get(&key).copied() {
@@ -2710,7 +3168,9 @@ impl EqualityLowering {
         self.source_relations.push(SourceHardRelation {
             equality,
             canonical_index,
+            kind,
         });
+        canonical_index
     }
 
     fn push_bound(&mut self, inequality: CanonicalAffineInequality, kind: SourceBoundKind) {
@@ -3268,6 +3728,26 @@ fn affine_bound_inequality(
     sense: CanonicalInequalitySense,
     side: AffineBoundSide,
 ) -> CanonicalAffineInequality {
+    affine_bound_inequality_with_representer_span(
+        source_id,
+        semantic_role,
+        functional,
+        dimension,
+        sense,
+        side,
+        FunctionalRepresenterSpan::Native,
+    )
+}
+
+fn affine_bound_inequality_with_representer_span(
+    source_id: &SourceId,
+    semantic_role: &'static str,
+    functional: CanonicalFunctional,
+    dimension: FunctionalDimension,
+    sense: CanonicalInequalitySense,
+    side: AffineBoundSide,
+    representer_span: FunctionalRepresenterSpan,
+) -> CanonicalAffineInequality {
     let provenance = relation_provenance(
         source_id.clone(),
         None,
@@ -3275,7 +3755,11 @@ fn affine_bound_inequality(
     );
     let violation_channel = violation_channel(side.configuration, &provenance);
     CanonicalAffineInequality::new(
-        Some(FunctionalUse::new(functional, provenance.clone())),
+        Some(FunctionalUse::with_representer_span(
+            functional,
+            provenance.clone(),
+            representer_span,
+        )),
         Vec::new(),
         provenance,
         dimension,
@@ -4093,7 +4577,7 @@ fn shared_level_path(
 }
 
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
-    let mut lowering = EqualityLowering::new();
+    let mut lowering = EqualityLowering::new(resolved_normal_inputs(snapshot));
     let mut value_constraints = CanonicalValueConstraintForest::default();
     let mut hard_bound_facts = Vec::new();
     let mut hard_derivative_bound_facts = Vec::new();
@@ -4122,7 +4606,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 block.components.iter().map(soft_field_equality).collect(),
                 loss,
                 None,
-                CanonicalSoftResidualBlockKind::Independent(block.kind),
+                block.kind,
             );
             continue;
         }
@@ -4148,6 +4632,124 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             };
             lowering.push_source(field_equality(&observation, participation));
         }
+    }
+
+    for (normal_index, normal) in lowering.resolved_normals.clone().iter().enumerate() {
+        let projection_components = normal_projection_components(normal);
+        match normal.direction_enforcement.configuration() {
+            NormalDirectionConfiguration::Hard => {
+                let dropped_axis = (0..3)
+                    .max_by(|left, right| {
+                        normal.direction.components()[*left]
+                            .abs()
+                            .total_cmp(&normal.direction.components()[*right].abs())
+                    })
+                    .expect("a physical normal has three components");
+                let drop_one = projection_components.len() == 3;
+                let mut canonical_indices = Vec::with_capacity(projection_components.len());
+                for (axis, component) in &projection_components {
+                    let participation = if drop_one && *axis == dropped_axis {
+                        CanonicalEqualityParticipation::VerificationOnly
+                    } else {
+                        CanonicalEqualityParticipation::SolverConstraint
+                    };
+                    let equality = field_equality_with_representer_span(
+                        component,
+                        participation,
+                        FunctionalRepresenterSpan::CompleteGradientAtSupport,
+                    );
+                    canonical_indices.push(lowering.push_source_with_kind(
+                        equality,
+                        SourceHardRelationKind::NormalProjection { normal_index },
+                    ));
+                }
+                lowering.canonical_hard_residual_blocks.push(
+                    CanonicalHardResidualBlock::normal_projection(canonical_indices),
+                );
+            }
+            NormalDirectionConfiguration::QuadraticPenalty(penalty) => {
+                lowering.push_soft_block(
+                    projection_components
+                        .iter()
+                        .map(|(_, component)| {
+                            soft_field_equality_with_representer_span(
+                                component,
+                                FunctionalRepresenterSpan::CompleteGradientAtSupport,
+                            )
+                        })
+                        .collect(),
+                    CanonicalSoftLoss::QuadraticPenalty {
+                        weight: penalty.weight(),
+                    },
+                    None,
+                    CanonicalSoftResidualBlockKind::NormalProjection,
+                );
+            }
+            NormalDirectionConfiguration::StandardDeviation(standard_deviation) => {
+                lowering.push_soft_block(
+                    projection_components
+                        .iter()
+                        .map(|(_, component)| {
+                            soft_field_equality_with_representer_span(
+                                component,
+                                FunctionalRepresenterSpan::CompleteGradientAtSupport,
+                            )
+                        })
+                        .collect(),
+                    CanonicalSoftLoss::StandardDeviation {
+                        standard_deviation: standard_deviation.value(),
+                    },
+                    None,
+                    CanonicalSoftResidualBlockKind::NormalProjection,
+                );
+            }
+        }
+
+        let configuration = match normal.minimum_slope_enforcement.configuration() {
+            MinimumNormalSlopeConfiguration::Hard => AffineBoundConfiguration::Hard,
+            MinimumNormalSlopeConfiguration::QuadraticPenalty(penalty) => {
+                AffineBoundConfiguration::QuadraticPenalty(penalty)
+            }
+            MinimumNormalSlopeConfiguration::LinearViolationPenalty(penalty) => {
+                AffineBoundConfiguration::LinearViolationPenalty(penalty)
+            }
+        };
+        let functional = CanonicalFunctional::new(
+            FunctionalDimension::FieldValuePerLength,
+            vec![FunctionalTerm::new(
+                normal.location.components(),
+                0.0,
+                normal.direction.components(),
+            )],
+        )
+        .expect("a checked normal slope lowers to one finite derivative functional");
+        let inequality = affine_bound_inequality_with_representer_span(
+            &normal.source_id,
+            "directed-normal/minimum-slope",
+            functional,
+            FunctionalDimension::FieldValuePerLength,
+            CanonicalInequalitySense::Lower,
+            AffineBoundSide {
+                bound: normal.minimum_slope.value(),
+                configuration,
+            },
+            FunctionalRepresenterSpan::CompleteGradientAtSupport,
+        );
+        if matches!(configuration, AffineBoundConfiguration::Hard) {
+            let (functional_key, sign) = canonical_inequality_functional_key(&inequality);
+            hard_derivative_bound_facts.push(HardDerivativeBoundFact {
+                source_id: normal.source_id.clone(),
+                functional_key,
+                sense: if sign < 0.0 {
+                    CanonicalInequalitySense::Upper
+                } else {
+                    CanonicalInequalitySense::Lower
+                },
+                bound: sign * normal.minimum_slope.value(),
+                semantic_role: inequality.provenance().semantic_role().clone(),
+            });
+        }
+        lowering.push_bound(inequality, SourceBoundKind::NormalSlope { normal_index });
     }
 
     for group in &snapshot.inner.covariance_groups {
@@ -4678,6 +5280,18 @@ fn field_equality(
     observation: &ScalarObservation,
     participation: CanonicalEqualityParticipation,
 ) -> CanonicalHardEquality {
+    field_equality_with_representer_span(
+        observation,
+        participation,
+        FunctionalRepresenterSpan::Native,
+    )
+}
+
+fn field_equality_with_representer_span(
+    observation: &ScalarObservation,
+    participation: CanonicalEqualityParticipation,
+    representer_span: FunctionalRepresenterSpan,
+) -> CanonicalHardEquality {
     let provenance = relation_provenance(
         observation.source_id.clone(),
         observation.group_id.clone(),
@@ -4693,7 +5307,11 @@ fn field_equality(
     )
     .expect("checked public observations lower to a finite nonzero functional");
     CanonicalHardEquality::new(
-        Some(FunctionalUse::new(functional, provenance.clone())),
+        Some(FunctionalUse::with_representer_span(
+            functional,
+            provenance.clone(),
+            representer_span,
+        )),
         Vec::new(),
         provenance,
         observation.functional.dimension,
@@ -4703,6 +5321,13 @@ fn field_equality(
 }
 
 fn soft_field_equality(observation: &ScalarObservation) -> CanonicalSoftEquality {
+    soft_field_equality_with_representer_span(observation, FunctionalRepresenterSpan::Native)
+}
+
+fn soft_field_equality_with_representer_span(
+    observation: &ScalarObservation,
+    representer_span: FunctionalRepresenterSpan,
+) -> CanonicalSoftEquality {
     let provenance = relation_provenance(
         observation.source_id.clone(),
         observation.group_id.clone(),
@@ -4718,7 +5343,7 @@ fn soft_field_equality(observation: &ScalarObservation) -> CanonicalSoftEquality
     )
     .expect("checked public observations lower to a finite nonzero functional");
     CanonicalSoftEquality::new(
-        FunctionalUse::new(functional, provenance),
+        FunctionalUse::with_representer_span(functional, provenance, representer_span),
         observation.target,
     )
 }
@@ -4758,12 +5383,146 @@ fn signed_coefficient_bits(sign: f64, coefficient: f64) -> u64 {
     }
 }
 
+fn directed_normal_assessments(
+    solution: &CubicExecutionSolution,
+    source_relations: &[SourceHardRelation],
+    source_bound_relations: &[SourceBoundRelation],
+    resolved_normals: &[ResolvedNormalInput],
+) -> Vec<DirectedNormalAssessment> {
+    let qp = solution
+        .qp
+        .as_ref()
+        .expect("normal slope relations select the QP execution route");
+    resolved_normals
+        .iter()
+        .enumerate()
+        .map(|(normal_index, normal)| {
+            let sample = solution.field.sample(normal.location.components());
+            let direction = normal.direction.components();
+            let recovered_slope = direction
+                .into_iter()
+                .zip(sample.gradient)
+                .map(|(direction, gradient)| direction * gradient)
+                .sum::<f64>();
+            let projection = std::array::from_fn(|axis| {
+                crate::math::canonical_zero(
+                    sample.gradient[axis] - recovered_slope * direction[axis],
+                )
+            });
+            let projection_residual = Vector3::try_new(projection[0], projection[1], projection[2])
+                .expect("accepted recovered projection components are finite");
+            let projection_residual_norm = stable_vector_norm(projection);
+            let recovered_bound = source_bound_relations
+                .iter()
+                .filter_map(|source_relation| match source_relation.kind {
+                    SourceBoundKind::NormalSlope {
+                        normal_index: candidate,
+                    } if candidate == normal_index => {
+                        Some(&solution.affine_inequalities[source_relation.canonical_index])
+                    }
+                    _ => None,
+                })
+                .next()
+                .expect("every resolved normal lowers one slope relation");
+            let direction_loss = solution.soft_objectives.iter().find_map(|objective| {
+                if objective.block_kind != CanonicalSoftResidualBlockKind::NormalProjection {
+                    return None;
+                }
+                let relation = objective
+                    .canonical_indices
+                    .first()
+                    .map(|index| &solution.soft_equalities[*index])?;
+                (relation.provenance.source() == &normal.source_id)
+                    .then_some(objective.objective_contribution)
+            });
+            let direction_tolerance = matches!(
+                normal.direction_enforcement.configuration(),
+                NormalDirectionConfiguration::Hard
+            )
+            .then(|| {
+                source_relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.equality.provenance().source() == &normal.source_id
+                            && relation.kind
+                                == SourceHardRelationKind::NormalProjection { normal_index }
+                    })
+                    .map(|relation| {
+                        qp.hard_relation_tolerances[relation.canonical_index].physical_tolerance
+                    })
+                    .fold(0.0_f64, f64::max)
+            });
+            DirectedNormalAssessment {
+                source_id: normal.source_id.clone(),
+                direction_semantic_role: SemanticRolePath::new(
+                    "directed-normal/direction-projection",
+                ),
+                slope_semantic_role: source_bound_relations
+                    .iter()
+                    .find_map(|source_relation| match source_relation.kind {
+                        SourceBoundKind::NormalSlope {
+                            normal_index: candidate,
+                        } if candidate == normal_index => Some(
+                            source_relation
+                                .inequality
+                                .provenance()
+                                .semantic_role()
+                                .clone(),
+                        ),
+                        _ => None,
+                    })
+                    .expect("every resolved normal retains slope role provenance"),
+                direction: normal.direction,
+                recovered_gradient: Vector3::try_new(
+                    sample.gradient[0],
+                    sample.gradient[1],
+                    sample.gradient[2],
+                )
+                .expect("an accepted recovered gradient is finite"),
+                projection_residual,
+                projection_residual_norm,
+                recovered_slope,
+                minimum_slope: normal.minimum_slope,
+                slope_slack: recovered_bound.slack,
+                slope_violation: recovered_bound.violation,
+                direction_tolerance,
+                slope_tolerance: recovered_bound.tolerance,
+                slope_active_state: public_bound_active_state(recovered_bound),
+                direction_enforcement: normal.direction_enforcement,
+                minimum_slope_enforcement: normal.minimum_slope_enforcement,
+                direction_loss,
+                slope_loss: recovered_bound.objective_contribution,
+                input_axis: normal.input_axis,
+                polarity_resolution_source_id: normal.polarity_resolution_source_id.clone(),
+                polarity_selection: normal.polarity_selection,
+            }
+        })
+        .collect()
+}
+
+fn stable_vector_norm(vector: [f64; 3]) -> f64 {
+    let scale = vector
+        .iter()
+        .map(|component| component.abs())
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return 0.0;
+    }
+    scale
+        * vector
+            .into_iter()
+            .map(|component| (component / scale).powi(2))
+            .sum::<f64>()
+            .sqrt()
+}
+
 fn success_report_qp(
     snapshot: &ProblemSnapshot,
     problem_size: ProblemSize,
     solution: &CubicExecutionSolution,
     source_relations: &[SourceHardRelation],
     source_bound_relations: &[SourceBoundRelation],
+    resolved_normals: &[ResolvedNormalInput],
     shared_level_values: &[SharedLevelValue],
 ) -> FitReport {
     let qp = solution
@@ -4888,6 +5647,12 @@ fn success_report_qp(
         .filter_map(|objective| covariance_group_assessment(objective, &solution.soft_equalities))
         .collect::<Vec<_>>();
     covariance_groups.sort_by(|left, right| left.group_id.cmp(&right.group_id));
+    let directed_normals = directed_normal_assessments(
+        solution,
+        source_relations,
+        source_bound_relations,
+        resolved_normals,
+    );
     let accepted_backend = &qp.attempts[qp.accepted_attempt].backend;
     FitReport {
         problem_size,
@@ -4903,6 +5668,7 @@ fn success_report_qp(
         shared_level_set_relations,
         soft_field_values,
         soft_gradients,
+        directed_normals,
         soft_tangents,
         covariance_groups,
         shared_level_values: shared_level_values.to_vec(),
@@ -4925,6 +5691,7 @@ fn success_report_qp(
         infeasibility_certificate: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
+        unresolved_axial_normals: Vec::new(),
     }
 }
 
@@ -5269,6 +6036,7 @@ fn success_report(
         shared_level_set_relations: Vec::new(),
         soft_field_values,
         soft_gradients,
+        directed_normals: Vec::new(),
         soft_tangents,
         covariance_groups,
         shared_level_values: shared_level_values.to_vec(),
@@ -5299,6 +6067,7 @@ fn success_report(
         infeasibility_certificate: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
+        unresolved_axial_normals: Vec::new(),
     }
 }
 
@@ -6644,7 +7413,9 @@ mod tests {
     use crate::cubic_execution::{QpFaultInjection, inject_qp_fault_once};
     use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel, Vector3};
     use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
-    use crate::observation::FieldValueObservation;
+    use crate::observation::{
+        DirectedNormalObservation, FieldValueObservation, MinimumNormalSlope,
+    };
     use crate::relation::{
         DirectionalDerivativeInterval, FieldValueBound, MinimumFieldSeparation,
         SharedLevelSetBuilder, StratigraphicFieldDirection, YoungerThan,
@@ -6701,6 +7472,34 @@ mod tests {
                     SourceId::new("bound"),
                     Point3::try_new(0.5, 0.5, 0.5).unwrap(),
                     10.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    fn injectable_normal_snapshot() -> ProblemSnapshot {
+        let snapshot = injectable_snapshot();
+        let mut builder = ProblemBuilder::new(
+            snapshot.input_coordinate_frame().clone(),
+            snapshot.field_unit().clone(),
+        );
+        for observation in &snapshot.inner.observations {
+            match observation {
+                ObservationInput::FieldValue(observation) => {
+                    builder.add(observation.clone()).unwrap();
+                }
+                _ => unreachable!("the injectable fixture contains only field values"),
+            }
+        }
+        builder
+            .add(
+                DirectedNormalObservation::try_new(
+                    SourceId::new("normal"),
+                    Point3::try_new(0.25, 0.25, 0.25).unwrap(),
+                    Vector3::try_new(1.0, 2.0, 2.0).unwrap(),
+                    MinimumNormalSlope::try_new(0.1).unwrap(),
                 )
                 .unwrap(),
             )
@@ -6853,7 +7652,7 @@ mod tests {
 
     #[test]
     fn snapshot_capacity_counts_source_relations_as_linear_report_storage() {
-        let lowering = EqualityLowering::new();
+        let lowering = EqualityLowering::new(Vec::new());
         assert!(plan_snapshot_capacity(&lowering, 0, 10_000, 0).is_ok());
         assert!(plan_source_lifecycle_capacity(4_000_000, 0).is_ok());
         let lifecycle_evidence = plan_source_lifecycle_capacity(4_194_304, 0)
@@ -6954,6 +7753,55 @@ mod tests {
         );
         assert!(recovery.no_model_produced());
         assert!(!failure.report().attempts().is_empty());
+    }
+
+    #[test]
+    fn public_normal_fit_rejects_recovery_corruption_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::RecoveryMap);
+        let failure = injectable_normal_snapshot()
+            .fit()
+            .expect_err("a damaged Normal recovery map must not publish a model");
+
+        assert_eq!(
+            failure.diagnosis(),
+            ProblemDiagnosis::RecoveryVerificationFailure
+        );
+        assert!(failure.report().canonical_acceptance().is_none());
+        assert!(
+            failure
+                .report()
+                .recovery_verification()
+                .unwrap()
+                .no_model_produced()
+        );
+    }
+
+    #[test]
+    fn public_normal_fit_rejects_backend_contract_corruption_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::BackendResidual);
+        let failure = injectable_normal_snapshot()
+            .fit()
+            .expect_err("a damaged Normal backend residual must not publish a model");
+
+        assert_eq!(
+            failure.diagnosis(),
+            ProblemDiagnosis::BackendContractViolation
+        );
+        assert!(failure.report().canonical_acceptance().is_none());
+    }
+
+    #[test]
+    fn normal_qp_capacity_failure_is_structured_before_allocation() {
+        inject_qp_fault_once(QpFaultInjection::Capacity);
+        let failure = injectable_normal_snapshot()
+            .fit()
+            .expect_err("an oversized Normal QP plan must fail before allocation");
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::CapacityExceeded);
+        let capacity = failure.report().capacity().unwrap();
+        assert!(!capacity.large_allocation_attempted());
+        assert!(!capacity.backend_invocation_attempted());
+        assert!(failure.report().attempts().is_empty());
     }
 
     #[test]

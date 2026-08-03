@@ -3,12 +3,15 @@
 pub use crate::cubic_equality::RecoveryVerificationFailureReason as RecoveryVerificationReason;
 pub use crate::functional::SemanticRolePath;
 use crate::functional::{GroupId, SourceId};
+use crate::geometry::Vector3;
 pub use crate::numerical::NumericalPolicyId;
 
 /// GeoRBF's semantic conclusion for a failed fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProblemDiagnosis {
+    /// One or more caller inputs require an explicit semantic resolution.
+    UnresolvedSemantics,
     /// The supplied problem could not form a valid fitting problem.
     InvalidProblem,
     /// Two locally comparable hard inputs have incompatible exact targets.
@@ -31,6 +34,39 @@ pub enum ProblemDiagnosis {
     InfeasibleProblem,
     /// Numerical execution failed without proving a stronger diagnosis.
     NumericalFailure,
+}
+
+/// Stable preflight evidence for one unresolved Axial Normal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnresolvedAxialNormalEvidence {
+    source_id: SourceId,
+    input_axis: Vector3,
+    backend_invoked: bool,
+}
+
+impl UnresolvedAxialNormalEvidence {
+    pub(crate) fn new(source_id: SourceId, input_axis: Vector3) -> Self {
+        Self {
+            source_id,
+            input_axis,
+            backend_invoked: false,
+        }
+    }
+
+    /// Returns the unresolved caller-owned Axial Normal identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the normalized orientation retained from the original input axis.
+    pub fn input_axis(&self) -> Vector3 {
+        self.input_axis
+    }
+
+    /// Confirms that semantic preflight stopped before backend execution.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
 }
 
 /// Stable proof that every supplied relation is invariant to a global constant shift.

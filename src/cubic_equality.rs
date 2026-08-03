@@ -15,7 +15,8 @@ use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::faer_backend;
 use crate::functional::{
     CanonicalFunctional, DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension,
-    FunctionalTerm, FunctionalUse, GroupId, ResidualId, SourceId, UsageProvenance,
+    FunctionalRepresenterSpan, FunctionalTerm, FunctionalUse, GroupId, ResidualId, SourceId,
+    UsageProvenance,
 };
 use crate::geometry::FieldUnitLabel;
 use crate::kernel::FieldEnergyNormalization;
@@ -529,6 +530,31 @@ impl CubicRepresentation {
     ) {
         self.field_energy_normalization = normalization;
     }
+
+    pub(crate) fn standard_functional_row(
+        &self,
+        functional: &CanonicalFunctional,
+    ) -> Result<(Vec<f64>, [f64; POLYNOMIAL_DIMENSION]), RepresentationFailure> {
+        let standard = self.coordinates.to_standard_functional(functional)?;
+        let ambient = self
+            .fitting_uses
+            .iter()
+            .map(|usage| {
+                let basis = self
+                    .coordinates
+                    .to_standard_functional(usage.functional())
+                    .expect("a retained basis functional has a finite standard form");
+                CubicKernel::pairing(&standard, &basis, &self.metric)
+            })
+            .collect();
+        let polynomial = std::array::from_fn(|column| {
+            standard.evaluate_affine(
+                if column == 0 { 1.0 } else { 0.0 },
+                std::array::from_fn(|axis| if axis + 1 == column { 1.0 } else { 0.0 }),
+            )
+        });
+        Ok((ambient, polynomial))
+    }
 }
 
 pub(crate) fn preflight_polynomial_analysis_failure(
@@ -570,11 +596,41 @@ pub(crate) fn canonical_fitting_uses(
                 .filter_map(CanonicalAffineInequality::field),
         )
     {
-        if !fitting_uses
-            .iter()
-            .any(|existing| existing.functional() == usage.functional())
-        {
-            fitting_uses.push(usage.clone());
+        let normal_basis = (usage.representer_span()
+            == FunctionalRepresenterSpan::CompleteGradientAtSupport)
+            .then(|| {
+                usage
+                    .functional()
+                    .terms()
+                    .first()
+                    .map(|term| {
+                        (0..3)
+                            .map(|axis| {
+                                let functional = CanonicalFunctional::new(
+                                    FunctionalDimension::FieldValuePerLength,
+                                    vec![FunctionalTerm::new(
+                                        term.support(),
+                                        0.0,
+                                        std::array::from_fn(|component| {
+                                            if component == axis { 1.0 } else { 0.0 }
+                                        }),
+                                    )],
+                                )
+                                .expect("a gradient-component basis functional is valid");
+                                FunctionalUse::new(functional, usage.provenance().clone())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_else(|| vec![usage.clone()]);
+        for basis_use in normal_basis {
+            if !fitting_uses
+                .iter()
+                .any(|existing| existing.functional() == basis_use.functional())
+            {
+                fitting_uses.push(basis_use);
+            }
         }
     }
     fitting_uses
@@ -1682,6 +1738,42 @@ pub(crate) enum CanonicalSoftResidualMemberKind {
     Tangent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalHardResidualBlockKind {
+    NormalProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalHardResidualBlock {
+    canonical_indices: Vec<usize>,
+    kind: CanonicalHardResidualBlockKind,
+}
+
+impl CanonicalHardResidualBlock {
+    pub(crate) fn normal_projection(canonical_indices: Vec<usize>) -> Self {
+        Self {
+            canonical_indices,
+            kind: CanonicalHardResidualBlockKind::NormalProjection,
+        }
+    }
+
+    pub(crate) fn canonical_indices(&self) -> &[usize] {
+        &self.canonical_indices
+    }
+
+    pub(crate) fn is_valid(&self, equality_count: usize) -> bool {
+        match self.kind {
+            CanonicalHardResidualBlockKind::NormalProjection => {
+                matches!(self.canonical_indices.len(), 2 | 3)
+                    && self
+                        .canonical_indices
+                        .iter()
+                        .all(|index| *index < equality_count)
+            }
+        }
+    }
+}
+
 impl CanonicalSoftResidualMemberKind {
     pub(crate) fn component_count(self) -> usize {
         match self {
@@ -1694,6 +1786,7 @@ impl CanonicalSoftResidualMemberKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CanonicalSoftResidualBlockKind {
     Independent(CanonicalSoftResidualMemberKind),
+    NormalProjection,
     CovarianceGroup {
         members: Vec<CanonicalSoftResidualMemberKind>,
     },
@@ -1709,6 +1802,7 @@ impl CanonicalSoftResidualBlockKind {
             Self::Independent(member) => {
                 covariance_group.is_none() && member.component_count() == residual_count
             }
+            Self::NormalProjection => covariance_group.is_none() && matches!(residual_count, 2 | 3),
             Self::CovarianceGroup { members } => {
                 covariance_group.is_some()
                     && !members.is_empty()
@@ -1774,6 +1868,7 @@ impl CanonicalSoftObjective {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CubicCanonicalProblem {
     pub(crate) equalities: Vec<CanonicalHardEquality>,
+    pub(crate) hard_residual_blocks: Vec<CanonicalHardResidualBlock>,
     pub(crate) affine_inequalities: Vec<CanonicalAffineInequality>,
     pub(crate) soft_equalities: Vec<CanonicalSoftEquality>,
     pub(crate) soft_objectives: Vec<CanonicalSoftObjective>,
@@ -2192,6 +2287,7 @@ impl CubicEqualityCore {
                     .into_iter()
                     .map(CanonicalHardEquality::from_field_only)
                     .collect(),
+                hard_residual_blocks: Vec::new(),
                 affine_inequalities: Vec::new(),
                 soft_equalities: Vec::new(),
                 soft_objectives: Vec::new(),
@@ -2220,6 +2316,15 @@ impl CubicEqualityCore {
             {
                 return Err(CubicEqualityFailure::NonFiniteTarget { equality: index });
             }
+        }
+        if problem
+            .hard_residual_blocks
+            .iter()
+            .any(|block| !block.is_valid(problem.equalities.len()))
+        {
+            return Err(CubicEqualityFailure::NonFiniteTarget {
+                equality: problem.equalities.len(),
+            });
         }
         let objective_residuals = problem
             .soft_objectives
@@ -2944,11 +3049,7 @@ fn recover_and_verify(
     if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::SideConditionRoundTripViolation);
     }
-    if hard_equalities
-        .iter()
-        .zip(&relation_tolerances)
-        .any(|(equality, tolerance)| equality.residual.abs() > tolerance.physical_tolerance)
-    {
+    if !hard_residuals_within_tolerance(&problem, &hard_equalities, &relation_tolerances) {
         reasons.push(RecoveryVerificationFailureReason::HardEqualityViolation);
     }
     if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
@@ -3019,6 +3120,48 @@ fn recover_and_verify(
         field_energy,
         total_objective,
     })
+}
+
+fn hard_residuals_within_tolerance(
+    problem: &CubicCanonicalProblem,
+    recovered: &[RecoveredHardEquality],
+    tolerances: &[CanonicalRelationToleranceEvidence],
+) -> bool {
+    let mut block_membership = vec![false; recovered.len()];
+    for block in &problem.hard_residual_blocks {
+        for index in block.canonical_indices() {
+            block_membership[*index] = true;
+        }
+        let scale = block
+            .canonical_indices()
+            .iter()
+            .map(|index| recovered[*index].residual.abs())
+            .fold(0.0_f64, f64::max);
+        let residual_norm = if scale == 0.0 {
+            0.0
+        } else {
+            scale
+                * block
+                    .canonical_indices()
+                    .iter()
+                    .map(|index| (recovered[*index].residual / scale).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+        };
+        let tolerance = block
+            .canonical_indices()
+            .iter()
+            .map(|index| tolerances[*index].physical_tolerance)
+            .fold(0.0_f64, f64::max);
+        if residual_norm > tolerance {
+            return false;
+        }
+    }
+    recovered.iter().zip(tolerances).zip(block_membership).all(
+        |((relation, tolerance), in_block)| {
+            in_block || relation.residual.abs() <= tolerance.physical_tolerance
+        },
+    )
 }
 
 fn canonical_relation_tolerances(
@@ -3382,6 +3525,7 @@ mod tests {
                     CanonicalHardEquality::from_field_only(HardEquality::new(usage, target))
                 })
                 .collect(),
+            hard_residual_blocks: Vec::new(),
             affine_inequalities: Vec::new(),
             soft_equalities: Vec::new(),
             soft_objectives: Vec::new(),
@@ -3600,6 +3744,7 @@ mod tests {
         ));
         let problem = CubicCanonicalProblem {
             equalities: equalities.clone(),
+            hard_residual_blocks: Vec::new(),
             affine_inequalities: Vec::new(),
             soft_equalities: Vec::new(),
             soft_objectives: Vec::new(),

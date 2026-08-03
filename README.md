@@ -8,6 +8,10 @@ development surface adds physical soft residual blocks and affine relations. Fie
 Tangent observations support checked scalar penalty/statistical configuration;
 complete Gradient observations support isotropic Euclidean quadratic penalties,
 isotropic standard deviations, or explicit checked three-component covariance.
+Directed Normal observations combine a rotation-invariant projection residual with
+an independent positive Minimum Normal Slope channel. Axial Normal observations retain
+their unoriented input axis and require an independently sourced explicit Polarity
+Resolution before fitting.
 An atomic `CovarianceGroupBuilder` joins same-dimension scalar and vector
 members under one named covariance and one identifiable group objective. Every
 soft problem supplies an explicit checked `FieldEnergyNormalization`. Callers otherwise declare
@@ -174,6 +178,23 @@ contribution; it deliberately exposes no invented per-member contribution.
 If group completion fails, `CovarianceGroupBuildFailure::into_parts` returns the
 unchanged draft and covariance for repair and retry.
 
+## Directed and Axial Normal workflow
+
+Normal inputs discard vector magnitude and normalize in the physical Euclidean
+input frame. A hard Directed Normal requires both exact alignment and a checked
+positive `MinimumNormalSlope`; soft direction and slope channels select their
+legal losses independently. `FitReport::directed_normals` restores the complete
+gradient, projection residual and norm, directed slope, slope slack/violation,
+active state, and separate objective contributions.
+
+An `AxialNormalObservation` preserves both the normalized caller orientation and
+the sign-invariant axis identity in the immutable snapshot. It cannot fit until a
+separate `PolarityResolution` chooses `AlongInputAxis` or `AgainstInputAxis`.
+Unresolved axes return `ProblemDiagnosis::UnresolvedSemantics` from preflight,
+with `backend_invoked == false`; no automatic flipping or polarity inference is
+performed. A resolved axis lowers through the same Directed Normal channels while
+the report retains the resolution `SourceId` and selection.
+
 ```compile_fail
 struct CustomInput;
 
@@ -241,3 +262,6 @@ mesh/isosurface claims, and GeoRBF does not output or imply Physical Thickness.
 
 Implementation and conformance evidence is recorded in
 [#33](docs/implementation/33-level-set-affine-relations.md).
+
+Directed/Axial Normal and Polarity Resolution evidence is recorded in
+[#34](docs/implementation/34-normal-direction-workflow.md).

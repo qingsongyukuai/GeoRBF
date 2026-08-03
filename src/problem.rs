@@ -1,6 +1,6 @@
 //! Problem construction, immutable snapshots, identity, and fit configuration.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -11,12 +11,14 @@ pub use crate::functional::{GroupId, SourceId};
 use crate::geometry::{FieldUnitLabel, GlobalAnisotropyMetric, InputCoordinateFrame};
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::numerical::NumericalPolicyId;
-use crate::observation::{CovarianceGroup, ObservationInput};
+use crate::observation::{
+    AxialNormalObservation, CovarianceGroup, DirectedNormalObservation, ObservationInput,
+};
 pub use crate::relation::StratigraphicFieldDirection;
 use crate::relation::{
     AdditiveFieldGauge, AdditiveFieldGaugeReference, DirectionalDerivativeInterval,
-    FieldSeparationInterval, FieldValueBound, PointToLevelSetRelation, SharedLevelSetInput,
-    SharedLevelSetRelationInput,
+    FieldSeparationInterval, FieldValueBound, PointToLevelSetRelation, PolarityResolution,
+    PolaritySelection, SharedLevelSetInput, SharedLevelSetRelationInput,
 };
 
 /// Resource request for a synchronous fit.
@@ -89,6 +91,9 @@ pub struct ProblemBuilder {
     input_coordinate_frame: InputCoordinateFrame,
     field_unit: FieldUnitLabel,
     observations: Vec<ObservationInput>,
+    directed_normals: Vec<DirectedNormalObservation>,
+    axial_normals: Vec<AxialNormalObservation>,
+    polarity_resolutions: Vec<PolarityResolution>,
     covariance_groups: Vec<CovarianceGroup>,
     shared_level_sets: Vec<SharedLevelSetInput>,
     additive_field_gauges: Vec<AdditiveFieldGauge>,
@@ -113,6 +118,9 @@ impl ProblemBuilder {
             input_coordinate_frame,
             field_unit,
             observations: Vec::new(),
+            directed_normals: Vec::new(),
+            axial_normals: Vec::new(),
+            polarity_resolutions: Vec::new(),
             covariance_groups: Vec::new(),
             shared_level_sets: Vec::new(),
             additive_field_gauges: Vec::new(),
@@ -210,7 +218,15 @@ impl ProblemBuilder {
                     ObservationInput::TangentDirection(tangent) => {
                         tangent.configuration().is_soft()
                     }
-                });
+                })
+            || self
+                .directed_normals
+                .iter()
+                .any(DirectedNormalObservation::is_soft)
+            || self
+                .axial_normals
+                .iter()
+                .any(AxialNormalObservation::is_soft);
         if has_soft_relation && self.field_energy_normalization.is_none() {
             errors.push(BuildError::MissingFieldEnergyNormalization);
         }
@@ -264,6 +280,75 @@ impl ProblemBuilder {
                     group_id,
                 }),
         );
+        let axial_normal_source_ids = self
+            .axial_normals
+            .iter()
+            .map(|normal| normal.source_id().clone())
+            .collect::<BTreeSet<_>>();
+        let mut dangling_polarity_resolutions = self
+            .polarity_resolutions
+            .iter()
+            .filter(|resolution| {
+                !axial_normal_source_ids.contains(resolution.axial_normal_source_id())
+            })
+            .map(|resolution| BuildError::UnknownAxialNormalReference {
+                resolution_source_id: resolution.source_id().clone(),
+                axial_normal_source_id: resolution.axial_normal_source_id().clone(),
+            })
+            .collect::<Vec<_>>();
+        dangling_polarity_resolutions.sort_by(|left, right| match (left, right) {
+            (
+                BuildError::UnknownAxialNormalReference {
+                    resolution_source_id: left,
+                    axial_normal_source_id: left_axial,
+                },
+                BuildError::UnknownAxialNormalReference {
+                    resolution_source_id: right,
+                    axial_normal_source_id: right_axial,
+                },
+            ) => left.cmp(right).then_with(|| left_axial.cmp(right_axial)),
+            _ => std::cmp::Ordering::Equal,
+        });
+        errors.extend(dangling_polarity_resolutions);
+        let mut polarity_by_axial = BTreeMap::<SourceId, (Vec<SourceId>, Vec<SourceId>)>::new();
+        for resolution in &self.polarity_resolutions {
+            let choices = polarity_by_axial
+                .entry(resolution.axial_normal_source_id().clone())
+                .or_default();
+            match resolution.selection() {
+                PolaritySelection::AlongInputAxis => {
+                    choices.0.push(resolution.source_id().clone());
+                }
+                PolaritySelection::AgainstInputAxis => {
+                    choices.1.push(resolution.source_id().clone());
+                }
+            }
+        }
+        for (axial_normal_source_id, (mut along, mut against)) in polarity_by_axial {
+            along.sort();
+            against.sort();
+            if along.len() > 1 {
+                errors.push(BuildError::DuplicatePolarityResolution {
+                    axial_normal_source_id: axial_normal_source_id.clone(),
+                    selection: PolaritySelection::AlongInputAxis,
+                    resolution_source_ids: along.clone(),
+                });
+            }
+            if against.len() > 1 {
+                errors.push(BuildError::DuplicatePolarityResolution {
+                    axial_normal_source_id: axial_normal_source_id.clone(),
+                    selection: PolaritySelection::AgainstInputAxis,
+                    resolution_source_ids: against.clone(),
+                });
+            }
+            if !along.is_empty() && !against.is_empty() {
+                errors.push(BuildError::ConflictingPolarityResolution {
+                    axial_normal_source_id,
+                    along_resolution_source_ids: along,
+                    against_resolution_source_ids: against,
+                });
+            }
+        }
         if let ThreadBudget::Exact(count) = self.fit_configuration.thread_budget {
             if count.get() != 1 {
                 errors.push(BuildError::UnsupportedThreadBudget {
@@ -278,6 +363,12 @@ impl ProblemBuilder {
             });
         }
         self.observations
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.directed_normals
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.axial_normals
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.polarity_resolutions
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.shared_level_sets
             .sort_by(|left, right| left.group_id().cmp(right.group_id()));
@@ -299,6 +390,9 @@ impl ProblemBuilder {
             input_coordinate_frame: self.input_coordinate_frame,
             field_unit: self.field_unit,
             observations: self.observations,
+            directed_normals: self.directed_normals,
+            axial_normals: self.axial_normals,
+            polarity_resolutions: self.polarity_resolutions,
             covariance_groups: self.covariance_groups,
             shared_level_sets: self.shared_level_sets,
             additive_field_gauges: self.additive_field_gauges,
@@ -333,6 +427,45 @@ impl ProblemBuilder {
         }
         self.source_ids.insert(source_id);
         self.observations.push(observation);
+        Ok(())
+    }
+
+    pub(crate) fn add_directed_normal(
+        &mut self,
+        observation: DirectedNormalObservation,
+    ) -> Result<(), AddError> {
+        let source_id = observation.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.directed_normals.push(observation);
+        Ok(())
+    }
+
+    pub(crate) fn add_axial_normal(
+        &mut self,
+        observation: AxialNormalObservation,
+    ) -> Result<(), AddError> {
+        let source_id = observation.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.axial_normals.push(observation);
+        Ok(())
+    }
+
+    pub(crate) fn add_polarity_resolution(
+        &mut self,
+        resolution: PolarityResolution,
+    ) -> Result<(), AddError> {
+        let source_id = resolution.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.polarity_resolutions.push(resolution);
         Ok(())
     }
 
@@ -511,6 +644,53 @@ impl ProblemSnapshot {
     /// Returns the number of top-level observations.
     pub fn observation_count(&self) -> usize {
         self.inner.observations.len()
+            + self.inner.directed_normals.len()
+            + self.inner.axial_normals.len()
+    }
+
+    /// Returns the caller-owned Directed Normal count.
+    pub fn directed_normal_count(&self) -> usize {
+        self.inner.directed_normals.len()
+    }
+
+    /// Returns the caller-owned Axial Normal count, including unresolved inputs.
+    pub fn axial_normal_count(&self) -> usize {
+        self.inner.axial_normals.len()
+    }
+
+    /// Returns the explicit polarity-resolution record count.
+    pub fn polarity_resolution_count(&self) -> usize {
+        self.inner.polarity_resolutions.len()
+    }
+
+    /// Finds one immutable Directed Normal by caller SourceId.
+    pub fn directed_normal_observation(
+        &self,
+        source_id: &SourceId,
+    ) -> Option<&DirectedNormalObservation> {
+        self.inner
+            .directed_normals
+            .iter()
+            .find(|observation| observation.source_id() == source_id)
+    }
+
+    /// Finds one immutable Axial Normal by caller SourceId.
+    pub fn axial_normal_observation(
+        &self,
+        source_id: &SourceId,
+    ) -> Option<&AxialNormalObservation> {
+        self.inner
+            .axial_normals
+            .iter()
+            .find(|observation| observation.source_id() == source_id)
+    }
+
+    /// Finds one immutable polarity resolution by its own caller SourceId.
+    pub fn polarity_resolution(&self, source_id: &SourceId) -> Option<&PolarityResolution> {
+        self.inner
+            .polarity_resolutions
+            .iter()
+            .find(|resolution| resolution.source_id() == source_id)
     }
 
     /// Returns the number of general mathematical shared level sets.
@@ -590,6 +770,9 @@ pub(crate) struct ProblemData {
     pub(crate) input_coordinate_frame: InputCoordinateFrame,
     pub(crate) field_unit: FieldUnitLabel,
     pub(crate) observations: Vec<ObservationInput>,
+    pub(crate) directed_normals: Vec<DirectedNormalObservation>,
+    pub(crate) axial_normals: Vec<AxialNormalObservation>,
+    pub(crate) polarity_resolutions: Vec<PolarityResolution>,
     pub(crate) covariance_groups: Vec<CovarianceGroup>,
     pub(crate) shared_level_sets: Vec<SharedLevelSetInput>,
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
@@ -677,6 +860,23 @@ pub enum BuildError {
     UnknownGroupReference {
         source_id: SourceId,
         group_id: GroupId,
+    },
+    /// A polarity resolution did not reference an Axial Normal in the problem.
+    UnknownAxialNormalReference {
+        resolution_source_id: SourceId,
+        axial_normal_source_id: SourceId,
+    },
+    /// Multiple independently sourced decisions repeated one polarity choice.
+    DuplicatePolarityResolution {
+        axial_normal_source_id: SourceId,
+        selection: PolaritySelection,
+        resolution_source_ids: Vec<SourceId>,
+    },
+    /// Independently sourced decisions selected both polarities for one axis.
+    ConflictingPolarityResolution {
+        axial_normal_source_id: SourceId,
+        along_resolution_source_ids: Vec<SourceId>,
+        against_resolution_source_ids: Vec<SourceId>,
     },
 }
 
