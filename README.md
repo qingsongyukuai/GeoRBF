@@ -4,7 +4,7 @@ GeoRBF is a Rust library for fitting implicit geological scalar fields from
 geological observations.
 
 Version 0.1.0 exposes complete public Cubic Equality tracers. The current v0.2
-development surface adds physical soft residual blocks. Field Value and
+development surface adds physical soft residual blocks and affine relations. Field Value and
 Tangent observations support checked scalar penalty/statistical configuration;
 complete Gradient observations support isotropic Euclidean quadratic penalties,
 isotropic standard deviations, or explicit checked three-component covariance.
@@ -215,3 +215,29 @@ Complete first-order residual blocks and named covariance groups are recorded in
 The crate-internal Cubic Convex QP execution seam and its Clarabel evidence are
 recorded in [#29](docs/implementation/29-cubic-convex-qp-execution.md); it adds
 no public affine-bound relation or public backend type.
+
+## Shared-level affine relations
+
+`FieldSeparationInterval` constrains the signed field-value difference
+`target - reference` between two ordered Shared Level Sets. Swapping those
+roles is equivalent only when `[lower, upper]` is also changed to
+`[-upper, -lower]`. `PointToLevelSetRelation` constrains one finite sampled
+point to an explicit `Increasing` or `Decreasing` field-value side using a
+strictly positive `MinimumFieldOffset`; GeoRBF never infers the side from
+coordinates, gradients, ages, names, or insertion order.
+
+Both relation families provide hard, quadratic-violation, and
+linear-violation configurations and allow forward `GroupId` references.
+They lower through the same semantic latents and Cubic QP route as the other
+affine bounds. Recovery reports the original-unit signed separation or point
+offset, independent side violations, activity, loss, objective, and complete
+source/group provenance.
+
+These relations guarantee inequalities only at their finite input support.
+Their intervals and offsets use field-value units: changing a length-unit
+label or uniformly transforming the coordinate frame does not rescale them.
+They are not distances, layer thicknesses, continuous-region guarantees, or
+mesh/isosurface claims, and GeoRBF does not output or imply Physical Thickness.
+
+Implementation and conformance evidence is recorded in
+[#33](docs/implementation/33-level-set-affine-relations.md).

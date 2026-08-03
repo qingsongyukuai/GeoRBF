@@ -15,7 +15,8 @@ use crate::observation::{CovarianceGroup, ObservationInput};
 pub use crate::relation::StratigraphicFieldDirection;
 use crate::relation::{
     AdditiveFieldGauge, AdditiveFieldGaugeReference, DirectionalDerivativeInterval,
-    FieldValueBound, SharedLevelSetInput, SharedLevelSetRelationInput,
+    FieldSeparationInterval, FieldValueBound, PointToLevelSetRelation, SharedLevelSetInput,
+    SharedLevelSetRelationInput,
 };
 
 /// Resource request for a synchronous fit.
@@ -93,6 +94,8 @@ pub struct ProblemBuilder {
     additive_field_gauges: Vec<AdditiveFieldGauge>,
     field_value_bounds: Vec<FieldValueBound>,
     directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
+    field_separation_intervals: Vec<FieldSeparationInterval>,
+    point_to_level_set_relations: Vec<PointToLevelSetRelation>,
     shared_level_set_relations: Vec<SharedLevelSetRelationInput>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
@@ -115,6 +118,8 @@ impl ProblemBuilder {
             additive_field_gauges: Vec::new(),
             field_value_bounds: Vec::new(),
             directional_derivative_intervals: Vec::new(),
+            field_separation_intervals: Vec::new(),
+            point_to_level_set_relations: Vec::new(),
             shared_level_set_relations: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
@@ -189,6 +194,14 @@ impl ProblemBuilder {
                 .iter()
                 .any(DirectionalDerivativeInterval::is_soft)
             || self
+                .field_separation_intervals
+                .iter()
+                .any(FieldSeparationInterval::is_soft)
+            || self
+                .point_to_level_set_relations
+                .iter()
+                .any(PointToLevelSetRelation::is_soft)
+            || self
                 .observations
                 .iter()
                 .any(|observation| match observation {
@@ -228,6 +241,18 @@ impl ProblemBuilder {
                     .filter(|group_id| !self.shared_level_group_ids.contains(*group_id))
                     .map(|group_id| (relation.source_id().clone(), group_id.clone()))
             }))
+            .chain(self.field_separation_intervals.iter().flat_map(|relation| {
+                [relation.reference_group_id(), relation.target_group_id()]
+                    .into_iter()
+                    .filter(|group_id| !self.shared_level_group_ids.contains(*group_id))
+                    .map(|group_id| (relation.source_id().clone(), group_id.clone()))
+            }))
+            .chain(
+                self.point_to_level_set_relations
+                    .iter()
+                    .filter(|relation| !self.shared_level_group_ids.contains(relation.group_id()))
+                    .map(|relation| (relation.source_id().clone(), relation.group_id().clone())),
+            )
             .collect::<Vec<_>>();
         dangling_references.sort();
         dangling_references.dedup();
@@ -264,6 +289,10 @@ impl ProblemBuilder {
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.directional_derivative_intervals
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.field_separation_intervals
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.point_to_level_set_relations
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.shared_level_set_relations
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
@@ -275,6 +304,8 @@ impl ProblemBuilder {
             additive_field_gauges: self.additive_field_gauges,
             field_value_bounds: self.field_value_bounds,
             directional_derivative_intervals: self.directional_derivative_intervals,
+            field_separation_intervals: self.field_separation_intervals,
+            point_to_level_set_relations: self.point_to_level_set_relations,
             shared_level_set_relations: self.shared_level_set_relations,
             source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
@@ -407,6 +438,32 @@ impl ProblemBuilder {
         self.shared_level_set_relations.push(relation);
         Ok(())
     }
+
+    pub(crate) fn add_field_separation_interval(
+        &mut self,
+        interval: FieldSeparationInterval,
+    ) -> Result<(), AddError> {
+        let source_id = interval.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.field_separation_intervals.push(interval);
+        Ok(())
+    }
+
+    pub(crate) fn add_point_to_level_set_relation(
+        &mut self,
+        relation: PointToLevelSetRelation,
+    ) -> Result<(), AddError> {
+        let source_id = relation.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.point_to_level_set_relations.push(relation);
+        Ok(())
+    }
 }
 
 /// An owning, immutable problem snapshot.
@@ -489,6 +546,16 @@ impl ProblemSnapshot {
         self.inner.directional_derivative_intervals.len()
     }
 
+    /// Returns the caller-owned Field Separation Interval count.
+    pub fn field_separation_interval_count(&self) -> usize {
+        self.inner.field_separation_intervals.len()
+    }
+
+    /// Returns the caller-owned Point to Level Set Relation count.
+    pub fn point_to_level_set_relation_count(&self) -> usize {
+        self.inner.point_to_level_set_relations.len()
+    }
+
     /// Returns the explicitly configured stratigraphic field direction.
     pub fn stratigraphic_field_direction(&self) -> Option<StratigraphicFieldDirection> {
         self.inner.stratigraphic_field_direction
@@ -528,6 +595,8 @@ pub(crate) struct ProblemData {
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
     pub(crate) field_value_bounds: Vec<FieldValueBound>,
     pub(crate) directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
+    pub(crate) field_separation_intervals: Vec<FieldSeparationInterval>,
+    pub(crate) point_to_level_set_relations: Vec<PointToLevelSetRelation>,
     pub(crate) shared_level_set_relations: Vec<SharedLevelSetRelationInput>,
     pub(crate) source_count: usize,
     pub(crate) resolved_kernel: KernelConfig,

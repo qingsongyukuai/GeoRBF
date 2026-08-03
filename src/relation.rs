@@ -74,6 +74,411 @@ pub enum DirectionalDerivativeViolationPenalty {
     Linear(LinearViolationPenalty),
 }
 
+/// One legal positive loss applied to a Field Separation Interval side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum FieldSeparationViolationPenalty {
+    /// A half-weighted squared loss, `1/2 * weight * violation^2`.
+    Quadratic(QuadraticPenalty),
+    /// A weighted one-sided loss, `weight * violation`.
+    Linear(LinearViolationPenalty),
+}
+
+/// A finite signed field-value interval between two ordered shared level sets.
+///
+/// The constrained quantity is `target - reference`. It has field-value units
+/// and carries no age, spatial-side, distance, or physical-thickness meaning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldSeparationInterval {
+    source_id: SourceId,
+    reference_group_id: GroupId,
+    target_group_id: GroupId,
+    lower: AffineBoundSide,
+    upper: AffineBoundSide,
+}
+
+impl FieldSeparationInterval {
+    /// Creates one hard closed interval for `target - reference`.
+    pub fn try_hard(
+        source_id: SourceId,
+        reference_group_id: GroupId,
+        target_group_id: GroupId,
+        lower: f64,
+        upper: f64,
+    ) -> Result<Self, FieldSeparationIntervalError> {
+        Self::new(
+            source_id,
+            reference_group_id,
+            target_group_id,
+            (lower, AffineBoundConfiguration::Hard),
+            (upper, AffineBoundConfiguration::Hard),
+        )
+    }
+
+    /// Creates a soft interval with independent quadratic penalties per side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_with_quadratic_penalties(
+        source_id: SourceId,
+        reference_group_id: GroupId,
+        target_group_id: GroupId,
+        lower: f64,
+        lower_penalty: QuadraticPenalty,
+        upper: f64,
+        upper_penalty: QuadraticPenalty,
+    ) -> Result<Self, FieldSeparationIntervalError> {
+        Self::new(
+            source_id,
+            reference_group_id,
+            target_group_id,
+            (
+                lower,
+                AffineBoundConfiguration::QuadraticPenalty(lower_penalty),
+            ),
+            (
+                upper,
+                AffineBoundConfiguration::QuadraticPenalty(upper_penalty),
+            ),
+        )
+    }
+
+    /// Creates a soft interval with independent linear penalties per side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_with_linear_violation_penalties(
+        source_id: SourceId,
+        reference_group_id: GroupId,
+        target_group_id: GroupId,
+        lower: f64,
+        lower_penalty: LinearViolationPenalty,
+        upper: f64,
+        upper_penalty: LinearViolationPenalty,
+    ) -> Result<Self, FieldSeparationIntervalError> {
+        Self::new(
+            source_id,
+            reference_group_id,
+            target_group_id,
+            (
+                lower,
+                AffineBoundConfiguration::LinearViolationPenalty(lower_penalty),
+            ),
+            (
+                upper,
+                AffineBoundConfiguration::LinearViolationPenalty(upper_penalty),
+            ),
+        )
+    }
+
+    /// Creates a soft interval whose sides independently select a legal loss.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_with_violation_penalties(
+        source_id: SourceId,
+        reference_group_id: GroupId,
+        target_group_id: GroupId,
+        lower: f64,
+        lower_penalty: FieldSeparationViolationPenalty,
+        upper: f64,
+        upper_penalty: FieldSeparationViolationPenalty,
+    ) -> Result<Self, FieldSeparationIntervalError> {
+        let configuration = |penalty| match penalty {
+            FieldSeparationViolationPenalty::Quadratic(penalty) => {
+                AffineBoundConfiguration::QuadraticPenalty(penalty)
+            }
+            FieldSeparationViolationPenalty::Linear(penalty) => {
+                AffineBoundConfiguration::LinearViolationPenalty(penalty)
+            }
+        };
+        Self::new(
+            source_id,
+            reference_group_id,
+            target_group_id,
+            (lower, configuration(lower_penalty)),
+            (upper, configuration(upper_penalty)),
+        )
+    }
+
+    fn new(
+        source_id: SourceId,
+        reference_group_id: GroupId,
+        target_group_id: GroupId,
+        lower: (f64, AffineBoundConfiguration),
+        upper: (f64, AffineBoundConfiguration),
+    ) -> Result<Self, FieldSeparationIntervalError> {
+        if reference_group_id == target_group_id {
+            return Err(FieldSeparationIntervalError::SelfReference {
+                group_id: reference_group_id,
+            });
+        }
+        if !lower.0.is_finite() || !upper.0.is_finite() {
+            return Err(FieldSeparationIntervalError::NonFiniteBound);
+        }
+        if lower.0 > upper.0 {
+            return Err(FieldSeparationIntervalError::EmptyInterval {
+                lower: lower.0,
+                upper: upper.0,
+            });
+        }
+        Ok(Self {
+            source_id,
+            reference_group_id,
+            target_group_id,
+            lower: AffineBoundSide {
+                bound: canonical_zero(lower.0),
+                configuration: lower.1,
+            },
+            upper: AffineBoundSide {
+                bound: canonical_zero(upper.0),
+                configuration: upper.1,
+            },
+        })
+    }
+
+    /// Returns the stable caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the ordered reference shared level set.
+    pub fn reference_group_id(&self) -> &GroupId {
+        &self.reference_group_id
+    }
+
+    /// Returns the ordered target shared level set.
+    pub fn target_group_id(&self) -> &GroupId {
+        &self.target_group_id
+    }
+
+    /// Returns the finite lower bound on `target - reference`.
+    pub fn lower_bound(&self) -> f64 {
+        self.lower.bound
+    }
+
+    /// Returns the finite upper bound on `target - reference`.
+    pub fn upper_bound(&self) -> f64 {
+        self.upper.bound
+    }
+
+    /// Reports whether either interval side owns a violation channel.
+    pub fn is_soft(&self) -> bool {
+        self.lower.configuration.is_soft() || self.upper.configuration.is_soft()
+    }
+
+    pub(crate) fn lower(&self) -> &AffineBoundSide {
+        &self.lower
+    }
+
+    pub(crate) fn upper(&self) -> &AffineBoundSide {
+        &self.upper
+    }
+}
+
+/// A rejected Field Separation Interval.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum FieldSeparationIntervalError {
+    /// Reference and target named the same shared level set.
+    SelfReference { group_id: GroupId },
+    /// A lower or upper field-value bound was NaN or infinite.
+    NonFiniteBound,
+    /// The closed interval had its lower endpoint above its upper endpoint.
+    EmptyInterval { lower: f64, upper: f64 },
+}
+
+impl fmt::Display for FieldSeparationIntervalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SelfReference { group_id } => write!(
+                formatter,
+                "field-separation reference and target both name GroupId `{group_id}`"
+            ),
+            Self::NonFiniteBound => formatter.write_str("field-separation bound is not finite"),
+            Self::EmptyInterval { lower, upper } => write!(
+                formatter,
+                "field-separation interval [{lower}, {upper}] is empty"
+            ),
+        }
+    }
+}
+
+impl Error for FieldSeparationIntervalError {}
+
+/// The explicitly declared field-value side of a shared level set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PointToLevelSetSide {
+    /// The point value is greater than the shared level value.
+    Increasing,
+    /// The point value is less than the shared level value.
+    Decreasing,
+}
+
+/// A finite, strictly positive point-to-level field-value difference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimumFieldOffset {
+    value: f64,
+}
+
+impl MinimumFieldOffset {
+    /// Creates a checked minimum field offset.
+    pub fn try_new(value: f64) -> Result<Self, MinimumFieldOffsetError> {
+        if !value.is_finite() {
+            return Err(MinimumFieldOffsetError::NotFinite);
+        }
+        if value <= 0.0 {
+            return Err(MinimumFieldOffsetError::NotPositive);
+        }
+        Ok(Self { value })
+    }
+
+    /// Returns the offset in the problem's field-value units.
+    pub fn value(self) -> f64 {
+        self.value
+    }
+}
+
+/// A rejected minimum field offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MinimumFieldOffsetError {
+    /// The supplied value was NaN or infinite.
+    NotFinite,
+    /// The supplied value was zero or negative.
+    NotPositive,
+}
+
+impl fmt::Display for MinimumFieldOffsetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => formatter.write_str("minimum field offset is not finite"),
+            Self::NotPositive => formatter.write_str("minimum field offset is not positive"),
+        }
+    }
+}
+
+impl Error for MinimumFieldOffsetError {}
+
+/// A finite sampled point constrained to one explicit side of a shared level set.
+///
+/// This relation is guaranteed only at its stored support. Its offset has
+/// field-value units and is not a distance or physical thickness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointToLevelSetRelation {
+    source_id: SourceId,
+    location: Point3,
+    group_id: GroupId,
+    side: PointToLevelSetSide,
+    minimum_offset: MinimumFieldOffset,
+    configuration: AffineBoundConfiguration,
+}
+
+impl PointToLevelSetRelation {
+    /// Creates one hard point-to-level-set side relation.
+    pub fn hard(
+        source_id: SourceId,
+        location: Point3,
+        group_id: GroupId,
+        side: PointToLevelSetSide,
+        minimum_offset: MinimumFieldOffset,
+    ) -> Self {
+        Self::new(
+            source_id,
+            location,
+            group_id,
+            side,
+            minimum_offset,
+            AffineBoundConfiguration::Hard,
+        )
+    }
+
+    /// Creates a soft point-side relation with a quadratic violation loss.
+    pub fn with_quadratic_penalty(
+        source_id: SourceId,
+        location: Point3,
+        group_id: GroupId,
+        side: PointToLevelSetSide,
+        minimum_offset: MinimumFieldOffset,
+        penalty: QuadraticPenalty,
+    ) -> Self {
+        Self::new(
+            source_id,
+            location,
+            group_id,
+            side,
+            minimum_offset,
+            AffineBoundConfiguration::QuadraticPenalty(penalty),
+        )
+    }
+
+    /// Creates a soft point-side relation with a linear violation loss.
+    pub fn with_linear_violation_penalty(
+        source_id: SourceId,
+        location: Point3,
+        group_id: GroupId,
+        side: PointToLevelSetSide,
+        minimum_offset: MinimumFieldOffset,
+        penalty: LinearViolationPenalty,
+    ) -> Self {
+        Self::new(
+            source_id,
+            location,
+            group_id,
+            side,
+            minimum_offset,
+            AffineBoundConfiguration::LinearViolationPenalty(penalty),
+        )
+    }
+
+    fn new(
+        source_id: SourceId,
+        location: Point3,
+        group_id: GroupId,
+        side: PointToLevelSetSide,
+        minimum_offset: MinimumFieldOffset,
+        configuration: AffineBoundConfiguration,
+    ) -> Self {
+        Self {
+            source_id,
+            location,
+            group_id,
+            side,
+            minimum_offset,
+            configuration,
+        }
+    }
+
+    /// Returns the stable caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the finite sampled location in the declared input frame.
+    pub fn location(&self) -> Point3 {
+        self.location
+    }
+
+    /// Returns the referenced shared level set.
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+
+    /// Returns the explicitly declared field-value side.
+    pub fn side(&self) -> PointToLevelSetSide {
+        self.side
+    }
+
+    /// Returns the strictly positive field-value offset.
+    pub fn minimum_offset(&self) -> MinimumFieldOffset {
+        self.minimum_offset
+    }
+
+    /// Reports whether this relation owns an explicit violation channel.
+    pub fn is_soft(&self) -> bool {
+        self.configuration.is_soft()
+    }
+
+    pub(crate) fn configuration(&self) -> AffineBoundConfiguration {
+        self.configuration
+    }
+}
+
 /// The explicit mapping from stratigraphic age to scalar-field value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1642,6 +2047,22 @@ impl private::Sealed for DirectionalDerivativeInterval {}
 impl ProblemInput for DirectionalDerivativeInterval {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
         builder.add_directional_derivative_interval(self)
+    }
+}
+
+impl private::Sealed for FieldSeparationInterval {}
+
+impl ProblemInput for FieldSeparationInterval {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_field_separation_interval(self)
+    }
+}
+
+impl private::Sealed for PointToLevelSetRelation {}
+
+impl ProblemInput for PointToLevelSetRelation {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_point_to_level_set_relation(self)
     }
 }
 
