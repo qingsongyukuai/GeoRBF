@@ -10,6 +10,7 @@ use georbf::observation::{
     TangentDirectionObservation,
 };
 use georbf::problem::{AddError, BuildError, ProblemInput};
+use georbf::relation::AdditiveFieldGauge;
 use georbf::{GroupId, ProblemBuilder, SourceId};
 
 fn point(x: f64, y: f64, z: f64) -> Point3 {
@@ -387,10 +388,18 @@ fn zero_gradient_satisfies_a_soft_tangent_without_polarity_or_slope() {
 #[test]
 fn covariance_groups_are_complete_same_dimension_atomic_problem_inputs() {
     let empty = CovarianceGroupBuilder::new(GroupId::new("empty"));
+    let empty_failure = empty
+        .build(CovarianceMatrix::try_new([[1.0]]).unwrap())
+        .expect_err("an empty group is incomplete");
     assert_eq!(
-        empty.build(CovarianceMatrix::try_new([[1.0]]).unwrap()),
-        Err(CovarianceGroupBuildError::EmptyGroup)
+        empty_failure.error(),
+        &CovarianceGroupBuildError::EmptyGroup
     );
+    let (mut repaired_empty, original_covariance) = empty_failure.into_parts();
+    repaired_empty
+        .add_field_value_member(SourceId::new("repaired/member"), point(0.0, 0.0, 0.0), 1.0)
+        .unwrap();
+    assert!(repaired_empty.build(original_covariance).is_ok());
 
     let mut draft = CovarianceGroupBuilder::new(GroupId::new("derivative-group"));
     draft
@@ -433,12 +442,26 @@ fn covariance_groups_are_complete_same_dimension_atomic_problem_inputs() {
             vector(0.0, 0.0, 0.0),
         )
         .unwrap();
+    let wrong_dimension_failure = wrong_dimension
+        .build(CovarianceMatrix::try_new([[1.0, 0.0], [0.0, 1.0]]).unwrap())
+        .expect_err("the covariance does not cover all three gradient components");
     assert_eq!(
-        wrong_dimension.build(CovarianceMatrix::try_new([[1.0, 0.0], [0.0, 1.0]]).unwrap()),
-        Err(CovarianceGroupBuildError::CovarianceDimensionMismatch {
+        wrong_dimension_failure.error(),
+        &CovarianceGroupBuildError::CovarianceDimensionMismatch {
             expected: 3,
             actual: 2,
-        })
+        }
+    );
+    let (wrong_dimension, rejected_covariance) = wrong_dimension_failure.into_parts();
+    assert_eq!(rejected_covariance.dimension(), 2);
+    assert!(
+        wrong_dimension
+            .build(
+                CovarianceMatrix::try_new([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],])
+                    .unwrap()
+            )
+            .is_ok(),
+        "a failed build retains the complete draft for repair"
     );
 
     let covariance = CovarianceMatrix::try_new([
@@ -640,6 +663,52 @@ fn conflicting_soft_gradients_increase_objective_without_a_conflict_diagnosis() 
             .map(|assessment| assessment.loss())
             .sum::<f64>()
             > 0.0
+    );
+}
+
+#[test]
+fn covariance_group_field_value_anchor_keeps_an_additive_gauge_out_of_the_solver() {
+    let anchor_location = point(0.0, 0.0, 0.0);
+    let mut group = CovarianceGroupBuilder::new(GroupId::new("absolute-statistical-group"));
+    group
+        .add_field_value_member(SourceId::new("soft-anchor"), anchor_location, 2.0)
+        .unwrap();
+
+    let mut builder = problem_builder();
+    builder
+        .add(
+            group
+                .build(CovarianceMatrix::try_new([[1.0]]).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    builder
+        .add(GradientObservation::new(
+            SourceId::new("complete-gradient"),
+            anchor_location,
+            vector(1.0, -0.5, 0.25),
+        ))
+        .unwrap();
+    builder
+        .add(
+            AdditiveFieldGauge::at_point(SourceId::new("reporting-gauge"), anchor_location, 2.0)
+                .unwrap(),
+        )
+        .unwrap();
+    builder
+        .set_field_energy_normalization(FieldEnergyNormalization::try_new(1.0).unwrap())
+        .unwrap();
+
+    let fit = builder.build().unwrap().fit().unwrap();
+    let gauge = fit
+        .report()
+        .hard_relations()
+        .iter()
+        .find(|relation| relation.source_id() == &SourceId::new("reporting-gauge"))
+        .expect("the report retains the verification-only gauge");
+    assert!(
+        gauge.scaled_kkt_tolerance().is_none(),
+        "a statistical field anchor already fixes the additive representative"
     );
 }
 

@@ -171,6 +171,8 @@ problem.set_field_energy_normalization(FieldEnergyNormalization::try_new(3.0)?)?
 `FitReport::covariance_groups` preserves member `SourceId`, ordered original-unit
 residuals, whitened recovery evidence, and only the unique group-level objective
 contribution; it deliberately exposes no invented per-member contribution.
+If group completion fails, `CovarianceGroupBuildFailure::into_parts` returns the
+unchanged draft and covariance for repair and retry.
 
 ```compile_fail
 struct CustomInput;

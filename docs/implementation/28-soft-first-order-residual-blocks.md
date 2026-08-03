@@ -28,20 +28,24 @@ accepts Field Value, complete Gradient, or Tangent members. The first member
 fixes the physical residual dimension; later members of another dimension and
 duplicate member `SourceId` values are rejected without mutating the draft. A
 completed group rejects an empty member set or a covariance dimension different
-from the flattened residual dimension. `ProblemBuilder::add` then atomically
-checks the complete group's `GroupId` and every member `SourceId` against all
-other problem inputs. Because only the group builder can create group members,
-hard relations and independently configured soft relations cannot be mixed into
-the group or duplicated outside it.
+from the flattened residual dimension. That failure retains both the complete
+draft and rejected covariance through `CovarianceGroupBuildFailure::into_parts`,
+so either input can be repaired without reconstructing accepted members.
+`ProblemBuilder::add` then atomically checks the complete group's `GroupId` and
+every member `SourceId` against all other problem inputs. Because only the group
+builder can create group members, hard relations and independently configured
+soft relations cannot be mixed into the group or duplicated outside it.
 
 ## Canonical objective and numerical path
 
 Canonical soft equality channels remain scalar physical functionals with stable
 source, group, relation, residual, and role provenance. The canonical objective
 now references ordered residual blocks rather than assuming one independent
-loss per scalar row. A block stores one explicit loss and either a diagonal
-isotropic precision or the full inverse covariance. Covariance cross terms enter
-the symmetric faer KKT as `A^T P A` and `A^T P target`; the route therefore
+loss per scalar row. Typed block/member kinds retain observation identity and
+covariance-member boundaries through recovery instead of reconstructing them
+from role strings. A block stores one explicit loss and either a diagonal
+isotropic precision or the full inverse covariance. Covariance cross terms
+enter the symmetric faer KKT as `A^T P A` and `A^T P target`; the route therefore
 remains the form-driven quadratic-objective-plus-affine-equalities path.
 
 Covariance Cholesky whitening, its inverse, precision formation, coordinate
@@ -77,8 +81,9 @@ such a split non-identifiable.
 boundaries, atomic group construction and problem insertion, Euclidean vector
 penalties under a non-identity anisotropy metric, single-observation covariance
 cross terms, scalar Tangent semantics including zero gradient, named
-cross-member covariance, contradictory soft evidence, public model queries,
-and rotation/reflection plus uniform length/field-unit covariance.
+cross-member covariance, repair after group-build failure, statistical
+field-value anchoring of additive gauges, contradictory soft evidence, public
+model queries, and rotation/reflection plus uniform length/field-unit covariance.
 
 `src/cubic_equality.rs` includes a narrow recovery corruption case proving that
 a damaged whitening inverse is rejected without a model. The issue #27 scalar

@@ -11,8 +11,9 @@ use crate::capacity::{
 use crate::cubic_equality::{
     AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
     CanonicalHardEquality, CanonicalRelationToleranceEvidence, CanonicalSoftEquality,
-    CanonicalSoftLoss, CanonicalSoftObjective, CpdEvidence, CubicCanonicalProblem,
-    CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
+    CanonicalSoftLoss, CanonicalSoftObjective, CanonicalSoftResidualBlockKind,
+    CanonicalSoftResidualMemberKind, CpdEvidence, CubicCanonicalProblem, CubicEqualityCore,
+    CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
     RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
     RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
@@ -1347,6 +1348,7 @@ struct ScalarObservation {
 struct ObservationResidualBlock {
     components: Vec<ScalarObservation>,
     configuration: ResidualBlockConfiguration,
+    kind: CanonicalSoftResidualMemberKind,
 }
 
 #[derive(Debug, Clone)]
@@ -1416,6 +1418,7 @@ fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<Observa
                         ResidualBlockConfiguration::StandardDeviation(standard_deviation)
                     }
                 },
+                kind: CanonicalSoftResidualMemberKind::FieldValue,
             },
             ObservationInput::Gradient(observation) => ObservationResidualBlock {
                 components: observation
@@ -1446,6 +1449,7 @@ fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<Observa
                         ResidualBlockConfiguration::Covariance(covariance.clone())
                     }
                 },
+                kind: CanonicalSoftResidualMemberKind::Gradient,
             },
             ObservationInput::TangentDirection(observation) => ObservationResidualBlock {
                 components: vec![ScalarObservation {
@@ -1469,6 +1473,7 @@ fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<Observa
                         ResidualBlockConfiguration::StandardDeviation(standard_deviation)
                     }
                 },
+                kind: CanonicalSoftResidualMemberKind::Tangent,
             },
         })
         .collect()
@@ -1521,6 +1526,19 @@ fn covariance_group_components(
         .collect()
 }
 
+fn covariance_group_member_kinds(
+    members: &[CovarianceGroupMember],
+) -> Vec<CanonicalSoftResidualMemberKind> {
+    members
+        .iter()
+        .map(|member| match member {
+            CovarianceGroupMember::FieldValue(_) => CanonicalSoftResidualMemberKind::FieldValue,
+            CovarianceGroupMember::Gradient(_) => CanonicalSoftResidualMemberKind::Gradient,
+            CovarianceGroupMember::Tangent(_) => CanonicalSoftResidualMemberKind::Tangent,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 struct SourceHardRelation {
     equality: CanonicalHardEquality,
@@ -1558,6 +1576,7 @@ impl EqualityLowering {
         equalities: Vec<CanonicalSoftEquality>,
         loss: CanonicalSoftLoss,
         covariance_group: Option<GroupId>,
+        block_kind: CanonicalSoftResidualBlockKind,
     ) {
         self.canonical_soft_objectives
             .push(CanonicalSoftObjective::new_block(
@@ -1567,6 +1586,7 @@ impl EqualityLowering {
                     .collect(),
                 loss,
                 covariance_group,
+                block_kind,
             ));
         self.canonical_soft_equalities.extend(equalities);
     }
@@ -2013,6 +2033,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 block.components.iter().map(soft_field_equality).collect(),
                 loss,
                 None,
+                CanonicalSoftResidualBlockKind::Independent(block.kind),
             );
             continue;
         }
@@ -2049,6 +2070,9 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 group.covariance().entries().to_vec(),
             ),
             Some(group.group_id().clone()),
+            CanonicalSoftResidualBlockKind::CovarianceGroup {
+                members: covariance_group_member_kinds(group.members()),
+            },
         );
     }
 
@@ -2115,7 +2139,13 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         .inner
         .observations
         .iter()
-        .any(|observation| matches!(observation, ObservationInput::FieldValue(_)));
+        .any(|observation| matches!(observation, ObservationInput::FieldValue(_)))
+        || snapshot.inner.covariance_groups.iter().any(|group| {
+            group
+                .members()
+                .iter()
+                .any(|member| matches!(member, CovarianceGroupMember::FieldValue(_)))
+        });
     let primary_gauge = (!has_absolute_observation)
         .then(|| snapshot.inner.additive_field_gauges.first())
         .flatten()
@@ -2397,13 +2427,13 @@ fn soft_field_value_assessment(
     objective: &crate::cubic_equality::RecoveredSoftObjective,
     relations: &[crate::cubic_equality::RecoveredSoftEquality],
 ) -> Option<SoftFieldValueAssessment> {
-    if objective.covariance_group.is_some() || objective.canonical_indices.len() != 1 {
+    if objective.block_kind
+        != CanonicalSoftResidualBlockKind::Independent(CanonicalSoftResidualMemberKind::FieldValue)
+        || objective.canonical_indices.len() != 1
+    {
         return None;
     }
     let relation = &relations[objective.canonical_indices[0]];
-    if relation.provenance.semantic_role().as_str() != "field-value-observation/value" {
-        return None;
-    }
     let (quadratic_penalty, standard_deviation) = match &objective.loss {
         CanonicalSoftLoss::QuadraticPenalty { weight } => (
             Some(
@@ -2437,7 +2467,10 @@ fn soft_gradient_assessment(
     objective: &crate::cubic_equality::RecoveredSoftObjective,
     relations: &[crate::cubic_equality::RecoveredSoftEquality],
 ) -> Option<SoftGradientAssessment> {
-    if objective.covariance_group.is_some() || objective.canonical_indices.len() != 3 {
+    if objective.block_kind
+        != CanonicalSoftResidualBlockKind::Independent(CanonicalSoftResidualMemberKind::Gradient)
+        || objective.canonical_indices.len() != 3
+    {
         return None;
     }
     let components = objective
@@ -2445,11 +2478,10 @@ fn soft_gradient_assessment(
         .iter()
         .map(|index| &relations[*index])
         .collect::<Vec<_>>();
-    if components.iter().enumerate().any(|(axis, relation)| {
-        relation.provenance.semantic_role().as_str()
-            != format!("gradient-observation/component/{axis}")
-            || relation.provenance.source() != components[0].provenance.source()
-    }) {
+    if components
+        .iter()
+        .any(|relation| relation.provenance.source() != components[0].provenance.source())
+    {
         return None;
     }
     let vector = |values: [f64; 3]| {
@@ -2511,15 +2543,13 @@ fn soft_tangent_assessment(
     objective: &crate::cubic_equality::RecoveredSoftObjective,
     relations: &[crate::cubic_equality::RecoveredSoftEquality],
 ) -> Option<SoftTangentAssessment> {
-    if objective.covariance_group.is_some() || objective.canonical_indices.len() != 1 {
-        return None;
-    }
-    let relation = &relations[objective.canonical_indices[0]];
-    if relation.provenance.semantic_role().as_str()
-        != "tangent-direction-observation/directional-derivative"
+    if objective.block_kind
+        != CanonicalSoftResidualBlockKind::Independent(CanonicalSoftResidualMemberKind::Tangent)
+        || objective.canonical_indices.len() != 1
     {
         return None;
     }
+    let relation = &relations[objective.canonical_indices[0]];
     let (quadratic_penalty, standard_deviation) = match &objective.loss {
         CanonicalSoftLoss::QuadraticPenalty { weight } => (
             Some(QuadraticPenalty::try_new(*weight).expect("canonical penalty stays checked")),
@@ -2550,6 +2580,12 @@ fn covariance_group_assessment(
     relations: &[crate::cubic_equality::RecoveredSoftEquality],
 ) -> Option<CovarianceGroupAssessment> {
     let group_id = objective.covariance_group.clone()?;
+    let CanonicalSoftResidualBlockKind::CovarianceGroup {
+        members: member_kinds,
+    } = &objective.block_kind
+    else {
+        return None;
+    };
     let (dimension, covariance_entries) = objective.loss.covariance_entries()?;
     let covariance = CovarianceMatrix::try_from_rows(
         covariance_entries
@@ -2563,26 +2599,26 @@ fn covariance_group_assessment(
         .iter()
         .map(|index| &relations[*index])
         .collect::<Vec<_>>();
-    let mut members = Vec::new();
+    let mut members = Vec::with_capacity(member_kinds.len());
     let mut start = 0;
-    while start < components.len() {
-        let source_id = components[start].provenance.source();
-        let mut end = start + 1;
-        while end < components.len() && components[end].provenance.source() == source_id {
-            end += 1;
+    for member_kind in member_kinds {
+        let end = start + member_kind.component_count();
+        let member_components = components.get(start..end)?;
+        let source_id = member_components[0].provenance.source();
+        if member_components
+            .iter()
+            .any(|relation| relation.provenance.source() != source_id)
+        {
+            return None;
         }
-        let member_components = &components[start..end];
-        let semantic_role = if member_components.len() == 3
-            && member_components
-                .iter()
-                .enumerate()
-                .all(|(axis, relation)| {
-                    relation.provenance.semantic_role().as_str()
-                        == format!("gradient-observation/component/{axis}")
-                }) {
-            SemanticRolePath::new("gradient-observation/vector")
-        } else {
-            member_components[0].provenance.semantic_role().clone()
+        let semantic_role = match member_kind {
+            CanonicalSoftResidualMemberKind::Gradient => {
+                SemanticRolePath::new("gradient-observation/vector")
+            }
+            CanonicalSoftResidualMemberKind::FieldValue
+            | CanonicalSoftResidualMemberKind::Tangent => {
+                member_components[0].provenance.semantic_role().clone()
+            }
         };
         let residual_dimension = match member_components[0].dimension {
             FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
@@ -2606,6 +2642,9 @@ fn covariance_group_assessment(
                 .collect(),
         });
         start = end;
+    }
+    if start != components.len() {
+        return None;
     }
     Some(CovarianceGroupAssessment {
         group_id,

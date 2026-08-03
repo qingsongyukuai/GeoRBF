@@ -1422,27 +1422,78 @@ impl CanonicalSoftEquality {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalSoftResidualMemberKind {
+    FieldValue,
+    Gradient,
+    Tangent,
+}
+
+impl CanonicalSoftResidualMemberKind {
+    pub(crate) fn component_count(self) -> usize {
+        match self {
+            Self::FieldValue | Self::Tangent => 1,
+            Self::Gradient => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CanonicalSoftResidualBlockKind {
+    Independent(CanonicalSoftResidualMemberKind),
+    CovarianceGroup {
+        members: Vec<CanonicalSoftResidualMemberKind>,
+    },
+}
+
+impl CanonicalSoftResidualBlockKind {
+    fn is_valid(&self, residual_count: usize, covariance_group: Option<&GroupId>) -> bool {
+        match self {
+            Self::Independent(member) => {
+                covariance_group.is_none() && member.component_count() == residual_count
+            }
+            Self::CovarianceGroup { members } => {
+                covariance_group.is_some()
+                    && !members.is_empty()
+                    && members.iter().try_fold(0_usize, |count, member| {
+                        count.checked_add(member.component_count())
+                    }) == Some(residual_count)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalSoftObjective {
     residuals: Vec<ResidualId>,
     loss: CanonicalSoftLoss,
     covariance_group: Option<GroupId>,
+    block_kind: CanonicalSoftResidualBlockKind,
 }
 
 impl CanonicalSoftObjective {
     pub(crate) fn new(residual: ResidualId, loss: CanonicalSoftLoss) -> Self {
-        Self::new_block(vec![residual], loss, None)
+        Self::new_block(
+            vec![residual],
+            loss,
+            None,
+            CanonicalSoftResidualBlockKind::Independent(
+                CanonicalSoftResidualMemberKind::FieldValue,
+            ),
+        )
     }
 
     pub(crate) fn new_block(
         residuals: Vec<ResidualId>,
         loss: CanonicalSoftLoss,
         covariance_group: Option<GroupId>,
+        block_kind: CanonicalSoftResidualBlockKind,
     ) -> Self {
         Self {
             residuals,
             loss,
             covariance_group,
+            block_kind,
         }
     }
 
@@ -1508,6 +1559,7 @@ struct AssembledSoftObjectiveBlock {
     whitening: Vec<f64>,
     inverse_whitening: Vec<f64>,
     covariance_group: Option<GroupId>,
+    block_kind: CanonicalSoftResidualBlockKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1617,6 +1669,7 @@ pub(crate) struct RecoveredSoftObjective {
     pub(crate) canonical_indices: Vec<usize>,
     pub(crate) loss: CanonicalSoftLoss,
     pub(crate) covariance_group: Option<GroupId>,
+    pub(crate) block_kind: CanonicalSoftResidualBlockKind,
     pub(crate) whitened_residual: Vec<f64>,
     pub(crate) objective_contribution: f64,
     pub(crate) whitening_round_trip_error: f64,
@@ -1889,10 +1942,13 @@ impl CubicEqualityCore {
                 .iter()
                 .zip(objective_residuals)
                 .any(|(relation, residual)| relation.provenance.residual() != residual)
-            || problem
-                .soft_objectives
-                .iter()
-                .any(|objective| !objective.loss.is_valid(objective.residuals.len()))
+            || problem.soft_objectives.iter().any(|objective| {
+                !objective.loss.is_valid(objective.residuals.len())
+                    || !objective.block_kind.is_valid(
+                        objective.residuals.len(),
+                        objective.covariance_group.as_ref(),
+                    )
+            })
         {
             return Err(CubicEqualityFailure::NonFiniteTarget {
                 equality: problem.equalities.len(),
@@ -1969,6 +2025,7 @@ fn solve_standard_form(
                 whitening: objective.loss.whitening_matrix(dimension),
                 inverse_whitening: objective.loss.inverse_whitening_matrix(dimension),
                 covariance_group: objective.covariance_group.clone(),
+                block_kind: objective.block_kind.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -2234,6 +2291,7 @@ fn verifies_assembled_provenance_and_rows(
                 && block.residuals == objective.residuals
                 && block.targets.len() == dimension
                 && block.covariance_group == objective.covariance_group
+                && block.block_kind == objective.block_kind
                 && block.canonical_precision == objective.loss.precision_matrix(dimension)
                 && block.standard_precision == block.canonical_precision
                 && block.whitening == objective.loss.whitening_matrix(dimension)
@@ -2384,6 +2442,7 @@ fn recover_and_verify(
                 canonical_indices: block.canonical_indices.clone(),
                 loss: objective.loss.clone(),
                 covariance_group: objective.covariance_group.clone(),
+                block_kind: objective.block_kind.clone(),
                 objective_contribution: 0.5
                     * whitened_residual
                         .iter()
@@ -3786,6 +3845,12 @@ mod tests {
                     .collect(),
                 CanonicalSoftLoss::covariance(2, vec![1.0, 0.25, 0.25, 2.0]),
                 Some(GroupId::new("damaged-whitening")),
+                CanonicalSoftResidualBlockKind::CovarianceGroup {
+                    members: vec![
+                        CanonicalSoftResidualMemberKind::FieldValue,
+                        CanonicalSoftResidualMemberKind::FieldValue,
+                    ],
+                },
             ));
         problem.soft_equalities = soft_equalities;
         let mut representation = CubicRepresentation::new(

@@ -300,15 +300,20 @@ impl CovarianceGroupBuilder {
     pub fn build(
         self,
         covariance: CovarianceMatrix,
-    ) -> Result<CovarianceGroup, CovarianceGroupBuildError> {
+    ) -> Result<CovarianceGroup, CovarianceGroupBuildFailure> {
         if self.members.is_empty() {
-            return Err(CovarianceGroupBuildError::EmptyGroup);
+            return Err(CovarianceGroupBuildFailure::new(
+                self,
+                covariance,
+                CovarianceGroupBuildError::EmptyGroup,
+            ));
         }
         if covariance.dimension() != self.scalar_residual_count {
-            return Err(CovarianceGroupBuildError::CovarianceDimensionMismatch {
+            let error = CovarianceGroupBuildError::CovarianceDimensionMismatch {
                 expected: self.scalar_residual_count,
                 actual: covariance.dimension(),
-            });
+            };
+            return Err(CovarianceGroupBuildFailure::new(self, covariance, error));
         }
         Ok(CovarianceGroup {
             group_id: self.group_id,
@@ -424,6 +429,50 @@ impl fmt::Display for CovarianceGroupBuildError {
 }
 
 impl Error for CovarianceGroupBuildError {}
+
+/// A failed covariance-group build that retains the complete repairable draft.
+#[derive(Debug)]
+pub struct CovarianceGroupBuildFailure {
+    builder: CovarianceGroupBuilder,
+    covariance: CovarianceMatrix,
+    error: CovarianceGroupBuildError,
+}
+
+impl CovarianceGroupBuildFailure {
+    fn new(
+        builder: CovarianceGroupBuilder,
+        covariance: CovarianceMatrix,
+        error: CovarianceGroupBuildError,
+    ) -> Self {
+        Self {
+            builder,
+            covariance,
+            error,
+        }
+    }
+
+    /// Returns the structured reason the group could not be completed.
+    pub fn error(&self) -> &CovarianceGroupBuildError {
+        &self.error
+    }
+
+    /// Recovers both inputs so the caller can repair either one and retry.
+    pub fn into_parts(self) -> (CovarianceGroupBuilder, CovarianceMatrix) {
+        (self.builder, self.covariance)
+    }
+}
+
+impl fmt::Display for CovarianceGroupBuildFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl Error for CovarianceGroupBuildFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
 
 /// A non-statistical weight for one scalar or Euclidean-vector residual.
 #[derive(Debug, Clone, Copy, PartialEq)]
