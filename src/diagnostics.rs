@@ -308,6 +308,51 @@ impl RelationGraphConflictEvidence {
     }
 }
 
+/// Complete provenance for an impossible hard shared-level relation cycle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedLevelRelationConflictEvidence {
+    source_ids: Box<[SourceId]>,
+    group_ids: Box<[GroupId]>,
+    semantic_roles: Box<[SemanticRolePath]>,
+    backend_invoked: bool,
+}
+
+impl SharedLevelRelationConflictEvidence {
+    pub(crate) fn new(
+        source_ids: Vec<SourceId>,
+        group_ids: Vec<GroupId>,
+        semantic_roles: Vec<SemanticRolePath>,
+    ) -> Self {
+        debug_assert_eq!(source_ids.len(), semantic_roles.len());
+        Self {
+            source_ids: source_ids.into(),
+            group_ids: group_ids.into(),
+            semantic_roles: semantic_roles.into(),
+            backend_invoked: false,
+        }
+    }
+
+    /// Returns every caller-owned relation source in stable order.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns every shared level participating in the proof in stable order.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Returns the stable semantic role paired with each reported source.
+    pub fn semantic_roles(&self) -> &[SemanticRolePath] {
+        &self.semantic_roles
+    }
+
+    /// Reports whether a backend was invoked before proving the contradiction.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+}
+
 /// Physical dimension of one scalar hard-relation residual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

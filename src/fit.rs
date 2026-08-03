@@ -39,9 +39,9 @@ use crate::diagnostics::{
     LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
     RankEvidenceDomain, RankEvidenceParts, RecoveryVerificationEvidence,
     RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
-    ScalingFailureReason, ScalingSummary, SideConditionEvidence, SolveAttemptKind,
-    SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
-    SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
+    ScalingFailureReason, ScalingSummary, SharedLevelRelationConflictEvidence,
+    SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts,
+    SolveAttemptTermination, SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence,
 };
 use crate::functional::{
@@ -70,6 +70,8 @@ use crate::observation::{
 use crate::problem::{ProblemSnapshot, ThreadBudget};
 use crate::relation::{
     AdditiveFieldGaugeReference, AffineBoundConfiguration, AffineBoundSide, LinearViolationPenalty,
+    MinimumFieldSeparation, SharedLevelRelationInput, SharedLevelRelationKind,
+    StratigraphicFieldDirection,
 };
 
 /// Successful fit output: one accepted model and its complete report.
@@ -362,6 +364,127 @@ pub struct DirectionalDerivativeIntervalAssessment {
     quadratic_penalty: Option<QuadraticPenalty>,
     linear_violation_penalty: Option<LinearViolationPenalty>,
     loss: Option<f64>,
+}
+
+/// Physical recovery assessment for one relation between semantic shared levels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedLevelRelationAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    kind: SharedLevelRelationKind,
+    first_group_id: GroupId,
+    second_group_id: GroupId,
+    lower_field_group_id: GroupId,
+    upper_field_group_id: GroupId,
+    field_direction: Option<StratigraphicFieldDirection>,
+    minimum_separation: Option<MinimumFieldSeparation>,
+    recovered_first_value: f64,
+    recovered_second_value: f64,
+    recovered_field_separation: f64,
+    slack: f64,
+    violation: f64,
+    tolerance: f64,
+    active_state: BoundActiveState,
+    quadratic_penalty: Option<QuadraticPenalty>,
+    linear_violation_penalty: Option<LinearViolationPenalty>,
+    loss: Option<f64>,
+}
+
+impl SharedLevelRelationAssessment {
+    /// Returns the caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable semantic role of this relation family.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the caller-declared relation kind.
+    pub fn kind(&self) -> SharedLevelRelationKind {
+        self.kind
+    }
+
+    /// Returns the first declared group: younger, older, or lower by relation kind.
+    pub fn first_group_id(&self) -> &GroupId {
+        &self.first_group_id
+    }
+
+    /// Returns the second declared group: older, younger, or upper by relation kind.
+    pub fn second_group_id(&self) -> &GroupId {
+        &self.second_group_id
+    }
+
+    /// Returns the group on the lower-field-value side after semantic orientation.
+    pub fn lower_field_group_id(&self) -> &GroupId {
+        &self.lower_field_group_id
+    }
+
+    /// Returns the group on the upper-field-value side after semantic orientation.
+    pub fn upper_field_group_id(&self) -> &GroupId {
+        &self.upper_field_group_id
+    }
+
+    /// Returns the explicit age-to-field mapping for age relations.
+    pub fn field_direction(&self) -> Option<StratigraphicFieldDirection> {
+        self.field_direction
+    }
+
+    /// Returns the strict minimum for age relations; non-strict order returns `None`.
+    pub fn minimum_separation(&self) -> Option<MinimumFieldSeparation> {
+        self.minimum_separation
+    }
+
+    /// Returns the recovered value of the first declared group.
+    pub fn recovered_first_value(&self) -> f64 {
+        self.recovered_first_value
+    }
+
+    /// Returns the recovered value of the second declared group.
+    pub fn recovered_second_value(&self) -> f64 {
+        self.recovered_second_value
+    }
+
+    /// Returns upper-field value minus lower-field value in physical field units.
+    pub fn recovered_field_separation(&self) -> f64 {
+        self.recovered_field_separation
+    }
+
+    /// Returns the nonnegative satisfaction slack in field-value units.
+    pub fn slack(&self) -> f64 {
+        self.slack
+    }
+
+    /// Returns the nonnegative violation in field-value units.
+    pub fn violation(&self) -> f64 {
+        self.violation
+    }
+
+    /// Returns the physical acceptance tolerance.
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
+    /// Returns whether the relation is active at the accepted tolerance.
+    pub fn active_state(&self) -> BoundActiveState {
+        self.active_state
+    }
+
+    /// Returns the configured quadratic violation penalty when present.
+    pub fn quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.quadratic_penalty
+    }
+
+    /// Returns the configured linear violation penalty when present.
+    pub fn linear_violation_penalty(&self) -> Option<LinearViolationPenalty> {
+        self.linear_violation_penalty
+    }
+
+    /// Returns this soft relation's objective contribution; hard relations return `None`.
+    pub fn loss(&self) -> Option<f64> {
+        self.loss
+    }
 }
 
 impl DirectionalDerivativeIntervalAssessment {
@@ -881,6 +1004,7 @@ pub struct FitReport {
     hard_relations: Vec<HardRelationAssessment>,
     field_value_bounds: Vec<FieldValueBoundAssessment>,
     directional_derivative_intervals: Vec<DirectionalDerivativeIntervalAssessment>,
+    shared_level_relations: Vec<SharedLevelRelationAssessment>,
     soft_field_values: Vec<SoftFieldValueAssessment>,
     soft_gradients: Vec<SoftGradientAssessment>,
     soft_tangents: Vec<SoftTangentAssessment>,
@@ -893,6 +1017,7 @@ pub struct FitReport {
     recovery_verification: Option<RecoveryVerificationEvidence>,
     direct_input_conflicts: Vec<DirectInputConflictEvidence>,
     relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
+    shared_level_relation_conflicts: Vec<SharedLevelRelationConflictEvidence>,
     execution_failure: Option<AttemptFailureEvidence>,
     cubic_analysis: Option<CubicAnalysisEvidence>,
     backend_rank: Option<RankEvidence>,
@@ -945,6 +1070,11 @@ impl FitReport {
     /// Returns Directional Derivative Interval sides in SourceId/role order.
     pub fn directional_derivative_intervals(&self) -> &[DirectionalDerivativeIntervalAssessment] {
         &self.directional_derivative_intervals
+    }
+
+    /// Returns shared-level relation assessments in stable SourceId order.
+    pub fn shared_level_relations(&self) -> &[SharedLevelRelationAssessment] {
+        &self.shared_level_relations
     }
 
     /// Returns soft Field Value assessments in stable SourceId order.
@@ -1015,6 +1145,16 @@ impl FitReport {
     /// Returns every hard relation-graph conflict in stable semantic/source order.
     pub fn relation_graph_conflicts(&self) -> &[RelationGraphConflictEvidence] {
         &self.relation_graph_conflicts
+    }
+
+    /// Returns the first impossible hard shared-level relation cycle.
+    pub fn shared_level_relation_conflict(&self) -> Option<&SharedLevelRelationConflictEvidence> {
+        self.shared_level_relation_conflicts.first()
+    }
+
+    /// Returns every impossible hard shared-level relation cycle in stable order.
+    pub fn shared_level_relation_conflicts(&self) -> &[SharedLevelRelationConflictEvidence] {
+        &self.shared_level_relation_conflicts
     }
 
     /// Returns the terminal backend-contract or numerical failure evidence.
@@ -1099,6 +1239,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         .len()
         .checked_add(snapshot.inner.field_value_bounds.len())
         .and_then(|count| count.checked_add(snapshot.inner.directional_derivative_intervals.len()))
+        .and_then(|count| count.checked_add(snapshot.inner.shared_level_relations.len()))
         .unwrap_or(usize::MAX);
     let source_identifier_bytes = source_identifier_bytes(snapshot).unwrap_or(usize::MAX);
     let conservative_problem_size = conservative_problem_size(
@@ -1124,6 +1265,10 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                             + usize::from(interval.upper().is_some())
                     }),
             )
+            .chain(std::iter::repeat_n(
+                1_usize,
+                snapshot.inner.shared_level_relations.len(),
+            ))
             .sum(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
@@ -1195,6 +1340,13 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                     .iter()
                     .map(|interval| interval.source_id().clone()),
             )
+            .chain(
+                snapshot
+                    .inner
+                    .shared_level_relations
+                    .iter()
+                    .map(|relation| relation.source_id().clone()),
+            )
             .collect::<Vec<_>>();
         source_ids.sort();
         let group_ids = snapshot
@@ -1256,6 +1408,8 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     }
     preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
     preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
+    preflight_report.shared_level_relation_conflicts =
+        lowering.shared_level_relation_conflicts.clone();
     let capacity_failure = match source_lifecycle_capacity {
         Ok(()) if lowering.canonical_affine_inequalities.is_empty() => plan_snapshot_capacity(
             &lowering,
@@ -1294,7 +1448,10 @@ fn primary_preflight_diagnosis(report: &FitReport) -> Option<ProblemDiagnosis> {
     if !report.uninformative_shared_level_sets.is_empty() {
         return Some(ProblemDiagnosis::UninformativeSharedLevelSet);
     }
-    if !report.direct_input_conflicts.is_empty() || !report.relation_graph_conflicts.is_empty() {
+    if !report.direct_input_conflicts.is_empty()
+        || !report.relation_graph_conflicts.is_empty()
+        || !report.shared_level_relation_conflicts.is_empty()
+    {
         return Some(ProblemDiagnosis::DirectInputConflict);
     }
     if report.unidentified_additive_gauge.is_some() {
@@ -1319,6 +1476,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         hard_relations: Vec::new(),
         field_value_bounds: Vec::new(),
         directional_derivative_intervals: Vec::new(),
+        shared_level_relations: Vec::new(),
         soft_field_values: Vec::new(),
         soft_gradients: Vec::new(),
         soft_tangents: Vec::new(),
@@ -1331,6 +1489,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         recovery_verification: None,
         direct_input_conflicts: Vec::new(),
         relation_graph_conflicts: Vec::new(),
+        shared_level_relation_conflicts: Vec::new(),
         execution_failure: None,
         cubic_analysis: None,
         backend_rank: None,
@@ -1398,14 +1557,27 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
                 Some((hard.checked_add(1)?, soft))
             }
         })?;
+    let (level_relation_hard, level_relation_soft) =
+        snapshot.inner.shared_level_relations.iter().try_fold(
+            (0_usize, 0_usize),
+            |(hard, soft), relation| {
+                if relation.is_soft() {
+                    Some((hard, soft.checked_add(1)?))
+                } else {
+                    Some((hard.checked_add(1)?, soft))
+                }
+            },
+        )?;
     Some(ScalarRelationCounts {
         hard: observation_hard
             .checked_add(group_hard)?
             .checked_add(snapshot.inner.additive_field_gauges.len())?
-            .checked_add(bound_hard)?,
+            .checked_add(bound_hard)?
+            .checked_add(level_relation_hard)?,
         soft: observation_soft
             .checked_add(covariance_group_soft)?
-            .checked_add(bound_soft)?,
+            .checked_add(bound_soft)?
+            .checked_add(level_relation_soft)?,
     })
 }
 
@@ -1428,17 +1600,40 @@ fn quadratic_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
             )
         })
         .count();
+    let level_relation_terms = snapshot
+        .inner
+        .shared_level_relations
+        .iter()
+        .filter(|relation| {
+            matches!(
+                relation.configuration(),
+                AffineBoundConfiguration::QuadraticPenalty(_)
+            )
+        })
+        .count();
     independent
         .checked_add(snapshot.inner.covariance_groups.len())?
-        .checked_add(bound_terms)
+        .checked_add(bound_terms)?
+        .checked_add(level_relation_terms)
 }
 
 fn linear_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
-    Some(
-        affine_bound_sides(snapshot)
-            .filter(|side| {
+    let bound_terms = affine_bound_sides(snapshot)
+        .filter(|side| {
+            matches!(
+                side.configuration,
+                AffineBoundConfiguration::LinearViolationPenalty(_)
+            )
+        })
+        .count();
+    bound_terms.checked_add(
+        snapshot
+            .inner
+            .shared_level_relations
+            .iter()
+            .filter(|relation| {
                 matches!(
-                    side.configuration,
+                    relation.configuration(),
                     AffineBoundConfiguration::LinearViolationPenalty(_)
                 )
             })
@@ -1551,12 +1746,24 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
                 .checked_mul(multiplicity)
                 .and_then(|source_bytes| bytes.checked_add(source_bytes))
         })?;
+    let shared_level_relation_bytes =
+        snapshot
+            .inner
+            .shared_level_relations
+            .iter()
+            .try_fold(0_usize, |bytes, relation| {
+                bytes
+                    .checked_add(relation.source_id().as_str().len())
+                    .and_then(|bytes| bytes.checked_add(relation.first_group_id().as_str().len()))
+                    .and_then(|bytes| bytes.checked_add(relation.second_group_id().as_str().len()))
+            })?;
     observation_bytes
         .checked_add(shared_level_bytes)?
         .checked_add(covariance_group_bytes)?
         .checked_add(gauge_bytes)?
         .checked_add(bound_bytes)?
-        .checked_add(derivative_interval_bytes)
+        .checked_add(derivative_interval_bytes)?
+        .checked_add(shared_level_relation_bytes)
 }
 
 fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> bool {
@@ -1565,7 +1772,13 @@ fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> 
             gauge.reference(),
             AdditiveFieldGaugeReference::LevelSet(referenced) if referenced == group_id
         )
-    })
+    }) || snapshot
+        .inner
+        .shared_level_relations
+        .iter()
+        .any(|relation| {
+            relation.first_group_id() == group_id || relation.second_group_id() == group_id
+        })
 }
 
 fn conservative_problem_size(
@@ -2007,10 +2220,21 @@ struct SourceBoundRelation {
     kind: SourceBoundKind,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum SourceBoundKind {
     FieldValue,
-    DirectionalDerivative { direction: Vector3 },
+    DirectionalDerivative {
+        direction: Vector3,
+    },
+    SharedLevel {
+        kind: SharedLevelRelationKind,
+        first_group_id: GroupId,
+        second_group_id: GroupId,
+        lower_field_group_id: GroupId,
+        upper_field_group_id: GroupId,
+        field_direction: Option<StratigraphicFieldDirection>,
+        minimum_separation: Option<MinimumFieldSeparation>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2025,6 +2249,7 @@ struct EqualityLowering {
     canonical_bound_index_by_key: BTreeMap<CanonicalBoundKey, usize>,
     direct_input_conflicts: Vec<DirectInputConflictEvidence>,
     relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
+    shared_level_relation_conflicts: Vec<SharedLevelRelationConflictEvidence>,
     semantic_latents: Vec<SemanticLatentDefinition>,
 }
 
@@ -2041,6 +2266,7 @@ impl EqualityLowering {
             canonical_bound_index_by_key: BTreeMap::new(),
             direct_input_conflicts: Vec::new(),
             relation_graph_conflicts: Vec::new(),
+            shared_level_relation_conflicts: Vec::new(),
             semantic_latents: Vec::new(),
         }
     }
@@ -2127,7 +2353,7 @@ impl EqualityLowering {
                     .latent_coefficients()
                     .iter()
                     .map(|term| (term.latent, canonical_scalar_bits(term.coefficient)))
-                    .collect(),
+                    .collect::<Vec<_>>(),
                 side: inequality.sense(),
                 bound: canonical_scalar_bits(inequality.bound()),
             };
@@ -2306,6 +2532,13 @@ struct ComponentAbsoluteTarget {
     target: f64,
 }
 
+#[derive(Debug, Clone)]
+struct AbsoluteGroupProof {
+    target: f64,
+    source_ids: Vec<SourceId>,
+    group_ids: Vec<GroupId>,
+}
+
 #[derive(Debug, Default)]
 /// Equality components retain original absolute anchors, never derived offsets.
 struct CanonicalValueConstraintForest {
@@ -2324,6 +2557,25 @@ impl CanonicalValueConstraintForest {
         let index = *self.node_index.get(&CanonicalValueNode::Support(support))?;
         let root = self.root(index);
         self.absolute_target[root].clone()
+    }
+
+    fn absolute_proof_for_group(&mut self, group_id: &GroupId) -> Option<AbsoluteGroupProof> {
+        let node = *self
+            .node_index
+            .get(&CanonicalValueNode::Group(group_id.clone()))?;
+        let root = self.root(node);
+        let absolute = self.absolute_target[root].clone()?;
+        let mut source_ids = self.proof_source_ids(node, absolute.node);
+        source_ids.push(absolute.source_id);
+        let mut group_ids = self.proof_group_ids(node, absolute.node);
+        group_ids.push(group_id.clone());
+        group_ids.sort();
+        group_ids.dedup();
+        Some(AbsoluteGroupProof {
+            target: absolute.target,
+            source_ids,
+            group_ids,
+        })
     }
 
     fn add_member_equality(
@@ -2643,7 +2895,23 @@ fn affine_bound_inequality(
         None,
         SemanticRolePath::new(semantic_role),
     );
-    let violation_channel = match side.configuration {
+    let violation_channel = violation_channel(side.configuration, &provenance);
+    CanonicalAffineInequality::new(
+        Some(FunctionalUse::new(functional, provenance.clone())),
+        Vec::new(),
+        provenance,
+        dimension,
+        sense,
+        side.bound,
+        violation_channel,
+    )
+}
+
+fn violation_channel(
+    configuration: AffineBoundConfiguration,
+    provenance: &UsageProvenance,
+) -> Option<CanonicalViolationChannel> {
+    match configuration {
         AffineBoundConfiguration::Hard => None,
         AffineBoundConfiguration::QuadraticPenalty(penalty) => {
             Some(CanonicalViolationChannel::new(
@@ -2661,20 +2929,340 @@ fn affine_bound_inequality(
                 },
             ))
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HardSharedLevelEdge {
+    source_id: SourceId,
+    from: GroupId,
+    to: GroupId,
+    semantic_role: SemanticRolePath,
+    minimum_difference: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SharedLevelRelationOrientation {
+    lower_field_group_id: GroupId,
+    upper_field_group_id: GroupId,
+    field_direction: Option<StratigraphicFieldDirection>,
+    minimum_separation: Option<MinimumFieldSeparation>,
+}
+
+impl SharedLevelRelationOrientation {
+    fn required_difference(&self) -> f64 {
+        self.minimum_separation
+            .map(MinimumFieldSeparation::value)
+            .unwrap_or(0.0)
+    }
+}
+
+fn shared_level_relation_orientation(
+    relation: &SharedLevelRelationInput,
+    direction: Option<StratigraphicFieldDirection>,
+) -> SharedLevelRelationOrientation {
+    let (lower_field_group_id, upper_field_group_id, field_direction) = match relation.kind() {
+        SharedLevelRelationKind::FieldLevelOrder => (
+            relation.first_group_id().clone(),
+            relation.second_group_id().clone(),
+            None,
+        ),
+        SharedLevelRelationKind::YoungerThan => {
+            match direction.expect("build requires a field direction for every age relation") {
+                StratigraphicFieldDirection::TowardYounger => (
+                    relation.second_group_id().clone(),
+                    relation.first_group_id().clone(),
+                    direction,
+                ),
+                StratigraphicFieldDirection::TowardOlder => (
+                    relation.first_group_id().clone(),
+                    relation.second_group_id().clone(),
+                    direction,
+                ),
+            }
+        }
+        SharedLevelRelationKind::OlderThan => {
+            match direction.expect("build requires a field direction for every age relation") {
+                StratigraphicFieldDirection::TowardYounger => (
+                    relation.first_group_id().clone(),
+                    relation.second_group_id().clone(),
+                    direction,
+                ),
+                StratigraphicFieldDirection::TowardOlder => (
+                    relation.second_group_id().clone(),
+                    relation.first_group_id().clone(),
+                    direction,
+                ),
+            }
+        }
     };
-    CanonicalAffineInequality::new(
-        Some(FunctionalUse::new(functional, provenance.clone())),
-        Vec::new(),
-        provenance,
-        dimension,
-        sense,
-        side.bound,
-        violation_channel,
-    )
+    SharedLevelRelationOrientation {
+        lower_field_group_id,
+        upper_field_group_id,
+        field_direction,
+        minimum_separation: relation.minimum_separation(),
+    }
+}
+
+fn shared_level_relation_role(kind: SharedLevelRelationKind) -> SemanticRolePath {
+    match kind {
+        SharedLevelRelationKind::YoungerThan => {
+            SemanticRolePath::new("younger-than/minimum-field-separation")
+        }
+        SharedLevelRelationKind::OlderThan => {
+            SemanticRolePath::new("older-than/minimum-field-separation")
+        }
+        SharedLevelRelationKind::FieldLevelOrder => {
+            SemanticRolePath::new("field-level-order/non-strict")
+        }
+    }
+}
+
+fn hard_shared_level_edge(
+    relation: &SharedLevelRelationInput,
+    direction: Option<StratigraphicFieldDirection>,
+) -> Option<HardSharedLevelEdge> {
+    if !matches!(relation.configuration(), AffineBoundConfiguration::Hard) {
+        return None;
+    }
+    let orientation = shared_level_relation_orientation(relation, direction);
+    let minimum_difference = orientation.required_difference();
+    Some(HardSharedLevelEdge {
+        source_id: relation.source_id().clone(),
+        from: orientation.lower_field_group_id,
+        to: orientation.upper_field_group_id,
+        semantic_role: shared_level_relation_role(relation.kind()),
+        minimum_difference,
+    })
+}
+
+fn shared_level_relation_conflicts(
+    relations: &[SharedLevelRelationInput],
+    direction: Option<StratigraphicFieldDirection>,
+) -> Vec<SharedLevelRelationConflictEvidence> {
+    let mut edges = relations
+        .iter()
+        .filter_map(|relation| hard_shared_level_edge(relation, direction))
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut adjacency = BTreeMap::<GroupId, Vec<usize>>::new();
+    for (index, edge) in edges.iter().enumerate() {
+        adjacency.entry(edge.from.clone()).or_default().push(index);
+    }
+
+    let mut seen = std::collections::BTreeSet::<Vec<SourceId>>::new();
+    let mut conflicts = Vec::new();
+    for (edge_index, edge) in edges.iter().enumerate() {
+        let proof = if edge.from == edge.to {
+            Some(vec![edge_index])
+        } else if edge.minimum_difference > 0.0 {
+            shared_level_path(&edges, &adjacency, &edge.to, &edge.from).map(|mut path| {
+                path.push(edge_index);
+                path
+            })
+        } else {
+            None
+        };
+        let Some(proof) = proof else {
+            continue;
+        };
+        let mut source_roles = proof
+            .iter()
+            .map(|index| {
+                (
+                    edges[*index].source_id.clone(),
+                    edges[*index].semantic_role.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        source_roles.sort_by(|left, right| left.0.cmp(&right.0));
+        source_roles.dedup_by(|left, right| left.0 == right.0);
+        let source_ids = source_roles
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>();
+        if !seen.insert(source_ids.clone()) {
+            continue;
+        }
+        let semantic_roles = source_roles
+            .into_iter()
+            .map(|(_, role)| role)
+            .collect::<Vec<_>>();
+        let mut group_ids = proof
+            .iter()
+            .flat_map(|index| [edges[*index].from.clone(), edges[*index].to.clone()])
+            .collect::<Vec<_>>();
+        group_ids.sort();
+        group_ids.dedup();
+        conflicts.push(SharedLevelRelationConflictEvidence::new(
+            source_ids,
+            group_ids,
+            semantic_roles,
+        ));
+    }
+    conflicts.sort_by(|left, right| {
+        left.source_ids()
+            .cmp(right.source_ids())
+            .then_with(|| left.group_ids().cmp(right.group_ids()))
+    });
+    conflicts
+}
+
+fn absolute_shared_level_relation_conflicts(
+    snapshot: &ProblemSnapshot,
+    value_constraints: &mut CanonicalValueConstraintForest,
+) -> Vec<SharedLevelRelationConflictEvidence> {
+    let mut edges = snapshot
+        .inner
+        .shared_level_relations
+        .iter()
+        .filter_map(|relation| {
+            hard_shared_level_edge(relation, snapshot.inner.stratigraphic_field_direction)
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut absolutes = BTreeMap::<GroupId, AbsoluteGroupProof>::new();
+    for group in &snapshot.inner.shared_level_sets {
+        if let Some(proof) = value_constraints.absolute_proof_for_group(group.group_id()) {
+            absolutes.insert(group.group_id().clone(), proof);
+        }
+    }
+
+    let mut seen = std::collections::BTreeSet::<Vec<SourceId>>::new();
+    let mut conflicts = Vec::new();
+    for (lower_group, lower_absolute) in &absolutes {
+        let paths = maximum_shared_level_paths(&edges, lower_group);
+        for (upper_group, (minimum_difference, edge_path)) in paths {
+            if &upper_group == lower_group || edge_path.is_empty() {
+                continue;
+            }
+            let Some(upper_absolute) = absolutes.get(&upper_group) else {
+                continue;
+            };
+            if upper_absolute.target - lower_absolute.target >= minimum_difference {
+                continue;
+            }
+            let mut source_roles = BTreeMap::<SourceId, SemanticRolePath>::new();
+            for source_id in &lower_absolute.source_ids {
+                source_roles.insert(
+                    source_id.clone(),
+                    SemanticRolePath::new("shared-level-relation-proof/lower-absolute"),
+                );
+            }
+            for edge_index in edge_path {
+                let edge = &edges[edge_index];
+                source_roles.insert(edge.source_id.clone(), edge.semantic_role.clone());
+            }
+            for source_id in &upper_absolute.source_ids {
+                source_roles.insert(
+                    source_id.clone(),
+                    SemanticRolePath::new("shared-level-relation-proof/upper-absolute"),
+                );
+            }
+            let source_ids = source_roles.keys().cloned().collect::<Vec<_>>();
+            if !seen.insert(source_ids.clone()) {
+                continue;
+            }
+            let semantic_roles = source_roles.into_values().collect::<Vec<_>>();
+            let mut group_ids = lower_absolute
+                .group_ids
+                .iter()
+                .chain(&upper_absolute.group_ids)
+                .cloned()
+                .collect::<Vec<_>>();
+            group_ids.extend(
+                edges
+                    .iter()
+                    .filter(|edge| source_ids.contains(&edge.source_id))
+                    .flat_map(|edge| [edge.from.clone(), edge.to.clone()]),
+            );
+            group_ids.sort();
+            group_ids.dedup();
+            conflicts.push(SharedLevelRelationConflictEvidence::new(
+                source_ids,
+                group_ids,
+                semantic_roles,
+            ));
+        }
+    }
+    conflicts.sort_by(|left, right| {
+        left.source_ids()
+            .cmp(right.source_ids())
+            .then_with(|| left.group_ids().cmp(right.group_ids()))
+    });
+    conflicts
+}
+
+fn maximum_shared_level_paths(
+    edges: &[HardSharedLevelEdge],
+    start: &GroupId,
+) -> BTreeMap<GroupId, (f64, Vec<usize>)> {
+    let mut paths = BTreeMap::from([(start.clone(), (0.0, Vec::new()))]);
+    for _ in 0..edges.len() {
+        let mut changed = false;
+        for (edge_index, edge) in edges.iter().enumerate() {
+            let Some((distance, path)) = paths.get(&edge.from).cloned() else {
+                continue;
+            };
+            let candidate = distance + edge.minimum_difference;
+            let should_update = paths
+                .get(&edge.to)
+                .is_none_or(|(known, _)| candidate > *known);
+            if should_update {
+                let mut candidate_path = path;
+                candidate_path.push(edge_index);
+                paths.insert(edge.to.clone(), (candidate, candidate_path));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    paths
+}
+
+fn shared_level_path(
+    edges: &[HardSharedLevelEdge],
+    adjacency: &BTreeMap<GroupId, Vec<usize>>,
+    start: &GroupId,
+    end: &GroupId,
+) -> Option<Vec<usize>> {
+    let mut predecessor = BTreeMap::<GroupId, (GroupId, usize)>::new();
+    let mut queue = VecDeque::from([start.clone()]);
+    let mut visited = std::collections::BTreeSet::from([start.clone()]);
+    while let Some(node) = queue.pop_front() {
+        if &node == end {
+            break;
+        }
+        for edge_index in adjacency.get(&node).into_iter().flatten() {
+            let next = edges[*edge_index].to.clone();
+            if visited.insert(next.clone()) {
+                predecessor.insert(next.clone(), (node.clone(), *edge_index));
+                queue.push_back(next);
+            }
+        }
+    }
+    if !visited.contains(end) {
+        return None;
+    }
+    let mut path = Vec::new();
+    let mut cursor = end.clone();
+    while &cursor != start {
+        let (previous, edge_index) = predecessor.get(&cursor)?.clone();
+        path.push(edge_index);
+        cursor = previous;
+    }
+    path.reverse();
+    Some(path)
 }
 
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
+    lowering.shared_level_relation_conflicts = shared_level_relation_conflicts(
+        &snapshot.inner.shared_level_relations,
+        snapshot.inner.stratigraphic_field_direction,
+    );
     let mut value_constraints = CanonicalValueConstraintForest::default();
     let mut hard_bound_facts = Vec::new();
     let mut hard_derivative_bound_facts = Vec::new();
@@ -2910,6 +3498,54 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         }
     }
 
+    for relation in &snapshot.inner.shared_level_relations {
+        let orientation = shared_level_relation_orientation(
+            relation,
+            snapshot.inner.stratigraphic_field_direction,
+        );
+        let lower_latent = latent_index_by_group[&orientation.lower_field_group_id];
+        let upper_latent = latent_index_by_group[&orientation.upper_field_group_id];
+        let semantic_role = shared_level_relation_role(relation.kind());
+        let provenance = relation_provenance_for_groups(
+            relation.source_id().clone(),
+            vec![
+                relation.first_group_id().clone(),
+                relation.second_group_id().clone(),
+            ],
+            semantic_role,
+        );
+        let inequality = CanonicalAffineInequality::new(
+            None,
+            vec![
+                SemanticLatentCoefficient {
+                    latent: lower_latent,
+                    coefficient: -1.0,
+                },
+                SemanticLatentCoefficient {
+                    latent: upper_latent,
+                    coefficient: 1.0,
+                },
+            ],
+            provenance.clone(),
+            FunctionalDimension::FieldValue,
+            CanonicalInequalitySense::Lower,
+            orientation.required_difference(),
+            violation_channel(relation.configuration(), &provenance),
+        );
+        lowering.push_bound(
+            inequality,
+            SourceBoundKind::SharedLevel {
+                kind: relation.kind(),
+                first_group_id: relation.first_group_id().clone(),
+                second_group_id: relation.second_group_id().clone(),
+                lower_field_group_id: orientation.lower_field_group_id,
+                upper_field_group_id: orientation.upper_field_group_id,
+                field_direction: orientation.field_direction,
+                minimum_separation: orientation.minimum_separation,
+            },
+        );
+    }
+
     let has_absolute_observation = snapshot
         .inner
         .observations
@@ -2993,6 +3629,22 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             }
         }
     }
+    lowering
+        .shared_level_relation_conflicts
+        .extend(absolute_shared_level_relation_conflicts(
+            snapshot,
+            &mut value_constraints,
+        ));
+    lowering
+        .shared_level_relation_conflicts
+        .sort_by(|left, right| {
+            left.source_ids()
+                .cmp(right.source_ids())
+                .then_with(|| left.group_ids().cmp(right.group_ids()))
+        });
+    lowering
+        .shared_level_relation_conflicts
+        .dedup_by(|left, right| left.source_ids() == right.source_ids());
     record_direct_bound_conflicts(&mut lowering, &mut value_constraints, &hard_bound_facts);
     lowering.record_direct_derivative_bound_conflicts(&hard_derivative_bound_facts);
     lowering
@@ -3184,6 +3836,22 @@ fn relation_provenance(
     UsageProvenance::new(source_id, group_id, relation_id, residual_id, semantic_role)
 }
 
+fn relation_provenance_for_groups(
+    source_id: SourceId,
+    group_ids: Vec<GroupId>,
+    semantic_role: SemanticRolePath,
+) -> UsageProvenance {
+    let relation_id = RelationId::new(format!("{}:{}", source_id.as_str(), semantic_role.as_str()));
+    let residual_id = ResidualId::new(format!("{}/residual", relation_id.as_str()));
+    UsageProvenance::new_with_groups(
+        source_id,
+        group_ids,
+        relation_id,
+        residual_id,
+        semantic_role,
+    )
+}
+
 fn signed_coefficient_bits(sign: f64, coefficient: f64) -> u64 {
     let value = sign * coefficient;
     if value == 0.0 {
@@ -3223,7 +3891,7 @@ fn success_report_qp(
     let mut field_value_bounds = source_bound_relations
         .iter()
         .filter_map(|source_relation| {
-            matches!(source_relation.kind, SourceBoundKind::FieldValue).then(|| {
+            matches!(&source_relation.kind, SourceBoundKind::FieldValue).then(|| {
                 field_value_bound_assessment(
                     source_relation,
                     &solution.affine_inequalities[source_relation.canonical_index],
@@ -3239,17 +3907,32 @@ fn success_report_qp(
     let mut directional_derivative_intervals = source_bound_relations
         .iter()
         .filter_map(|source_relation| {
-            let SourceBoundKind::DirectionalDerivative { direction } = source_relation.kind else {
+            let SourceBoundKind::DirectionalDerivative { direction } = &source_relation.kind else {
                 return None;
             };
             Some(directional_derivative_interval_assessment(
                 source_relation,
                 &solution.affine_inequalities[source_relation.canonical_index],
-                direction,
+                *direction,
             ))
         })
         .collect::<Vec<_>>();
     directional_derivative_intervals.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
+    let mut shared_level_relations = source_bound_relations
+        .iter()
+        .filter_map(|source_relation| {
+            shared_level_relation_assessment(
+                source_relation,
+                &solution.affine_inequalities[source_relation.canonical_index],
+                shared_level_values,
+            )
+        })
+        .collect::<Vec<_>>();
+    shared_level_relations.sort_by(|left, right| {
         left.source_id
             .cmp(&right.source_id)
             .then_with(|| left.semantic_role.cmp(&right.semantic_role))
@@ -3288,6 +3971,7 @@ fn success_report_qp(
         hard_relations,
         field_value_bounds,
         directional_derivative_intervals,
+        shared_level_relations,
         soft_field_values,
         soft_gradients,
         soft_tangents,
@@ -3300,6 +3984,7 @@ fn success_report_qp(
         recovery_verification: None,
         direct_input_conflicts: Vec::new(),
         relation_graph_conflicts: Vec::new(),
+        shared_level_relation_conflicts: Vec::new(),
         execution_failure: None,
         cubic_analysis: Some(public_cubic_analysis(&solution.representation)),
         backend_rank: None,
@@ -3366,6 +4051,59 @@ fn directional_derivative_interval_assessment(
         linear_violation_penalty,
         loss: recovered.objective_contribution,
     }
+}
+
+fn shared_level_relation_assessment(
+    source_relation: &SourceBoundRelation,
+    recovered: &RecoveredAffineInequality,
+    shared_level_values: &[SharedLevelValue],
+) -> Option<SharedLevelRelationAssessment> {
+    let SourceBoundKind::SharedLevel {
+        kind,
+        first_group_id,
+        second_group_id,
+        lower_field_group_id,
+        upper_field_group_id,
+        field_direction,
+        minimum_separation,
+    } = &source_relation.kind
+    else {
+        return None;
+    };
+    let value = |group_id: &GroupId| {
+        shared_level_values
+            .iter()
+            .find(|level| level.group_id() == group_id)
+            .map(SharedLevelValue::value)
+            .expect("every checked shared-level relation recovers both semantic latents")
+    };
+    let (quadratic_penalty, linear_violation_penalty) =
+        public_bound_penalties(&source_relation.inequality);
+    Some(SharedLevelRelationAssessment {
+        source_id: source_relation.inequality.provenance().source().clone(),
+        semantic_role: source_relation
+            .inequality
+            .provenance()
+            .semantic_role()
+            .clone(),
+        kind: *kind,
+        first_group_id: first_group_id.clone(),
+        second_group_id: second_group_id.clone(),
+        lower_field_group_id: lower_field_group_id.clone(),
+        upper_field_group_id: upper_field_group_id.clone(),
+        field_direction: *field_direction,
+        minimum_separation: *minimum_separation,
+        recovered_first_value: value(first_group_id),
+        recovered_second_value: value(second_group_id),
+        recovered_field_separation: recovered.value,
+        slack: recovered.slack,
+        violation: recovered.violation,
+        tolerance: recovered.tolerance,
+        active_state: public_bound_active_state(recovered),
+        quadratic_penalty,
+        linear_violation_penalty,
+        loss: recovered.objective_contribution,
+    })
 }
 
 fn public_bound_penalties(
@@ -3510,6 +4248,7 @@ fn success_report(
         hard_relations,
         field_value_bounds: Vec::new(),
         directional_derivative_intervals: Vec::new(),
+        shared_level_relations: Vec::new(),
         soft_field_values,
         soft_gradients,
         soft_tangents,
@@ -3522,6 +4261,7 @@ fn success_report(
         recovery_verification: None,
         direct_input_conflicts: Vec::new(),
         relation_graph_conflicts: Vec::new(),
+        shared_level_relation_conflicts: Vec::new(),
         execution_failure: None,
         cubic_analysis: Some(public_cubic_analysis(&solution.representation)),
         backend_rank: Some(public_rank_evidence(
@@ -4887,7 +5627,10 @@ mod tests {
     use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel, Vector3};
     use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
     use crate::observation::FieldValueObservation;
-    use crate::relation::{DirectionalDerivativeInterval, FieldValueBound, SharedLevelSetBuilder};
+    use crate::relation::{
+        DirectionalDerivativeInterval, FieldValueBound, MinimumFieldSeparation,
+        SharedLevelSetBuilder, StratigraphicFieldDirection, YoungerThan,
+    };
     use crate::{Point3, ProblemBuilder};
 
     fn injectable_snapshot() -> ProblemSnapshot {
@@ -4977,6 +5720,47 @@ mod tests {
 
     fn injectable_derivative_interval_snapshot() -> ProblemSnapshot {
         derivative_interval_snapshot(10.0)
+    }
+
+    fn injectable_shared_level_relation_snapshot() -> ProblemSnapshot {
+        let snapshot = injectable_snapshot();
+        let mut builder = ProblemBuilder::new(
+            snapshot.input_coordinate_frame().clone(),
+            snapshot.field_unit().clone(),
+        );
+        builder
+            .set_stratigraphic_field_direction(StratigraphicFieldDirection::TowardYounger)
+            .unwrap();
+        for observation in &snapshot.inner.observations {
+            match observation {
+                ObservationInput::FieldValue(observation) => {
+                    builder.add(observation.clone()).unwrap();
+                }
+                _ => unreachable!("the injectable fixture contains only field values"),
+            }
+        }
+        for (group_id, source_id, support) in [
+            ("older", "older/member", [0.0, 0.0, 0.0]),
+            ("younger", "younger/member", [1.0, 0.0, 0.0]),
+        ] {
+            let mut group = SharedLevelSetBuilder::new(GroupId::new(group_id));
+            group
+                .add_member(
+                    SourceId::new(source_id),
+                    Point3::try_new(support[0], support[1], support[2]).unwrap(),
+                )
+                .unwrap();
+            builder.add(group.build().unwrap()).unwrap();
+        }
+        builder
+            .add(YoungerThan::hard(
+                SourceId::new("age"),
+                GroupId::new("younger"),
+                GroupId::new("older"),
+                MinimumFieldSeparation::try_new(0.5).unwrap(),
+            ))
+            .unwrap();
+        builder.build().unwrap()
     }
 
     fn injectable_infeasible_derivative_interval_snapshot() -> ProblemSnapshot {
@@ -5190,6 +5974,40 @@ mod tests {
             .report()
             .capacity()
             .expect("the derivative QP capacity failure retains checked evidence");
+        assert!(!capacity.large_allocation_attempted());
+        assert!(!capacity.backend_invocation_attempted());
+        assert!(failure.report().attempts().is_empty());
+    }
+
+    #[test]
+    fn shared_level_relation_fit_rejects_recovery_corruption_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::ScalingMap);
+        let failure = injectable_shared_level_relation_snapshot()
+            .fit()
+            .expect_err("a damaged shared-level recovery map must not publish a model");
+
+        assert_eq!(
+            failure.diagnosis(),
+            ProblemDiagnosis::RecoveryVerificationFailure
+        );
+        assert!(failure.report().canonical_acceptance().is_none());
+        let recovery = failure.report().recovery_verification().unwrap();
+        assert_eq!(
+            recovery.reasons(),
+            &[RecoveryVerificationFailureReason::ScalingRoundTripViolation]
+        );
+        assert!(recovery.no_model_produced());
+    }
+
+    #[test]
+    fn shared_level_relation_qp_capacity_failure_is_preallocation_evidence() {
+        inject_qp_fault_once(QpFaultInjection::Capacity);
+        let failure = injectable_shared_level_relation_snapshot()
+            .fit()
+            .expect_err("an oversized shared-level QP plan must fail before allocation");
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::CapacityExceeded);
+        let capacity = failure.report().capacity().unwrap();
         assert!(!capacity.large_allocation_attempted());
         assert!(!capacity.backend_invocation_attempted());
         assert!(failure.report().attempts().is_empty());

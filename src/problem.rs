@@ -12,9 +12,10 @@ use crate::geometry::{FieldUnitLabel, GlobalAnisotropyMetric, InputCoordinateFra
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::numerical::NumericalPolicyId;
 use crate::observation::{CovarianceGroup, ObservationInput};
+pub use crate::relation::StratigraphicFieldDirection;
 use crate::relation::{
     AdditiveFieldGauge, AdditiveFieldGaugeReference, DirectionalDerivativeInterval,
-    FieldValueBound, SharedLevelSetInput,
+    FieldValueBound, SharedLevelRelationInput, SharedLevelRelationKind, SharedLevelSetInput,
 };
 
 /// Resource request for a synchronous fit.
@@ -92,11 +93,13 @@ pub struct ProblemBuilder {
     additive_field_gauges: Vec<AdditiveFieldGauge>,
     field_value_bounds: Vec<FieldValueBound>,
     directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
+    shared_level_relations: Vec<SharedLevelRelationInput>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
     shared_level_group_ids: BTreeSet<GroupId>,
     field_energy_normalization: Option<FieldEnergyNormalization>,
     global_anisotropy_metric: Option<GlobalAnisotropyMetric>,
+    stratigraphic_field_direction: Option<StratigraphicFieldDirection>,
     fit_configuration: FitConfiguration,
 }
 
@@ -112,11 +115,13 @@ impl ProblemBuilder {
             additive_field_gauges: Vec::new(),
             field_value_bounds: Vec::new(),
             directional_derivative_intervals: Vec::new(),
+            shared_level_relations: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
             shared_level_group_ids: BTreeSet::new(),
             field_energy_normalization: None,
             global_anisotropy_metric: None,
+            stratigraphic_field_direction: None,
             fit_configuration: FitConfiguration::default(),
         }
     }
@@ -150,6 +155,18 @@ impl ProblemBuilder {
         Ok(())
     }
 
+    /// Sets the one explicit mapping from stratigraphic age to field value.
+    pub fn set_stratigraphic_field_direction(
+        &mut self,
+        direction: StratigraphicFieldDirection,
+    ) -> Result<(), BuilderConfigurationError> {
+        if self.stratigraphic_field_direction.is_some() {
+            return Err(BuilderConfigurationError::StratigraphicFieldDirectionAlreadySet);
+        }
+        self.stratigraphic_field_direction = Some(direction);
+        Ok(())
+    }
+
     /// Replaces the complete fit configuration before snapshot creation.
     pub fn set_fit_configuration(&mut self, configuration: FitConfiguration) {
         self.fit_configuration = configuration;
@@ -162,6 +179,10 @@ impl ProblemBuilder {
             errors.push(BuildError::NoObservations);
         }
         let has_soft_relation = !self.covariance_groups.is_empty()
+            || self
+                .shared_level_relations
+                .iter()
+                .any(SharedLevelRelationInput::is_soft)
             || self.field_value_bounds.iter().any(FieldValueBound::is_soft)
             || self
                 .directional_derivative_intervals
@@ -180,6 +201,16 @@ impl ProblemBuilder {
         if has_soft_relation && self.field_energy_normalization.is_none() {
             errors.push(BuildError::MissingFieldEnergyNormalization);
         }
+        if self.stratigraphic_field_direction.is_none()
+            && self.shared_level_relations.iter().any(|relation| {
+                matches!(
+                    relation.kind(),
+                    SharedLevelRelationKind::YoungerThan | SharedLevelRelationKind::OlderThan
+                )
+            })
+        {
+            errors.push(BuildError::MissingStratigraphicFieldDirection);
+        }
         let mut dangling_references = self
             .additive_field_gauges
             .iter()
@@ -196,6 +227,26 @@ impl ProblemBuilder {
         dangling_references.sort();
         errors.extend(
             dangling_references
+                .into_iter()
+                .map(|(source_id, group_id)| BuildError::UnknownGroupReference {
+                    source_id,
+                    group_id,
+                }),
+        );
+        let mut dangling_relation_references = self
+            .shared_level_relations
+            .iter()
+            .flat_map(|relation| {
+                [relation.first_group_id(), relation.second_group_id()]
+                    .into_iter()
+                    .filter(|group_id| !self.shared_level_group_ids.contains(*group_id))
+                    .map(|group_id| (relation.source_id().clone(), group_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        dangling_relation_references.sort();
+        dangling_relation_references.dedup();
+        errors.extend(
+            dangling_relation_references
                 .into_iter()
                 .map(|(source_id, group_id)| BuildError::UnknownGroupReference {
                     source_id,
@@ -227,6 +278,8 @@ impl ProblemBuilder {
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.directional_derivative_intervals
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.shared_level_relations
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
             input_coordinate_frame: self.input_coordinate_frame,
             field_unit: self.field_unit,
@@ -236,6 +289,7 @@ impl ProblemBuilder {
             additive_field_gauges: self.additive_field_gauges,
             field_value_bounds: self.field_value_bounds,
             directional_derivative_intervals: self.directional_derivative_intervals,
+            shared_level_relations: self.shared_level_relations,
             source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
             field_energy_normalization: self
@@ -244,6 +298,7 @@ impl ProblemBuilder {
             global_anisotropy_metric: self
                 .global_anisotropy_metric
                 .unwrap_or_else(GlobalAnisotropyMetric::identity),
+            stratigraphic_field_direction: self.stratigraphic_field_direction,
             fit_configuration: self.fit_configuration,
         };
         Ok(ProblemSnapshot {
@@ -353,6 +408,19 @@ impl ProblemBuilder {
         self.directional_derivative_intervals.push(interval);
         Ok(())
     }
+
+    pub(crate) fn add_shared_level_relation(
+        &mut self,
+        relation: SharedLevelRelationInput,
+    ) -> Result<(), AddError> {
+        let source_id = relation.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.shared_level_relations.push(relation);
+        Ok(())
+    }
 }
 
 /// An owning, immutable problem snapshot.
@@ -435,6 +503,34 @@ impl ProblemSnapshot {
         self.inner.directional_derivative_intervals.len()
     }
 
+    /// Returns the explicitly configured stratigraphic field direction.
+    pub fn stratigraphic_field_direction(&self) -> Option<StratigraphicFieldDirection> {
+        self.inner.stratigraphic_field_direction
+    }
+
+    /// Returns the number of caller-owned Younger Than and Older Than relations.
+    pub fn stratigraphic_age_relation_count(&self) -> usize {
+        self.inner
+            .shared_level_relations
+            .iter()
+            .filter(|relation| {
+                matches!(
+                    relation.kind(),
+                    SharedLevelRelationKind::YoungerThan | SharedLevelRelationKind::OlderThan
+                )
+            })
+            .count()
+    }
+
+    /// Returns the number of caller-owned non-strict Field Level Order relations.
+    pub fn field_level_order_count(&self) -> usize {
+        self.inner
+            .shared_level_relations
+            .iter()
+            .filter(|relation| relation.kind() == SharedLevelRelationKind::FieldLevelOrder)
+            .count()
+    }
+
     /// Returns the number of independently identified caller sources.
     pub fn source_count(&self) -> usize {
         self.inner.source_count
@@ -451,10 +547,12 @@ pub(crate) struct ProblemData {
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
     pub(crate) field_value_bounds: Vec<FieldValueBound>,
     pub(crate) directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
+    pub(crate) shared_level_relations: Vec<SharedLevelRelationInput>,
     pub(crate) source_count: usize,
     pub(crate) resolved_kernel: KernelConfig,
     pub(crate) field_energy_normalization: FieldEnergyNormalization,
     pub(crate) global_anisotropy_metric: GlobalAnisotropyMetric,
+    pub(crate) stratigraphic_field_direction: Option<StratigraphicFieldDirection>,
     pub(crate) fit_configuration: FitConfiguration,
 }
 
@@ -491,6 +589,8 @@ pub enum BuilderConfigurationError {
     GlobalAnisotropyMetricAlreadySet,
     /// The problem already has its one FieldEnergy normalization.
     FieldEnergyNormalizationAlreadySet,
+    /// The one problem-level stratigraphic field direction is already configured.
+    StratigraphicFieldDirectionAlreadySet,
 }
 
 impl fmt::Display for BuilderConfigurationError {
@@ -501,6 +601,9 @@ impl fmt::Display for BuilderConfigurationError {
             }
             Self::FieldEnergyNormalizationAlreadySet => {
                 formatter.write_str("a FieldEnergy normalization is already set")
+            }
+            Self::StratigraphicFieldDirectionAlreadySet => {
+                formatter.write_str("a stratigraphic field direction is already set")
             }
         }
     }
@@ -516,6 +619,8 @@ pub enum BuildError {
     NoObservations,
     /// At least one soft relation exists without an explicit FieldEnergy scale.
     MissingFieldEnergyNormalization,
+    /// An age relation exists without an explicit stratigraphic field direction.
+    MissingStratigraphicFieldDirection,
     /// The current public Cubic Equality path is intentionally sequential.
     UnsupportedThreadBudget { requested: usize },
     /// A relation references a GroupId absent from the completed snapshot.

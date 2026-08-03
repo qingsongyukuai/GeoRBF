@@ -74,6 +74,385 @@ pub enum DirectionalDerivativeViolationPenalty {
     Linear(LinearViolationPenalty),
 }
 
+/// The explicit mapping from stratigraphic age to scalar-field value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StratigraphicFieldDirection {
+    /// Field value increases toward geologically younger horizons.
+    TowardYounger,
+    /// Field value increases toward geologically older horizons.
+    TowardOlder,
+}
+
+/// A finite, strictly positive shared-level difference in field-value units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimumFieldSeparation {
+    value: f64,
+}
+
+impl MinimumFieldSeparation {
+    /// Creates a checked minimum field separation.
+    pub fn try_new(value: f64) -> Result<Self, MinimumFieldSeparationError> {
+        if !value.is_finite() {
+            return Err(MinimumFieldSeparationError::NotFinite);
+        }
+        if value <= 0.0 {
+            return Err(MinimumFieldSeparationError::NotPositive);
+        }
+        Ok(Self { value })
+    }
+
+    /// Returns the separation in the problem's field-value units.
+    pub fn value(self) -> f64 {
+        self.value
+    }
+}
+
+/// A rejected minimum field separation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MinimumFieldSeparationError {
+    /// The supplied value was NaN or infinite.
+    NotFinite,
+    /// The supplied value was zero or negative.
+    NotPositive,
+}
+
+impl fmt::Display for MinimumFieldSeparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => formatter.write_str("minimum field separation is not finite"),
+            Self::NotPositive => formatter.write_str("minimum field separation is not positive"),
+        }
+    }
+}
+
+impl Error for MinimumFieldSeparationError {}
+
+/// The caller-declared semantic kind of a relation between shared levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SharedLevelRelationKind {
+    /// One named level is geologically younger than another.
+    YoungerThan,
+    /// One named level is geologically older than another.
+    OlderThan,
+    /// One field level is non-strictly no greater than another.
+    FieldLevelOrder,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SharedLevelRelationInput {
+    source_id: SourceId,
+    first_group_id: GroupId,
+    second_group_id: GroupId,
+    kind: SharedLevelRelationKind,
+    minimum_separation: Option<MinimumFieldSeparation>,
+    configuration: AffineBoundConfiguration,
+}
+
+impl SharedLevelRelationInput {
+    fn age(
+        source_id: SourceId,
+        first_group_id: GroupId,
+        second_group_id: GroupId,
+        kind: SharedLevelRelationKind,
+        minimum_separation: MinimumFieldSeparation,
+        configuration: AffineBoundConfiguration,
+    ) -> Self {
+        Self {
+            source_id,
+            first_group_id,
+            second_group_id,
+            kind,
+            minimum_separation: Some(minimum_separation),
+            configuration,
+        }
+    }
+
+    fn order(
+        source_id: SourceId,
+        lower_group_id: GroupId,
+        upper_group_id: GroupId,
+        configuration: AffineBoundConfiguration,
+    ) -> Self {
+        Self {
+            source_id,
+            first_group_id: lower_group_id,
+            second_group_id: upper_group_id,
+            kind: SharedLevelRelationKind::FieldLevelOrder,
+            minimum_separation: None,
+            configuration,
+        }
+    }
+
+    pub(crate) fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    pub(crate) fn first_group_id(&self) -> &GroupId {
+        &self.first_group_id
+    }
+
+    pub(crate) fn second_group_id(&self) -> &GroupId {
+        &self.second_group_id
+    }
+
+    pub(crate) fn kind(&self) -> SharedLevelRelationKind {
+        self.kind
+    }
+
+    pub(crate) fn minimum_separation(&self) -> Option<MinimumFieldSeparation> {
+        self.minimum_separation
+    }
+
+    pub(crate) fn configuration(&self) -> AffineBoundConfiguration {
+        self.configuration
+    }
+
+    pub(crate) fn is_soft(&self) -> bool {
+        self.configuration.is_soft()
+    }
+}
+
+/// A strict stratigraphic statement that one horizon is younger than another.
+#[derive(Debug, Clone, PartialEq)]
+pub struct YoungerThan(SharedLevelRelationInput);
+
+impl YoungerThan {
+    /// Creates one hard younger-than relation.
+    pub fn hard(
+        source_id: SourceId,
+        younger_group_id: GroupId,
+        older_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+    ) -> Self {
+        Self(SharedLevelRelationInput::age(
+            source_id,
+            younger_group_id,
+            older_group_id,
+            SharedLevelRelationKind::YoungerThan,
+            minimum_separation,
+            AffineBoundConfiguration::Hard,
+        ))
+    }
+
+    /// Creates a soft younger-than relation with a quadratic violation loss.
+    pub fn with_quadratic_penalty(
+        source_id: SourceId,
+        younger_group_id: GroupId,
+        older_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        penalty: QuadraticPenalty,
+    ) -> Self {
+        Self(SharedLevelRelationInput::age(
+            source_id,
+            younger_group_id,
+            older_group_id,
+            SharedLevelRelationKind::YoungerThan,
+            minimum_separation,
+            AffineBoundConfiguration::QuadraticPenalty(penalty),
+        ))
+    }
+
+    /// Creates a soft younger-than relation with a linear violation loss.
+    pub fn with_linear_violation_penalty(
+        source_id: SourceId,
+        younger_group_id: GroupId,
+        older_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        penalty: LinearViolationPenalty,
+    ) -> Self {
+        Self(SharedLevelRelationInput::age(
+            source_id,
+            younger_group_id,
+            older_group_id,
+            SharedLevelRelationKind::YoungerThan,
+            minimum_separation,
+            AffineBoundConfiguration::LinearViolationPenalty(penalty),
+        ))
+    }
+
+    /// Returns the stable caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        self.0.source_id()
+    }
+
+    /// Returns the geologically younger shared level.
+    pub fn younger_group_id(&self) -> &GroupId {
+        self.0.first_group_id()
+    }
+
+    /// Returns the geologically older shared level.
+    pub fn older_group_id(&self) -> &GroupId {
+        self.0.second_group_id()
+    }
+
+    /// Returns the required strict field-value difference.
+    pub fn minimum_separation(&self) -> MinimumFieldSeparation {
+        self.0
+            .minimum_separation()
+            .expect("an age relation always owns a separation")
+    }
+
+    /// Reports whether this relation owns an explicit violation channel.
+    pub fn is_soft(&self) -> bool {
+        self.0.is_soft()
+    }
+}
+
+/// A strict stratigraphic statement that one horizon is older than another.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OlderThan(SharedLevelRelationInput);
+
+impl OlderThan {
+    /// Creates one hard older-than relation.
+    pub fn hard(
+        source_id: SourceId,
+        older_group_id: GroupId,
+        younger_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+    ) -> Self {
+        Self(SharedLevelRelationInput::age(
+            source_id,
+            older_group_id,
+            younger_group_id,
+            SharedLevelRelationKind::OlderThan,
+            minimum_separation,
+            AffineBoundConfiguration::Hard,
+        ))
+    }
+
+    /// Creates a soft older-than relation with a quadratic violation loss.
+    pub fn with_quadratic_penalty(
+        source_id: SourceId,
+        older_group_id: GroupId,
+        younger_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        penalty: QuadraticPenalty,
+    ) -> Self {
+        Self(SharedLevelRelationInput::age(
+            source_id,
+            older_group_id,
+            younger_group_id,
+            SharedLevelRelationKind::OlderThan,
+            minimum_separation,
+            AffineBoundConfiguration::QuadraticPenalty(penalty),
+        ))
+    }
+
+    /// Creates a soft older-than relation with a linear violation loss.
+    pub fn with_linear_violation_penalty(
+        source_id: SourceId,
+        older_group_id: GroupId,
+        younger_group_id: GroupId,
+        minimum_separation: MinimumFieldSeparation,
+        penalty: LinearViolationPenalty,
+    ) -> Self {
+        Self(SharedLevelRelationInput::age(
+            source_id,
+            older_group_id,
+            younger_group_id,
+            SharedLevelRelationKind::OlderThan,
+            minimum_separation,
+            AffineBoundConfiguration::LinearViolationPenalty(penalty),
+        ))
+    }
+
+    /// Returns the stable caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        self.0.source_id()
+    }
+
+    /// Returns the geologically older shared level.
+    pub fn older_group_id(&self) -> &GroupId {
+        self.0.first_group_id()
+    }
+
+    /// Returns the geologically younger shared level.
+    pub fn younger_group_id(&self) -> &GroupId {
+        self.0.second_group_id()
+    }
+
+    /// Returns the required strict field-value difference.
+    pub fn minimum_separation(&self) -> MinimumFieldSeparation {
+        self.0
+            .minimum_separation()
+            .expect("an age relation always owns a separation")
+    }
+
+    /// Reports whether this relation owns an explicit violation channel.
+    pub fn is_soft(&self) -> bool {
+        self.0.is_soft()
+    }
+}
+
+/// A non-strict direct ordering of two shared scalar-field levels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldLevelOrder(SharedLevelRelationInput);
+
+impl FieldLevelOrder {
+    /// Creates the hard relation `lower_group <= upper_group`.
+    pub fn hard(source_id: SourceId, lower_group_id: GroupId, upper_group_id: GroupId) -> Self {
+        Self(SharedLevelRelationInput::order(
+            source_id,
+            lower_group_id,
+            upper_group_id,
+            AffineBoundConfiguration::Hard,
+        ))
+    }
+
+    /// Creates a soft non-strict order with a quadratic violation loss.
+    pub fn with_quadratic_penalty(
+        source_id: SourceId,
+        lower_group_id: GroupId,
+        upper_group_id: GroupId,
+        penalty: QuadraticPenalty,
+    ) -> Self {
+        Self(SharedLevelRelationInput::order(
+            source_id,
+            lower_group_id,
+            upper_group_id,
+            AffineBoundConfiguration::QuadraticPenalty(penalty),
+        ))
+    }
+
+    /// Creates a soft non-strict order with a linear violation loss.
+    pub fn with_linear_violation_penalty(
+        source_id: SourceId,
+        lower_group_id: GroupId,
+        upper_group_id: GroupId,
+        penalty: LinearViolationPenalty,
+    ) -> Self {
+        Self(SharedLevelRelationInput::order(
+            source_id,
+            lower_group_id,
+            upper_group_id,
+            AffineBoundConfiguration::LinearViolationPenalty(penalty),
+        ))
+    }
+
+    /// Returns the stable caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        self.0.source_id()
+    }
+
+    /// Returns the shared level constrained to have the lower-or-equal value.
+    pub fn lower_group_id(&self) -> &GroupId {
+        self.0.first_group_id()
+    }
+
+    /// Returns the shared level constrained to have the upper-or-equal value.
+    pub fn upper_group_id(&self) -> &GroupId {
+        self.0.second_group_id()
+    }
+
+    /// Reports whether this relation owns an explicit violation channel.
+    pub fn is_soft(&self) -> bool {
+        self.0.is_soft()
+    }
+}
+
 impl From<QuadraticPenalty> for DirectionalDerivativeViolationPenalty {
     fn from(penalty: QuadraticPenalty) -> Self {
         Self::Quadratic(penalty)
@@ -1070,5 +1449,29 @@ impl private::Sealed for DirectionalDerivativeInterval {}
 impl ProblemInput for DirectionalDerivativeInterval {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
         builder.add_directional_derivative_interval(self)
+    }
+}
+
+impl private::Sealed for YoungerThan {}
+
+impl ProblemInput for YoungerThan {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_shared_level_relation(self.0)
+    }
+}
+
+impl private::Sealed for OlderThan {}
+
+impl ProblemInput for OlderThan {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_shared_level_relation(self.0)
+    }
+}
+
+impl private::Sealed for FieldLevelOrder {}
+
+impl ProblemInput for FieldLevelOrder {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_shared_level_relation(self.0)
     }
 }

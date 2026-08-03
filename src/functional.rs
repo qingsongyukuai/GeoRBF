@@ -258,6 +258,7 @@ impl fmt::Display for SemanticRolePath {
 pub(crate) struct UsageProvenance {
     source: SourceId,
     group: Option<GroupId>,
+    groups: Box<[GroupId]>,
     relation: RelationId,
     residual: ResidualId,
     semantic_role: SemanticRolePath,
@@ -271,9 +272,31 @@ impl UsageProvenance {
         residual: ResidualId,
         semantic_role: SemanticRolePath,
     ) -> Self {
+        let groups = group.clone().into_iter().collect::<Vec<_>>().into();
         Self {
             source,
             group,
+            groups,
+            relation,
+            residual,
+            semantic_role,
+        }
+    }
+
+    pub(crate) fn new_with_groups(
+        source: SourceId,
+        mut groups: Vec<GroupId>,
+        relation: RelationId,
+        residual: ResidualId,
+        semantic_role: SemanticRolePath,
+    ) -> Self {
+        groups.sort();
+        groups.dedup();
+        let group = groups.first().cloned();
+        Self {
+            source,
+            group,
+            groups: groups.into(),
             relation,
             residual,
             semantic_role,
@@ -286,6 +309,10 @@ impl UsageProvenance {
 
     pub(crate) fn group(&self) -> Option<&GroupId> {
         self.group.as_ref()
+    }
+
+    pub(crate) fn groups(&self) -> &[GroupId] {
+        &self.groups
     }
 
     pub(crate) fn relation(&self) -> &RelationId {
