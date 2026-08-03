@@ -1316,23 +1316,16 @@ fn execute_qp_attempts(
                 internal_scaling_error,
             ));
         }
-        // Two active derivative-interval sides can consume the Standard
-        // backend's complete complementarity budget. A bounded near miss uses
-        // the existing Robust slot without changing either profile's policy.
-        let derivative_interval_problem = form.affine_inequality_rows.iter().any(|row| {
-            row.provenance
-                .semantic_role()
-                .as_str()
-                .starts_with("directional-derivative-interval/")
-        });
-        let retryable_standard_residual = derivative_interval_problem
-            && sequence == 0
+        // A Standard candidate just outside canonical acceptance uses the
+        // existing Robust slot. The versioned policy bounds this retry band;
+        // larger misses remain immediate backend-contract failures.
+        let retryable_standard_residual = sequence == 0
             && matches!(
                 failure_reason,
                 Some(QpAttemptFailureReason::BackendResidualExceeded)
             )
             && residuals.is_some_and(|residuals| {
-                residuals.maximum() <= 10.0 * EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit
+                residuals.maximum() <= EQUALITY_KKT_POLICY_V1.convex_standard_retry_residual_limit
             });
         if (matches!(candidate.attempt.termination, ClarabelTermination::Solved)
             && !retryable_standard_residual)
