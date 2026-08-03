@@ -111,8 +111,8 @@ jobs:
     steps:
       - name: Check out the accepted commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install the exact MSRV
-        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Install the exact MSRV and Clippy
+        run: rustup toolchain install 1.85.0 --profile minimal --component clippy
       - name: Verify types and compile targets
         run: cargo check --locked --all-targets
       - name: Run the cumulative Equality Spine corpus
