@@ -27,6 +27,7 @@ include = [
     "/docs/implementation/24-immutable-model-batch-query.md",
     "/docs/implementation/25-equality-spine-release.md",
     "/docs/implementation/27-soft-field-value-objective.md",
+    "/docs/implementation/28-soft-first-order-residual-blocks.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/v0.1.0/**",
 ]

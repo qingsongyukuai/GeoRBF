@@ -734,6 +734,7 @@ pub struct CanonicalAcceptanceEvidence {
     polynomial_round_trip_error: Option<f64>,
     field_coefficient_round_trip_error: Option<f64>,
     field_energy_round_trip_error: Option<f64>,
+    whitening_round_trip_error: Option<f64>,
     objective_round_trip_error: Option<f64>,
     objective_verified: bool,
     tolerance_round_trip_error: Option<f64>,
@@ -748,6 +749,7 @@ pub(crate) struct CanonicalAcceptanceEvidenceParts {
     pub(crate) polynomial_round_trip_error: Option<f64>,
     pub(crate) field_coefficient_round_trip_error: Option<f64>,
     pub(crate) field_energy_round_trip_error: Option<f64>,
+    pub(crate) whitening_round_trip_error: Option<f64>,
     pub(crate) objective_round_trip_error: Option<f64>,
     pub(crate) objective_verified: bool,
     pub(crate) tolerance_round_trip_error: Option<f64>,
@@ -767,6 +769,7 @@ impl CanonicalAcceptanceEvidence {
             polynomial_round_trip_error: parts.polynomial_round_trip_error,
             field_coefficient_round_trip_error: parts.field_coefficient_round_trip_error,
             field_energy_round_trip_error: parts.field_energy_round_trip_error,
+            whitening_round_trip_error: parts.whitening_round_trip_error,
             objective_round_trip_error: parts.objective_round_trip_error,
             objective_verified: parts.objective_verified,
             tolerance_round_trip_error: parts.tolerance_round_trip_error,
@@ -816,6 +819,11 @@ impl CanonicalAcceptanceEvidence {
     /// Returns FieldEnergy recovery round-trip error when reached.
     pub fn field_energy_round_trip_error(&self) -> Option<f64> {
         self.field_energy_round_trip_error
+    }
+
+    /// Returns the maximum whitening recovery round-trip error when reached.
+    pub fn whitening_round_trip_error(&self) -> Option<f64> {
+        self.whitening_round_trip_error
     }
 
     /// Returns physical/standard objective recovery round-trip error when
@@ -1489,6 +1497,7 @@ pub struct RecoveryVerificationEvidence {
     polynomial_round_trip_error: Option<f64>,
     field_coefficient_round_trip_error: Option<f64>,
     field_energy_round_trip_error: Option<f64>,
+    whitening_round_trip_error: Option<f64>,
     objective_round_trip_error: Option<f64>,
     tolerance_round_trip_error: Option<f64>,
     no_model_produced: bool,
@@ -1501,6 +1510,7 @@ pub(crate) struct RecoveryVerificationEvidenceParts {
     pub(crate) polynomial_round_trip_error: Option<f64>,
     pub(crate) field_coefficient_round_trip_error: Option<f64>,
     pub(crate) field_energy_round_trip_error: Option<f64>,
+    pub(crate) whitening_round_trip_error: Option<f64>,
     pub(crate) objective_round_trip_error: Option<f64>,
     pub(crate) tolerance_round_trip_error: Option<f64>,
     pub(crate) no_model_produced: bool,
@@ -1518,6 +1528,7 @@ impl RecoveryVerificationEvidence {
             polynomial_round_trip_error: parts.polynomial_round_trip_error,
             field_coefficient_round_trip_error: parts.field_coefficient_round_trip_error,
             field_energy_round_trip_error: parts.field_energy_round_trip_error,
+            whitening_round_trip_error: parts.whitening_round_trip_error,
             objective_round_trip_error: parts.objective_round_trip_error,
             tolerance_round_trip_error: parts.tolerance_round_trip_error,
             no_model_produced: parts.no_model_produced,
@@ -1557,6 +1568,11 @@ impl RecoveryVerificationEvidence {
     /// Returns FieldEnergy round-trip error when available.
     pub fn field_energy_round_trip_error(&self) -> Option<f64> {
         self.field_energy_round_trip_error
+    }
+
+    /// Returns the maximum whitening recovery round-trip error when available.
+    pub fn whitening_round_trip_error(&self) -> Option<f64> {
+        self.whitening_round_trip_error
     }
 
     /// Returns physical/standard objective round-trip error when available.

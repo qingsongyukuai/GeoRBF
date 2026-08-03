@@ -11,7 +11,7 @@ pub use crate::functional::{GroupId, SourceId};
 use crate::geometry::{FieldUnitLabel, GlobalAnisotropyMetric, InputCoordinateFrame};
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::numerical::NumericalPolicyId;
-use crate::observation::ObservationInput;
+use crate::observation::{CovarianceGroup, ObservationInput};
 use crate::relation::{AdditiveFieldGauge, AdditiveFieldGaugeReference, SharedLevelSetInput};
 
 /// Resource request for a synchronous fit.
@@ -84,10 +84,12 @@ pub struct ProblemBuilder {
     input_coordinate_frame: InputCoordinateFrame,
     field_unit: FieldUnitLabel,
     observations: Vec<ObservationInput>,
+    covariance_groups: Vec<CovarianceGroup>,
     shared_level_sets: Vec<SharedLevelSetInput>,
     additive_field_gauges: Vec<AdditiveFieldGauge>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
+    shared_level_group_ids: BTreeSet<GroupId>,
     field_energy_normalization: Option<FieldEnergyNormalization>,
     global_anisotropy_metric: Option<GlobalAnisotropyMetric>,
     fit_configuration: FitConfiguration,
@@ -100,10 +102,12 @@ impl ProblemBuilder {
             input_coordinate_frame,
             field_unit,
             observations: Vec::new(),
+            covariance_groups: Vec::new(),
             shared_level_sets: Vec::new(),
             additive_field_gauges: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
+            shared_level_group_ids: BTreeSet::new(),
             field_energy_normalization: None,
             global_anisotropy_metric: None,
             fit_configuration: FitConfiguration::default(),
@@ -150,13 +154,17 @@ impl ProblemBuilder {
         if self.source_ids.is_empty() {
             errors.push(BuildError::NoObservations);
         }
-        let has_soft_relation = self.observations.iter().any(|observation| {
-            matches!(
-                observation,
-                ObservationInput::FieldValue(field_value)
-                    if field_value.configuration().is_soft()
-            )
-        });
+        let has_soft_relation = !self.covariance_groups.is_empty()
+            || self
+                .observations
+                .iter()
+                .any(|observation| match observation {
+                    ObservationInput::FieldValue(value) => value.configuration().is_soft(),
+                    ObservationInput::Gradient(gradient) => gradient.configuration().is_soft(),
+                    ObservationInput::TangentDirection(tangent) => {
+                        tangent.configuration().is_soft()
+                    }
+                });
         if has_soft_relation && self.field_energy_normalization.is_none() {
             errors.push(BuildError::MissingFieldEnergyNormalization);
         }
@@ -166,7 +174,7 @@ impl ProblemBuilder {
             .filter_map(|gauge| match gauge.reference() {
                 AdditiveFieldGaugeReference::Point(_) => None,
                 AdditiveFieldGaugeReference::LevelSet(group_id)
-                    if !self.group_ids.contains(group_id) =>
+                    if !self.shared_level_group_ids.contains(group_id) =>
                 {
                     Some((gauge.source_id().clone(), group_id.clone()))
                 }
@@ -199,12 +207,15 @@ impl ProblemBuilder {
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.shared_level_sets
             .sort_by(|left, right| left.group_id().cmp(right.group_id()));
+        self.covariance_groups
+            .sort_by(|left, right| left.group_id().cmp(right.group_id()));
         self.additive_field_gauges
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
             input_coordinate_frame: self.input_coordinate_frame,
             field_unit: self.field_unit,
             observations: self.observations,
+            covariance_groups: self.covariance_groups,
             shared_level_sets: self.shared_level_sets,
             additive_field_gauges: self.additive_field_gauges,
             source_count: self.source_ids.len(),
@@ -253,6 +264,7 @@ impl ProblemBuilder {
             });
         }
         self.group_ids.insert(group_id);
+        self.shared_level_group_ids.insert(group.group_id().clone());
         self.source_ids.extend(
             group
                 .members()
@@ -260,6 +272,31 @@ impl ProblemBuilder {
                 .map(|member| member.source_id().clone()),
         );
         self.shared_level_sets.push(group);
+        Ok(())
+    }
+
+    pub(crate) fn add_covariance_group(&mut self, group: CovarianceGroup) -> Result<(), AddError> {
+        let group_id = group.group_id().clone();
+        if self.group_ids.contains(&group_id) {
+            return Err(AddError::DuplicateGroupId { group_id });
+        }
+        if let Some(member) = group
+            .members()
+            .iter()
+            .find(|member| self.source_ids.contains(member.source_id()))
+        {
+            return Err(AddError::DuplicateSourceId {
+                source_id: member.source_id().clone(),
+            });
+        }
+        self.group_ids.insert(group_id);
+        self.source_ids.extend(
+            group
+                .members()
+                .iter()
+                .map(|member| member.source_id().clone()),
+        );
+        self.covariance_groups.push(group);
         Ok(())
     }
 
@@ -342,6 +379,11 @@ impl ProblemSnapshot {
             .count()
     }
 
+    /// Returns the number of complete named covariance groups.
+    pub fn covariance_group_count(&self) -> usize {
+        self.inner.covariance_groups.len()
+    }
+
     /// Returns the number of independently identified caller sources.
     pub fn source_count(&self) -> usize {
         self.inner.source_count
@@ -353,6 +395,7 @@ pub(crate) struct ProblemData {
     pub(crate) input_coordinate_frame: InputCoordinateFrame,
     pub(crate) field_unit: FieldUnitLabel,
     pub(crate) observations: Vec<ObservationInput>,
+    pub(crate) covariance_groups: Vec<CovarianceGroup>,
     pub(crate) shared_level_sets: Vec<SharedLevelSetInput>,
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
     pub(crate) source_count: usize,

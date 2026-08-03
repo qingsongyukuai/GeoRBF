@@ -4,10 +4,13 @@ GeoRBF is a Rust library for fitting implicit geological scalar fields from
 geological observations.
 
 Version 0.1.0 exposes complete public Cubic Equality tracers. The current v0.2
-development surface adds the first complete soft tracer: a Field
-Value Observation may carry either a checked positive `QuadraticPenalty` or a
-checked positive statistical `StandardDeviation`, while the problem supplies
-an explicit checked `FieldEnergyNormalization`. Callers otherwise declare
+development surface adds physical soft residual blocks. Field Value and
+Tangent observations support checked scalar penalty/statistical configuration;
+complete Gradient observations support isotropic Euclidean quadratic penalties,
+isotropic standard deviations, or explicit checked three-component covariance.
+An atomic `CovarianceGroupBuilder` joins same-dimension scalar and vector
+members under one named covariance and one identifiable group objective. Every
+soft problem supplies an explicit checked `FieldEnergyNormalization`. Callers otherwise declare
 an input coordinate frame and units; add hard absolute field-value and complete
 gradient observations, unoriented tangent directions, or atomically built
 shared level sets and geological horizons; choose an explicit additive field
@@ -125,6 +128,50 @@ loss contribution. `field_energy` and `total_objective` are independently
 recomputed during recovery; a failed objective or provenance round trip returns
 a structured fit failure and never a model.
 
+## Soft vector residuals and covariance groups
+
+Gradient covariance and named cross-member covariance remain physical ordered
+residual blocks; whitening is private derived state with a checked inverse:
+
+```rust,no_run
+use georbf::kernel::FieldEnergyNormalization;
+use georbf::observation::{CovarianceGroupBuilder, CovarianceMatrix};
+use georbf::{GroupId, Point3, ProblemBuilder, SourceId, Vector3};
+# use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let frame = InputCoordinateFrame::try_new(
+#     ["east", "north", "elevation"], Handedness::Right, LengthUnitLabel::new("m")
+# )?;
+# let mut problem = ProblemBuilder::new(frame, FieldUnitLabel::new("field-unit"));
+let mut group = CovarianceGroupBuilder::new(GroupId::new("derivative-survey"));
+group.add_gradient_member(
+    SourceId::new("gradient-1"),
+    Point3::try_new(0.0, 0.0, 0.0)?,
+    Vector3::try_new(0.5, -0.25, 1.0)?,
+)?;
+group.add_tangent_member(
+    SourceId::new("tangent-1"),
+    Point3::try_new(1.0, 0.0, 0.0)?,
+    Vector3::try_new(1.0, 1.0, 0.0)?,
+)?;
+let covariance = CovarianceMatrix::try_new([
+    [1.0, 0.0, 0.0, 0.25],
+    [0.0, 2.0, 0.0, 0.0],
+    [0.0, 0.0, 3.0, 0.0],
+    [0.25, 0.0, 0.0, 1.0],
+])?;
+problem.add(group.build(covariance)?)?;
+problem.set_field_energy_normalization(FieldEnergyNormalization::try_new(3.0)?)?;
+# Ok(())
+# }
+```
+
+`FitReport::soft_gradients` and `soft_tangents` recover independent residuals.
+`FitReport::covariance_groups` preserves member `SourceId`, ordered original-unit
+residuals, whitened recovery evidence, and only the unique group-level objective
+contribution; it deliberately exposes no invented per-member contribution.
+
 ```compile_fail
 struct CustomInput;
 
@@ -161,3 +208,5 @@ The cumulative release evidence and traceability audit are recorded in
 [#25](docs/implementation/25-equality-spine-release.md).
 The first v0.2 soft-objective tracer and its requirement mapping are recorded in
 [#27](docs/implementation/27-soft-field-value-objective.md).
+Complete first-order residual blocks and named covariance groups are recorded in
+[#28](docs/implementation/28-soft-first-order-residual-blocks.md).

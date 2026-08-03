@@ -37,7 +37,7 @@ use crate::functional::{
     CanonicalFunctional, FunctionalDimension, FunctionalTerm, FunctionalUse, GroupId, RelationId,
     ResidualId, SemanticRolePath, SourceId, UsageProvenance,
 };
-use crate::geometry::FieldUnitLabel;
+use crate::geometry::{FieldUnitLabel, Vector3};
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::kkt::{
     AlgebraicAnalysisPhase as InternalBackendAnalysisPhase,
@@ -53,7 +53,8 @@ use crate::kkt::{
 use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
 use crate::observation::{
-    FieldValueConfiguration, ObservationInput, QuadraticPenalty, StandardDeviation,
+    CovarianceGroupMember, CovarianceMatrix, FieldValueConfiguration, GradientConfiguration,
+    ObservationInput, QuadraticPenalty, StandardDeviation, TangentConfiguration,
 };
 use crate::problem::{ProblemSnapshot, ThreadBudget};
 use crate::relation::AdditiveFieldGaugeReference;
@@ -133,6 +134,7 @@ struct CubicProblemSizeParts {
     scalar_soft_relations: usize,
     canonical_hard_equalities: usize,
     canonical_soft_equalities: usize,
+    quadratic_objective_terms: usize,
     center_coefficients: usize,
     semantic_latents: usize,
     solver_hard_equalities: usize,
@@ -155,7 +157,7 @@ impl ProblemSize {
             center_coefficients: Some(parts.center_coefficients),
             semantic_latents: parts.semantic_latents,
             auxiliary_variables: 0,
-            quadratic_objective_terms: parts.canonical_soft_equalities,
+            quadratic_objective_terms: parts.quadratic_objective_terms,
             cone_blocks: 0,
             primal_variables: Some(primal_variables),
             equality_constraints: Some(equality_constraints),
@@ -312,6 +314,220 @@ impl SoftFieldValueAssessment {
     }
 }
 
+/// Recovered complete-gradient vector residual and its one block-level loss.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftGradientAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    target: Vector3,
+    recovered_gradient: Vector3,
+    residual: Vector3,
+    quadratic_penalty: Option<QuadraticPenalty>,
+    standard_deviation: Option<StandardDeviation>,
+    covariance: Option<CovarianceMatrix>,
+    whitened_residual: Box<[f64]>,
+    whitening_round_trip_error: f64,
+    loss: f64,
+}
+
+impl SoftGradientAssessment {
+    /// Returns the caller-owned source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable ordered-vector residual role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the observed complete gradient in caller units.
+    pub fn target(&self) -> Vector3 {
+        self.target
+    }
+
+    /// Returns the independently recovered complete gradient.
+    pub fn recovered_gradient(&self) -> Vector3 {
+        self.recovered_gradient
+    }
+
+    /// Returns recovered gradient minus target in field-per-length units.
+    pub fn residual(&self) -> Vector3 {
+        self.residual
+    }
+
+    /// Returns the Euclidean vector penalty when configured.
+    pub fn quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.quadratic_penalty
+    }
+
+    /// Returns the isotropic statistical standard deviation when configured.
+    pub fn standard_deviation(&self) -> Option<StandardDeviation> {
+        self.standard_deviation
+    }
+
+    /// Returns the statistical covariance when configured.
+    pub fn covariance(&self) -> Option<&CovarianceMatrix> {
+        self.covariance.as_ref()
+    }
+
+    /// Returns the derived whitened residual in canonical component order.
+    pub fn whitened_residual(&self) -> &[f64] {
+        &self.whitened_residual
+    }
+
+    /// Returns the whitening forward/inverse recovery error.
+    pub fn whitening_round_trip_error(&self) -> f64 {
+        self.whitening_round_trip_error
+    }
+
+    /// Returns this vector block's dimensionless objective contribution.
+    pub fn loss(&self) -> f64 {
+        self.loss
+    }
+}
+
+/// Recovered scalar directional-derivative residual for one soft Tangent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftTangentAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    recovered_directional_derivative: f64,
+    residual: f64,
+    quadratic_penalty: Option<QuadraticPenalty>,
+    standard_deviation: Option<StandardDeviation>,
+    loss: f64,
+}
+
+impl SoftTangentAssessment {
+    /// Returns the caller-owned source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable directional-derivative residual role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the Tangent target, which is exactly zero.
+    pub fn target(&self) -> f64 {
+        0.0
+    }
+
+    /// Returns the independently recovered directional derivative.
+    pub fn recovered_directional_derivative(&self) -> f64 {
+        self.recovered_directional_derivative
+    }
+
+    /// Returns recovered directional derivative minus zero target.
+    pub fn residual(&self) -> f64 {
+        self.residual
+    }
+
+    /// Returns the non-statistical penalty when configured.
+    pub fn quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.quadratic_penalty
+    }
+
+    /// Returns the statistical standard deviation when configured.
+    pub fn standard_deviation(&self) -> Option<StandardDeviation> {
+        self.standard_deviation
+    }
+
+    /// Returns this scalar residual's dimensionless objective contribution.
+    pub fn loss(&self) -> f64 {
+        self.loss
+    }
+}
+
+/// One original-unit member residual recovered from a covariance group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CovarianceGroupMemberAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    dimension: ResidualDimension,
+    target_components: Box<[f64]>,
+    recovered_components: Box<[f64]>,
+    residual_components: Box<[f64]>,
+}
+
+impl CovarianceGroupMemberAssessment {
+    /// Returns the stable caller-owned member identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable scalar or ordered-vector member role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the common physical residual dimension.
+    pub fn dimension(&self) -> ResidualDimension {
+        self.dimension
+    }
+
+    /// Returns target components in the group's explicit component order.
+    pub fn target_components(&self) -> &[f64] {
+        &self.target_components
+    }
+
+    /// Returns independently recovered components in original physical units.
+    pub fn recovered_components(&self) -> &[f64] {
+        &self.recovered_components
+    }
+
+    /// Returns recovered-minus-target components in original physical units.
+    pub fn residual_components(&self) -> &[f64] {
+        &self.residual_components
+    }
+}
+
+/// Recovered observables and the only identifiable objective contribution for
+/// one named covariance group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CovarianceGroupAssessment {
+    group_id: GroupId,
+    covariance: CovarianceMatrix,
+    members: Vec<CovarianceGroupMemberAssessment>,
+    whitened_residual: Box<[f64]>,
+    whitening_round_trip_error: f64,
+    objective_contribution: f64,
+}
+
+impl CovarianceGroupAssessment {
+    /// Returns the stable caller-owned group identity.
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+
+    /// Returns the checked covariance in explicit flattened member order.
+    pub fn covariance(&self) -> &CovarianceMatrix {
+        &self.covariance
+    }
+
+    /// Returns original member blocks without invented member-level losses.
+    pub fn members(&self) -> &[CovarianceGroupMemberAssessment] {
+        &self.members
+    }
+
+    /// Returns the derived whitened residual vector.
+    pub fn whitened_residual(&self) -> &[f64] {
+        &self.whitened_residual
+    }
+
+    /// Returns the whitening forward/inverse recovery error.
+    pub fn whitening_round_trip_error(&self) -> f64 {
+        self.whitening_round_trip_error
+    }
+
+    /// Returns the unique group-level dimensionless objective contribution.
+    pub fn objective_contribution(&self) -> f64 {
+        self.objective_contribution
+    }
+}
+
 impl HardRelationAssessment {
     /// Returns the caller-owned source identity.
     pub fn source_id(&self) -> &SourceId {
@@ -426,6 +642,9 @@ pub struct FitReport {
     requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
     soft_field_values: Vec<SoftFieldValueAssessment>,
+    soft_gradients: Vec<SoftGradientAssessment>,
+    soft_tangents: Vec<SoftTangentAssessment>,
+    covariance_groups: Vec<CovarianceGroupAssessment>,
     shared_level_values: Vec<SharedLevelValue>,
     field_energy: Option<f64>,
     total_objective: Option<f64>,
@@ -480,6 +699,21 @@ impl FitReport {
     /// Returns soft Field Value assessments in stable SourceId order.
     pub fn soft_field_values(&self) -> &[SoftFieldValueAssessment] {
         &self.soft_field_values
+    }
+
+    /// Returns complete soft Gradient assessments in stable SourceId order.
+    pub fn soft_gradients(&self) -> &[SoftGradientAssessment] {
+        &self.soft_gradients
+    }
+
+    /// Returns soft Tangent assessments in stable SourceId order.
+    pub fn soft_tangents(&self) -> &[SoftTangentAssessment] {
+        &self.soft_tangents
+    }
+
+    /// Returns named covariance-group assessments in stable GroupId order.
+    pub fn covariance_groups(&self) -> &[CovarianceGroupAssessment] {
+        &self.covariance_groups
     }
 
     /// Returns every recovered shared-level semantic latent in GroupId order.
@@ -601,11 +835,13 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         soft: usize::MAX,
     });
     let scalar_relation_count = scalar_relation_counts.total().unwrap_or(usize::MAX);
+    let quadratic_objective_terms = quadratic_objective_term_count(snapshot).unwrap_or(usize::MAX);
     let source_identifier_bytes = source_identifier_bytes(snapshot).unwrap_or(usize::MAX);
     let conservative_problem_size = conservative_problem_size(
         snapshot.inner.observations.len(),
         scalar_relation_counts,
         snapshot.inner.shared_level_sets.len(),
+        quadratic_objective_terms,
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
     let source_lifecycle_capacity =
@@ -639,6 +875,12 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         .observations
         .iter()
         .any(|observation| matches!(observation, ObservationInput::FieldValue(_)))
+        || snapshot.inner.covariance_groups.iter().any(|group| {
+            group
+                .members()
+                .iter()
+                .any(|member| matches!(member, CovarianceGroupMember::FieldValue(_)))
+        })
         || !snapshot.inner.additive_field_gauges.is_empty();
     if !has_absolute_reference {
         let mut source_ids = snapshot
@@ -646,6 +888,14 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             .observations
             .iter()
             .map(|observation| observation.source_id().clone())
+            .chain(
+                snapshot
+                    .inner
+                    .covariance_groups
+                    .iter()
+                    .flat_map(|group| group.members())
+                    .map(|member| member.source_id().clone()),
+            )
             .chain(
                 snapshot
                     .inner
@@ -687,6 +937,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         scalar_soft_relations: scalar_relation_counts.soft,
         canonical_hard_equalities: lowering.canonical_equalities.len(),
         canonical_soft_equalities: lowering.canonical_soft_equalities.len(),
+        quadratic_objective_terms: lowering.canonical_soft_objectives.len(),
         center_coefficients: fitting_uses.len(),
         semantic_latents: lowering.semantic_latents.len(),
         solver_hard_equalities: lowering.solver_equality_count(),
@@ -757,6 +1008,9 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
         soft_field_values: Vec::new(),
+        soft_gradients: Vec::new(),
+        soft_tangents: Vec::new(),
+        covariance_groups: Vec::new(),
         shared_level_values: Vec::new(),
         field_energy: None,
         total_objective: None,
@@ -797,6 +1051,12 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
             ObservationInput::FieldValue(value) if value.configuration().is_soft() => {
                 Some((hard, soft.checked_add(1)?))
             }
+            ObservationInput::Gradient(gradient) if gradient.configuration().is_soft() => {
+                Some((hard, soft.checked_add(3)?))
+            }
+            ObservationInput::TangentDirection(tangent) if tangent.configuration().is_soft() => {
+                Some((hard, soft.checked_add(1)?))
+            }
             ObservationInput::FieldValue(_) | ObservationInput::TangentDirection(_) => {
                 Some((hard.checked_add(1)?, soft))
             }
@@ -810,12 +1070,33 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
         .try_fold(0_usize, |count, group| {
             count.checked_add(group.members().len())
         })?;
+    let covariance_group_soft = snapshot
+        .inner
+        .covariance_groups
+        .iter()
+        .try_fold(0_usize, |count, group| {
+            count.checked_add(group.scalar_residual_count())
+        })?;
     Some(ScalarRelationCounts {
         hard: observation_hard
             .checked_add(group_hard)?
             .checked_add(snapshot.inner.additive_field_gauges.len())?,
-        soft: observation_soft,
+        soft: observation_soft.checked_add(covariance_group_soft)?,
     })
+}
+
+fn quadratic_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
+    let independent = snapshot
+        .inner
+        .observations
+        .iter()
+        .filter(|observation| match observation {
+            ObservationInput::FieldValue(value) => value.configuration().is_soft(),
+            ObservationInput::Gradient(gradient) => gradient.configuration().is_soft(),
+            ObservationInput::TangentDirection(tangent) => tangent.configuration().is_soft(),
+        })
+        .count();
+    independent.checked_add(snapshot.inner.covariance_groups.len())
 }
 
 fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
@@ -848,6 +1129,23 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
                         .and_then(|bytes| bytes.checked_add(member.source_id().as_str().len()))
                 })
             })?;
+    let covariance_group_bytes =
+        snapshot
+            .inner
+            .covariance_groups
+            .iter()
+            .try_fold(0_usize, |bytes, group| {
+                group.members().iter().try_fold(bytes, |bytes, member| {
+                    let multiplicity = member.scalar_residual_count();
+                    group
+                        .group_id()
+                        .as_str()
+                        .len()
+                        .checked_add(member.source_id().as_str().len())?
+                        .checked_mul(multiplicity)
+                        .and_then(|member_bytes| bytes.checked_add(member_bytes))
+                })
+            })?;
     let gauge_bytes =
         snapshot
             .inner
@@ -864,6 +1162,7 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
             })?;
     observation_bytes
         .checked_add(shared_level_bytes)?
+        .checked_add(covariance_group_bytes)?
         .checked_add(gauge_bytes)
 }
 
@@ -880,6 +1179,7 @@ fn conservative_problem_size(
     input_observations: usize,
     scalar_relations: ScalarRelationCounts,
     semantic_latents: usize,
+    quadratic_objective_terms: usize,
 ) -> ProblemSize {
     ProblemSize {
         input_observations,
@@ -890,7 +1190,7 @@ fn conservative_problem_size(
         center_coefficients: None,
         semantic_latents,
         auxiliary_variables: 0,
-        quadratic_objective_terms: scalar_relations.soft,
+        quadratic_objective_terms,
         cone_blocks: 0,
         primal_variables: None,
         equality_constraints: None,
@@ -1041,7 +1341,20 @@ struct ScalarObservation {
     functional: ScalarFunctionalDescriptor,
     semantic_role: SemanticRolePath,
     target: f64,
-    field_value_configuration: FieldValueConfiguration,
+}
+
+#[derive(Debug, Clone)]
+struct ObservationResidualBlock {
+    components: Vec<ScalarObservation>,
+    configuration: ResidualBlockConfiguration,
+}
+
+#[derive(Debug, Clone)]
+enum ResidualBlockConfiguration {
+    Hard,
+    QuadraticPenalty(QuadraticPenalty),
+    StandardDeviation(StandardDeviation),
+    Covariance(CovarianceMatrix),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1081,39 +1394,120 @@ impl ScalarFunctionalDescriptor {
     }
 }
 
-fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservation> {
+fn observation_residual_blocks(observations: &[ObservationInput]) -> Vec<ObservationResidualBlock> {
     observations
         .iter()
-        .flat_map(|observation| match observation {
-            ObservationInput::FieldValue(observation) => vec![ScalarObservation {
+        .map(|observation| match observation {
+            ObservationInput::FieldValue(observation) => ObservationResidualBlock {
+                components: vec![ScalarObservation {
+                    source_id: observation.source_id().clone(),
+                    group_id: None,
+                    support: observation.location().components(),
+                    functional: ScalarFunctionalDescriptor::field_value(),
+                    semantic_role: SemanticRolePath::new("field-value-observation/value"),
+                    target: observation.value(),
+                }],
+                configuration: match observation.configuration() {
+                    FieldValueConfiguration::Hard => ResidualBlockConfiguration::Hard,
+                    FieldValueConfiguration::QuadraticPenalty(penalty) => {
+                        ResidualBlockConfiguration::QuadraticPenalty(penalty)
+                    }
+                    FieldValueConfiguration::StandardDeviation(standard_deviation) => {
+                        ResidualBlockConfiguration::StandardDeviation(standard_deviation)
+                    }
+                },
+            },
+            ObservationInput::Gradient(observation) => ObservationResidualBlock {
+                components: observation
+                    .gradient()
+                    .components()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(axis, target)| ScalarObservation {
+                        source_id: observation.source_id().clone(),
+                        group_id: None,
+                        support: observation.location().components(),
+                        functional: ScalarFunctionalDescriptor::gradient_component(axis),
+                        semantic_role: SemanticRolePath::new(format!(
+                            "gradient-observation/component/{axis}"
+                        )),
+                        target,
+                    })
+                    .collect(),
+                configuration: match observation.configuration() {
+                    GradientConfiguration::Hard => ResidualBlockConfiguration::Hard,
+                    GradientConfiguration::QuadraticPenalty(penalty) => {
+                        ResidualBlockConfiguration::QuadraticPenalty(*penalty)
+                    }
+                    GradientConfiguration::StandardDeviation(standard_deviation) => {
+                        ResidualBlockConfiguration::StandardDeviation(*standard_deviation)
+                    }
+                    GradientConfiguration::Covariance(covariance) => {
+                        ResidualBlockConfiguration::Covariance(covariance.clone())
+                    }
+                },
+            },
+            ObservationInput::TangentDirection(observation) => ObservationResidualBlock {
+                components: vec![ScalarObservation {
+                    source_id: observation.source_id().clone(),
+                    group_id: None,
+                    support: observation.location().components(),
+                    functional: ScalarFunctionalDescriptor::directional_derivative(
+                        observation.direction().components(),
+                    ),
+                    semantic_role: SemanticRolePath::new(
+                        "tangent-direction-observation/directional-derivative",
+                    ),
+                    target: 0.0,
+                }],
+                configuration: match observation.configuration() {
+                    TangentConfiguration::Hard => ResidualBlockConfiguration::Hard,
+                    TangentConfiguration::QuadraticPenalty(penalty) => {
+                        ResidualBlockConfiguration::QuadraticPenalty(penalty)
+                    }
+                    TangentConfiguration::StandardDeviation(standard_deviation) => {
+                        ResidualBlockConfiguration::StandardDeviation(standard_deviation)
+                    }
+                },
+            },
+        })
+        .collect()
+}
+
+fn covariance_group_components(
+    group_id: &GroupId,
+    members: &[CovarianceGroupMember],
+) -> Vec<ScalarObservation> {
+    members
+        .iter()
+        .flat_map(|member| match member {
+            CovarianceGroupMember::FieldValue(observation) => vec![ScalarObservation {
                 source_id: observation.source_id().clone(),
-                group_id: None,
+                group_id: Some(group_id.clone()),
                 support: observation.location().components(),
                 functional: ScalarFunctionalDescriptor::field_value(),
                 semantic_role: SemanticRolePath::new("field-value-observation/value"),
                 target: observation.value(),
-                field_value_configuration: observation.configuration(),
             }],
-            ObservationInput::Gradient(observation) => observation
+            CovarianceGroupMember::Gradient(observation) => observation
                 .gradient()
                 .components()
                 .into_iter()
                 .enumerate()
                 .map(|(axis, target)| ScalarObservation {
                     source_id: observation.source_id().clone(),
-                    group_id: None,
+                    group_id: Some(group_id.clone()),
                     support: observation.location().components(),
                     functional: ScalarFunctionalDescriptor::gradient_component(axis),
                     semantic_role: SemanticRolePath::new(format!(
                         "gradient-observation/component/{axis}"
                     )),
                     target,
-                    field_value_configuration: FieldValueConfiguration::Hard,
                 })
                 .collect(),
-            ObservationInput::TangentDirection(observation) => vec![ScalarObservation {
+            CovarianceGroupMember::Tangent(observation) => vec![ScalarObservation {
                 source_id: observation.source_id().clone(),
-                group_id: None,
+                group_id: Some(group_id.clone()),
                 support: observation.location().components(),
                 functional: ScalarFunctionalDescriptor::directional_derivative(
                     observation.direction().components(),
@@ -1122,7 +1516,6 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                     "tangent-direction-observation/directional-derivative",
                 ),
                 target: 0.0,
-                field_value_configuration: FieldValueConfiguration::Hard,
             }],
         })
         .collect()
@@ -1160,13 +1553,22 @@ impl EqualityLowering {
         }
     }
 
-    fn push_soft(&mut self, equality: CanonicalSoftEquality, loss: CanonicalSoftLoss) {
+    fn push_soft_block(
+        &mut self,
+        equalities: Vec<CanonicalSoftEquality>,
+        loss: CanonicalSoftLoss,
+        covariance_group: Option<GroupId>,
+    ) {
         self.canonical_soft_objectives
-            .push(CanonicalSoftObjective::new(
-                equality.provenance().residual().clone(),
+            .push(CanonicalSoftObjective::new_block(
+                equalities
+                    .iter()
+                    .map(|equality| equality.provenance().residual().clone())
+                    .collect(),
                 loss,
+                covariance_group,
             ));
-        self.canonical_soft_equalities.push(equality);
+        self.canonical_soft_equalities.extend(equalities);
     }
 
     fn push_source(&mut self, equality: CanonicalHardEquality) {
@@ -1586,44 +1988,68 @@ fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEquali
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
     let mut value_constraints = CanonicalValueConstraintForest::default();
-    for observation in scalar_observations(&snapshot.inner.observations) {
-        let soft_loss = match observation.field_value_configuration {
-            FieldValueConfiguration::Hard => None,
-            FieldValueConfiguration::QuadraticPenalty(penalty) => {
+    for block in observation_residual_blocks(&snapshot.inner.observations) {
+        let soft_loss = match &block.configuration {
+            ResidualBlockConfiguration::Hard => None,
+            ResidualBlockConfiguration::QuadraticPenalty(penalty) => {
                 Some(CanonicalSoftLoss::QuadraticPenalty {
                     weight: penalty.weight(),
                 })
             }
-            FieldValueConfiguration::StandardDeviation(standard_deviation) => {
+            ResidualBlockConfiguration::StandardDeviation(standard_deviation) => {
                 Some(CanonicalSoftLoss::StandardDeviation {
                     standard_deviation: standard_deviation.value(),
                 })
             }
+            ResidualBlockConfiguration::Covariance(covariance) => {
+                Some(CanonicalSoftLoss::covariance(
+                    covariance.dimension(),
+                    covariance.entries().to_vec(),
+                ))
+            }
         };
         if let Some(loss) = soft_loss {
-            lowering.push_soft(soft_field_equality(&observation), loss);
+            lowering.push_soft_block(
+                block.components.iter().map(soft_field_equality).collect(),
+                loss,
+                None,
+            );
             continue;
         }
-        let edge =
-            (observation.functional.dimension == FunctionalDimension::FieldValue).then(|| {
-                value_constraints.add_absolute_support(
-                    observation.support,
-                    observation.target,
-                    &observation.source_id,
-                )
-            });
-        if let Some(edge) = &edge {
-            lowering.record_graph_conflict(edge, &observation.semantic_role);
+        for observation in block.components {
+            let edge =
+                (observation.functional.dimension == FunctionalDimension::FieldValue).then(|| {
+                    value_constraints.add_absolute_support(
+                        observation.support,
+                        observation.target,
+                        &observation.source_id,
+                    )
+                });
+            if let Some(edge) = &edge {
+                lowering.record_graph_conflict(edge, &observation.semantic_role);
+            }
+            let participation = if edge
+                .as_ref()
+                .is_some_and(|edge| !matches!(edge, CanonicalValueEdgeOutcome::Independent))
+            {
+                CanonicalEqualityParticipation::VerificationOnly
+            } else {
+                CanonicalEqualityParticipation::SolverConstraint
+            };
+            lowering.push_source(field_equality(&observation, participation));
         }
-        let participation = if edge
-            .as_ref()
-            .is_some_and(|edge| !matches!(edge, CanonicalValueEdgeOutcome::Independent))
-        {
-            CanonicalEqualityParticipation::VerificationOnly
-        } else {
-            CanonicalEqualityParticipation::SolverConstraint
-        };
-        lowering.push_source(field_equality(&observation, participation));
+    }
+
+    for group in &snapshot.inner.covariance_groups {
+        let components = covariance_group_components(group.group_id(), group.members());
+        lowering.push_soft_block(
+            components.iter().map(soft_field_equality).collect(),
+            CanonicalSoftLoss::covariance(
+                group.covariance().dimension(),
+                group.covariance().entries().to_vec(),
+            ),
+            Some(group.group_id().clone()),
+        );
     }
 
     let latent_index_by_group = snapshot
@@ -1725,7 +2151,6 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                         functional: ScalarFunctionalDescriptor::field_value(),
                         semantic_role: role,
                         target: gauge.value(),
-                        field_value_configuration: FieldValueConfiguration::Hard,
                     },
                     participation,
                 ));
@@ -1849,7 +2274,7 @@ fn success_report(
         center_coefficients: Some(solution.assembly.field_coefficients),
         semantic_latents: solution.assembly.semantic_latents,
         auxiliary_variables: 0,
-        quadratic_objective_terms: solution.soft_equalities.len(),
+        quadratic_objective_terms: solution.soft_objectives.len(),
         cone_blocks: 0,
         primal_variables: Some(solution.assembly.primal_variables),
         equality_constraints: Some(
@@ -1871,15 +2296,33 @@ fn success_report(
             .then_with(|| left.semantic_role.cmp(&right.semantic_role))
     });
     let mut soft_field_values = solution
-        .soft_equalities
+        .soft_objectives
         .iter()
-        .map(soft_field_value_assessment)
+        .filter_map(|objective| soft_field_value_assessment(objective, &solution.soft_equalities))
         .collect::<Vec<_>>();
     soft_field_values.sort_by(|left, right| {
         left.source_id
             .cmp(&right.source_id)
             .then_with(|| left.semantic_role.cmp(&right.semantic_role))
     });
+    let mut soft_gradients = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| soft_gradient_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    soft_gradients.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut soft_tangents = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| soft_tangent_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    soft_tangents.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut covariance_groups = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| covariance_group_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    covariance_groups.sort_by(|left, right| left.group_id.cmp(&right.group_id));
     let backend_fingerprint = public_backend_fingerprint(&solution.backend.backend);
     let attempts = public_attempts(&solution.backend.attempts);
     FitReport {
@@ -1890,6 +2333,9 @@ fn success_report(
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
         soft_field_values,
+        soft_gradients,
+        soft_tangents,
+        covariance_groups,
         shared_level_values: shared_level_values.to_vec(),
         field_energy: Some(solution.field_energy),
         total_objective: Some(solution.total_objective),
@@ -1948,12 +2394,20 @@ fn hard_relation_assessment(
 }
 
 fn soft_field_value_assessment(
-    relation: &crate::cubic_equality::RecoveredSoftEquality,
-) -> SoftFieldValueAssessment {
-    let (quadratic_penalty, standard_deviation) = match relation.loss {
+    objective: &crate::cubic_equality::RecoveredSoftObjective,
+    relations: &[crate::cubic_equality::RecoveredSoftEquality],
+) -> Option<SoftFieldValueAssessment> {
+    if objective.covariance_group.is_some() || objective.canonical_indices.len() != 1 {
+        return None;
+    }
+    let relation = &relations[objective.canonical_indices[0]];
+    if relation.provenance.semantic_role().as_str() != "field-value-observation/value" {
+        return None;
+    }
+    let (quadratic_penalty, standard_deviation) = match &objective.loss {
         CanonicalSoftLoss::QuadraticPenalty { weight } => (
             Some(
-                QuadraticPenalty::try_new(weight)
+                QuadraticPenalty::try_new(*weight)
                     .expect("canonical quadratic penalties retain checked public values"),
             ),
             None,
@@ -1961,12 +2415,13 @@ fn soft_field_value_assessment(
         CanonicalSoftLoss::StandardDeviation { standard_deviation } => (
             None,
             Some(
-                StandardDeviation::try_new(standard_deviation)
+                StandardDeviation::try_new(*standard_deviation)
                     .expect("canonical standard deviations retain checked public values"),
             ),
         ),
+        CanonicalSoftLoss::Covariance { .. } => return None,
     };
-    SoftFieldValueAssessment {
+    Some(SoftFieldValueAssessment {
         source_id: relation.provenance.source().clone(),
         semantic_role: relation.provenance.semantic_role().clone(),
         target: relation.target,
@@ -1974,8 +2429,192 @@ fn soft_field_value_assessment(
         residual: relation.residual,
         quadratic_penalty,
         standard_deviation,
-        loss: relation.objective_contribution,
+        loss: objective.objective_contribution,
+    })
+}
+
+fn soft_gradient_assessment(
+    objective: &crate::cubic_equality::RecoveredSoftObjective,
+    relations: &[crate::cubic_equality::RecoveredSoftEquality],
+) -> Option<SoftGradientAssessment> {
+    if objective.covariance_group.is_some() || objective.canonical_indices.len() != 3 {
+        return None;
     }
+    let components = objective
+        .canonical_indices
+        .iter()
+        .map(|index| &relations[*index])
+        .collect::<Vec<_>>();
+    if components.iter().enumerate().any(|(axis, relation)| {
+        relation.provenance.semantic_role().as_str()
+            != format!("gradient-observation/component/{axis}")
+            || relation.provenance.source() != components[0].provenance.source()
+    }) {
+        return None;
+    }
+    let vector = |values: [f64; 3]| {
+        Vector3::try_new(values[0], values[1], values[2])
+            .expect("recovered finite gradient components form a public vector")
+    };
+    let target = vector(std::array::from_fn(|axis| components[axis].target));
+    let recovered_gradient = vector(std::array::from_fn(|axis| components[axis].value));
+    let residual = vector(std::array::from_fn(|axis| components[axis].residual));
+    let (quadratic_penalty, standard_deviation, covariance) = match &objective.loss {
+        CanonicalSoftLoss::QuadraticPenalty { weight } => (
+            Some(QuadraticPenalty::try_new(*weight).expect("canonical penalty stays checked")),
+            None,
+            None,
+        ),
+        CanonicalSoftLoss::StandardDeviation { standard_deviation } => (
+            None,
+            Some(
+                StandardDeviation::try_new(*standard_deviation)
+                    .expect("canonical uncertainty stays checked"),
+            ),
+            None,
+        ),
+        CanonicalSoftLoss::Covariance {
+            dimension,
+            covariance,
+            ..
+        } => {
+            let rows = covariance
+                .chunks_exact(*dimension)
+                .map(<[f64]>::to_vec)
+                .collect();
+            (
+                None,
+                None,
+                Some(
+                    CovarianceMatrix::try_from_rows(rows)
+                        .expect("canonical covariance stays checked"),
+                ),
+            )
+        }
+    };
+    Some(SoftGradientAssessment {
+        source_id: components[0].provenance.source().clone(),
+        semantic_role: SemanticRolePath::new("gradient-observation/vector"),
+        target,
+        recovered_gradient,
+        residual,
+        quadratic_penalty,
+        standard_deviation,
+        covariance,
+        whitened_residual: objective.whitened_residual.clone().into(),
+        whitening_round_trip_error: objective.whitening_round_trip_error,
+        loss: objective.objective_contribution,
+    })
+}
+
+fn soft_tangent_assessment(
+    objective: &crate::cubic_equality::RecoveredSoftObjective,
+    relations: &[crate::cubic_equality::RecoveredSoftEquality],
+) -> Option<SoftTangentAssessment> {
+    if objective.covariance_group.is_some() || objective.canonical_indices.len() != 1 {
+        return None;
+    }
+    let relation = &relations[objective.canonical_indices[0]];
+    if relation.provenance.semantic_role().as_str()
+        != "tangent-direction-observation/directional-derivative"
+    {
+        return None;
+    }
+    let (quadratic_penalty, standard_deviation) = match &objective.loss {
+        CanonicalSoftLoss::QuadraticPenalty { weight } => (
+            Some(QuadraticPenalty::try_new(*weight).expect("canonical penalty stays checked")),
+            None,
+        ),
+        CanonicalSoftLoss::StandardDeviation { standard_deviation } => (
+            None,
+            Some(
+                StandardDeviation::try_new(*standard_deviation)
+                    .expect("canonical uncertainty stays checked"),
+            ),
+        ),
+        CanonicalSoftLoss::Covariance { .. } => return None,
+    };
+    Some(SoftTangentAssessment {
+        source_id: relation.provenance.source().clone(),
+        semantic_role: relation.provenance.semantic_role().clone(),
+        recovered_directional_derivative: relation.value,
+        residual: relation.residual,
+        quadratic_penalty,
+        standard_deviation,
+        loss: objective.objective_contribution,
+    })
+}
+
+fn covariance_group_assessment(
+    objective: &crate::cubic_equality::RecoveredSoftObjective,
+    relations: &[crate::cubic_equality::RecoveredSoftEquality],
+) -> Option<CovarianceGroupAssessment> {
+    let group_id = objective.covariance_group.clone()?;
+    let (dimension, covariance_entries) = objective.loss.covariance_entries()?;
+    let covariance = CovarianceMatrix::try_from_rows(
+        covariance_entries
+            .chunks_exact(dimension)
+            .map(<[f64]>::to_vec)
+            .collect(),
+    )
+    .expect("canonical group covariance stays checked");
+    let components = objective
+        .canonical_indices
+        .iter()
+        .map(|index| &relations[*index])
+        .collect::<Vec<_>>();
+    let mut members = Vec::new();
+    let mut start = 0;
+    while start < components.len() {
+        let source_id = components[start].provenance.source();
+        let mut end = start + 1;
+        while end < components.len() && components[end].provenance.source() == source_id {
+            end += 1;
+        }
+        let member_components = &components[start..end];
+        let semantic_role = if member_components.len() == 3
+            && member_components
+                .iter()
+                .enumerate()
+                .all(|(axis, relation)| {
+                    relation.provenance.semantic_role().as_str()
+                        == format!("gradient-observation/component/{axis}")
+                }) {
+            SemanticRolePath::new("gradient-observation/vector")
+        } else {
+            member_components[0].provenance.semantic_role().clone()
+        };
+        let residual_dimension = match member_components[0].dimension {
+            FunctionalDimension::FieldValue => ResidualDimension::FieldValue,
+            FunctionalDimension::FieldValuePerLength => ResidualDimension::FieldValuePerLength,
+        };
+        members.push(CovarianceGroupMemberAssessment {
+            source_id: source_id.clone(),
+            semantic_role,
+            dimension: residual_dimension,
+            target_components: member_components
+                .iter()
+                .map(|relation| relation.target)
+                .collect(),
+            recovered_components: member_components
+                .iter()
+                .map(|relation| relation.value)
+                .collect(),
+            residual_components: member_components
+                .iter()
+                .map(|relation| relation.residual)
+                .collect(),
+        });
+        start = end;
+    }
+    Some(CovarianceGroupAssessment {
+        group_id,
+        covariance,
+        members,
+        whitened_residual: objective.whitened_residual.clone().into(),
+        whitening_round_trip_error: objective.whitening_round_trip_error,
+        objective_contribution: objective.objective_contribution,
+    })
 }
 
 fn failure_report(
@@ -2014,18 +2653,49 @@ fn failure_report(
             ));
             report.canonical_acceptance = public_failure_acceptance(evidence);
             report.hard_relations = public_failed_hard_relations(evidence, source_relations);
+            let recovered_relations = evidence.soft_equalities.as_deref().unwrap_or_default();
             report.soft_field_values = evidence
-                .soft_equalities
+                .soft_objectives
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
-                .map(soft_field_value_assessment)
+                .filter_map(|objective| soft_field_value_assessment(objective, recovered_relations))
                 .collect();
             report.soft_field_values.sort_by(|left, right| {
                 left.source_id
                     .cmp(&right.source_id)
                     .then_with(|| left.semantic_role.cmp(&right.semantic_role))
             });
+            report.soft_gradients = evidence
+                .soft_objectives
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|objective| soft_gradient_assessment(objective, recovered_relations))
+                .collect();
+            report
+                .soft_gradients
+                .sort_by(|left, right| left.source_id.cmp(&right.source_id));
+            report.soft_tangents = evidence
+                .soft_objectives
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|objective| soft_tangent_assessment(objective, recovered_relations))
+                .collect();
+            report
+                .soft_tangents
+                .sort_by(|left, right| left.source_id.cmp(&right.source_id));
+            report.covariance_groups = evidence
+                .soft_objectives
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|objective| covariance_group_assessment(objective, recovered_relations))
+                .collect();
+            report
+                .covariance_groups
+                .sort_by(|left, right| left.group_id.cmp(&right.group_id));
             report.recovery_verification = Some(public_recovery_evidence(evidence));
         }
         CubicEqualityFailure::EmptyEqualitySet | CubicEqualityFailure::NonFiniteTarget { .. } => {}
@@ -2446,6 +3116,7 @@ fn public_failure_acceptance(
             polynomial_round_trip_error: evidence.polynomial_round_trip_error,
             field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
             field_energy_round_trip_error: evidence.field_energy_round_trip_error,
+            whitening_round_trip_error: evidence.whitening_round_trip_error,
             objective_round_trip_error: evidence.objective_round_trip_error,
             objective_verified: evidence.objective_round_trip_error.is_some()
                 && !evidence
@@ -2675,6 +3346,7 @@ fn public_success_acceptance(solution: &CubicEqualitySolution) -> CanonicalAccep
         polynomial_round_trip_error: Some(solution.polynomial_round_trip_error),
         field_coefficient_round_trip_error: Some(solution.field_coefficient_round_trip_error),
         field_energy_round_trip_error: Some(solution.field_energy_round_trip_error),
+        whitening_round_trip_error: Some(solution.whitening_round_trip_error),
         objective_round_trip_error: Some(solution.objective_round_trip_error),
         objective_verified: solution.objective_verified,
         tolerance_round_trip_error: Some(solution.tolerance_round_trip_error),
@@ -2693,6 +3365,7 @@ fn public_recovery_evidence(
         polynomial_round_trip_error: evidence.polynomial_round_trip_error,
         field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
         field_energy_round_trip_error: evidence.field_energy_round_trip_error,
+        whitening_round_trip_error: evidence.whitening_round_trip_error,
         objective_round_trip_error: evidence.objective_round_trip_error,
         tolerance_round_trip_error: evidence.tolerance_round_trip_error,
         no_model_produced: evidence.no_model_produced,
@@ -2804,6 +3477,7 @@ mod tests {
                 scalar_soft_relations: 0,
                 canonical_hard_equalities: 0,
                 canonical_soft_equalities: 0,
+                quadratic_objective_terms: 0,
                 center_coefficients: usize::MAX,
                 semantic_latents: 1,
                 solver_hard_equalities: 0,
@@ -2833,11 +3507,13 @@ mod tests {
             }),
             hard_equalities: None,
             soft_equalities: None,
+            soft_objectives: None,
             relation_tolerances: None,
             hard_equality_violations: None,
             polynomial_round_trip_error: None,
             field_coefficient_round_trip_error: None,
             field_energy_round_trip_error: None,
+            whitening_round_trip_error: None,
             objective_round_trip_error: None,
             tolerance_round_trip_error: None,
             recovery_finite: Some(true),
