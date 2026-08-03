@@ -1228,6 +1228,7 @@ pub(crate) struct CanonicalAffineInequality {
     field: Option<FunctionalUse>,
     latent_coefficients: Vec<SemanticLatentCoefficient>,
     provenance: UsageProvenance,
+    source_provenances: Vec<UsageProvenance>,
     dimension: FunctionalDimension,
     sense: CanonicalInequalitySense,
     bound: f64,
@@ -1333,6 +1334,7 @@ impl CanonicalAffineInequality {
         Self {
             field,
             latent_coefficients,
+            source_provenances: vec![provenance.clone()],
             provenance,
             dimension,
             sense,
@@ -1351,6 +1353,17 @@ impl CanonicalAffineInequality {
 
     pub(crate) fn provenance(&self) -> &UsageProvenance {
         &self.provenance
+    }
+
+    pub(crate) fn source_provenances(&self) -> &[UsageProvenance] {
+        &self.source_provenances
+    }
+
+    pub(crate) fn add_source_provenance(&mut self, provenance: UsageProvenance) {
+        debug_assert!(!self.source_provenances.contains(&provenance));
+        self.source_provenances.push(provenance);
+        self.source_provenances
+            .sort_by(|left, right| left.source().cmp(right.source()));
     }
 
     pub(crate) fn dimension(&self) -> FunctionalDimension {

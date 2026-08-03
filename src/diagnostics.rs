@@ -55,16 +55,16 @@ pub struct InfeasibilityCertificateEvidence {
 }
 
 impl InfeasibilityCertificateEvidence {
-    pub(crate) fn new(values: [f64; 6], finite: bool, backend_invoked: bool) -> Self {
+    pub(crate) fn new(parts: InfeasibilityCertificateEvidenceParts) -> Self {
         Self {
-            normalized_ray_norm: values[0],
-            stationarity_residual: values[1],
-            dual_cone_violation: values[2],
-            separation_margin: values[3],
-            residual_limit: values[4],
-            separation_limit: values[5],
-            finite,
-            backend_invoked,
+            finite: parts.finite,
+            normalized_ray_norm: parts.normalized_ray_norm,
+            stationarity_residual: parts.stationarity_residual,
+            dual_cone_violation: parts.dual_cone_violation,
+            separation_margin: parts.separation_margin,
+            residual_limit: parts.residual_limit,
+            separation_limit: parts.separation_limit,
+            backend_invoked: parts.backend_invoked,
         }
     }
 
@@ -100,6 +100,17 @@ impl InfeasibilityCertificateEvidence {
     pub fn backend_invoked(self) -> bool {
         self.backend_invoked
     }
+}
+
+pub(crate) struct InfeasibilityCertificateEvidenceParts {
+    pub(crate) finite: bool,
+    pub(crate) normalized_ray_norm: f64,
+    pub(crate) stationarity_residual: f64,
+    pub(crate) dual_cone_violation: f64,
+    pub(crate) separation_margin: f64,
+    pub(crate) residual_limit: f64,
+    pub(crate) separation_limit: f64,
+    pub(crate) backend_invoked: bool,
 }
 
 impl UnidentifiedAdditiveGaugeEvidence {
@@ -1124,7 +1135,7 @@ pub struct BackendFingerprint {
     schema_version: u32,
     crate_name: Box<str>,
     crate_version: Box<str>,
-    features: [Box<str>; 2],
+    features: Box<[Box<str>]>,
     algorithm: Box<str>,
     target_arch: Box<str>,
     target_os: Box<str>,
@@ -1136,7 +1147,7 @@ pub(crate) struct BackendFingerprintParts {
     pub(crate) schema_version: u32,
     pub(crate) crate_name: &'static str,
     pub(crate) crate_version: &'static str,
-    pub(crate) features: [&'static str; 2],
+    pub(crate) features: Vec<&'static str>,
     pub(crate) algorithm: &'static str,
     pub(crate) target_arch: &'static str,
     pub(crate) target_os: &'static str,
@@ -1150,7 +1161,7 @@ impl BackendFingerprint {
             schema_version: parts.schema_version,
             crate_name: parts.crate_name.into(),
             crate_version: parts.crate_version.into(),
-            features: parts.features.map(Into::into),
+            features: parts.features.into_iter().map(Into::into).collect(),
             algorithm: parts.algorithm.into(),
             target_arch: parts.target_arch.into(),
             target_os: parts.target_os.into(),
@@ -1175,8 +1186,8 @@ impl BackendFingerprint {
     }
 
     /// Returns the exact enabled backend features.
-    pub fn features(&self) -> [&str; 2] {
-        self.features.each_ref().map(|feature| feature.as_ref())
+    pub fn features(&self) -> &[Box<str>] {
+        &self.features
     }
 
     /// Returns the resolved backend algorithm.
@@ -1455,13 +1466,13 @@ pub struct ConvexResidualEvidence {
 }
 
 impl ConvexResidualEvidence {
-    pub(crate) fn new(values: [f64; 5]) -> Self {
+    pub(crate) fn new(parts: ConvexResidualEvidenceParts) -> Self {
         Self {
-            primal: values[0],
-            dual: values[1],
-            stationarity: values[2],
-            complementarity: values[3],
-            relative_gap: values[4],
+            primal: parts.primal,
+            dual: parts.dual,
+            stationarity: parts.stationarity,
+            complementarity: parts.complementarity,
+            relative_gap: parts.relative_gap,
         }
     }
 
@@ -1485,6 +1496,14 @@ impl ConvexResidualEvidence {
     pub fn relative_gap(self) -> f64 {
         self.relative_gap
     }
+}
+
+pub(crate) struct ConvexResidualEvidenceParts {
+    pub(crate) primal: f64,
+    pub(crate) dual: f64,
+    pub(crate) stationarity: f64,
+    pub(crate) complementarity: f64,
+    pub(crate) relative_gap: f64,
 }
 
 /// Structured reason why an attempt or execution path was rejected.

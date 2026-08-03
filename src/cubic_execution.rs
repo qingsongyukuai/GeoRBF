@@ -369,6 +369,32 @@ struct QpCanonicalRow {
     coefficients: Vec<f64>,
     rhs: f64,
     violation_variable: Option<usize>,
+    provenance_edges: Vec<QpProvenanceEdge>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QpConeRole {
+    Zero,
+    Nonnegative,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct QpProvenanceEdge {
+    provenance: UsageProvenance,
+    derived_block: DerivedBlockId,
+    derived_row: DerivedRowId,
+    derived_column: Option<DerivedColumnId>,
+    backend_row: usize,
+    backend_column: Option<usize>,
+    cone: QpConeRole,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct QpViolationNonnegativeRow {
+    coefficients: Vec<f64>,
+    rhs: f64,
+    violation_variable: usize,
+    provenance_edge: QpProvenanceEdge,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,7 +430,7 @@ struct ConvexQpForm {
     inequality_constraints: usize,
     hard_equality_rows: Vec<QpCanonicalRow>,
     affine_inequality_rows: Vec<QpCanonicalRow>,
-    violation_nonnegative_rows: Vec<Vec<f64>>,
+    violation_nonnegative_rows: Vec<QpViolationNonnegativeRow>,
     soft_objective_blocks: Vec<QpSoftObjectiveBlock>,
     capacity: ConvexQpCapacityPlan,
 }
@@ -596,6 +622,7 @@ fn assemble_qp_form(
         .collect::<Vec<_>>();
     let mut hard_equality_rows = Vec::with_capacity(hard_equalities.len());
     for (canonical_index, equality) in hard_equalities {
+        let backend_row = hard_equality_rows.len();
         hard_equality_rows.push(QpCanonicalRow {
             canonical_index,
             provenance: equality.provenance().clone(),
@@ -612,6 +639,17 @@ fn assemble_qp_form(
             )?,
             rhs: equality.target(),
             violation_variable: None,
+            provenance_edges: vec![QpProvenanceEdge {
+                provenance: equality.provenance().clone(),
+                derived_block: DerivedBlockId::from_residual(equality.provenance().residual()),
+                derived_row: DerivedRowId::from_residual(equality.provenance().residual()),
+                derived_column: equality
+                    .field()
+                    .map(|_| DerivedColumnId::from_residual(equality.provenance().residual())),
+                backend_row,
+                backend_column: None,
+                cone: QpConeRole::Zero,
+            }],
         });
     }
     let mut affine_inequality_rows = Vec::with_capacity(problem.affine_inequalities.len());
@@ -646,15 +684,52 @@ fn assemble_qp_form(
             coefficients,
             rhs: inequality.upper_form_bound(),
             violation_variable,
+            provenance_edges: inequality
+                .source_provenances()
+                .iter()
+                .map(|provenance| QpProvenanceEdge {
+                    provenance: provenance.clone(),
+                    derived_block: DerivedBlockId::from_residual(provenance.residual()),
+                    derived_row: DerivedRowId::from_residual(provenance.residual()),
+                    derived_column: inequality
+                        .field()
+                        .map(|_| DerivedColumnId::from_residual(provenance.residual())),
+                    backend_row: hard_equality_rows.len() + canonical_index,
+                    backend_column: violation_variable,
+                    cone: QpConeRole::Nonnegative,
+                })
+                .collect(),
         });
     }
     let violation_nonnegative_rows = affine_inequality_rows
         .iter()
-        .filter_map(|row| row.violation_variable)
-        .map(|variable| {
-            let mut row = vec![0.0; variables];
-            row[variable] = -1.0;
-            row
+        .filter_map(|row| row.violation_variable.map(|variable| (row, variable)))
+        .enumerate()
+        .map(|(soft_index, (relation_row, variable))| {
+            let mut coefficients = vec![0.0; variables];
+            coefficients[variable] = -1.0;
+            let provenance = relation_row
+                .provenance_edges
+                .first()
+                .expect("a soft inequality retains source provenance")
+                .provenance
+                .clone();
+            QpViolationNonnegativeRow {
+                coefficients,
+                rhs: 0.0,
+                violation_variable: variable,
+                provenance_edge: QpProvenanceEdge {
+                    derived_block: DerivedBlockId::from_residual(provenance.residual()),
+                    derived_row: DerivedRowId::from_residual(provenance.residual()),
+                    derived_column: Some(DerivedColumnId::from_residual(provenance.residual())),
+                    provenance,
+                    backend_row: hard_equality_rows.len()
+                        + affine_inequality_rows.len()
+                        + soft_index,
+                    backend_column: Some(variable),
+                    cone: QpConeRole::Nonnegative,
+                },
+            }
         })
         .collect::<Vec<_>>();
     let soft_objective_blocks = assemble_qp_soft_objectives(representation, problem)?;
@@ -716,7 +791,11 @@ fn assemble_qp_form(
         .iter()
         .chain(&affine_inequality_rows)
         .map(|row| row.coefficients.as_slice())
-        .chain(violation_nonnegative_rows.iter().map(Vec::as_slice))
+        .chain(
+            violation_nonnegative_rows
+                .iter()
+                .map(|row| row.coefficients.as_slice()),
+        )
         .collect::<Vec<_>>();
     let constraints = rows
         .iter()
@@ -726,7 +805,7 @@ fn assemble_qp_form(
         .iter()
         .map(|row| row.rhs)
         .chain(affine_inequality_rows.iter().map(|row| row.rhs))
-        .chain(std::iter::repeat_n(0.0, violation_nonnegative_rows.len()))
+        .chain(violation_nonnegative_rows.iter().map(|row| row.rhs))
         .collect::<Vec<_>>();
     Ok(ConvexQpForm {
         variables,
@@ -2035,7 +2114,11 @@ fn verifies_qp_form_provenance(
             equality.participation() == CanonicalEqualityParticipation::SolverConstraint
         })
         .collect::<Vec<_>>();
-    for (row, (canonical_index, equality)) in form.hard_equality_rows.iter().zip(solver_equalities)
+    for (backend_row, (row, (canonical_index, equality))) in form
+        .hard_equality_rows
+        .iter()
+        .zip(solver_equalities)
+        .enumerate()
     {
         let expected = reduced_affine_row(
             representation,
@@ -2054,6 +2137,18 @@ fn verifies_qp_form_provenance(
             || row.coefficients != expected
             || row.rhs != equality.target()
             || row.violation_variable.is_some()
+            || row.provenance_edges
+                != vec![QpProvenanceEdge {
+                    provenance: equality.provenance().clone(),
+                    derived_block: DerivedBlockId::from_residual(equality.provenance().residual()),
+                    derived_row: DerivedRowId::from_residual(equality.provenance().residual()),
+                    derived_column: equality
+                        .field()
+                        .map(|_| DerivedColumnId::from_residual(equality.provenance().residual())),
+                    backend_row,
+                    backend_column: None,
+                    cone: QpConeRole::Zero,
+                }]
         {
             return Ok(false);
         }
@@ -2081,6 +2176,21 @@ fn verifies_qp_form_provenance(
         if let Some(variable) = expected_violation_variable {
             expected[variable] = -1.0;
         }
+        let expected_provenance_edges = inequality
+            .source_provenances()
+            .iter()
+            .map(|provenance| QpProvenanceEdge {
+                provenance: provenance.clone(),
+                derived_block: DerivedBlockId::from_residual(provenance.residual()),
+                derived_row: DerivedRowId::from_residual(provenance.residual()),
+                derived_column: inequality
+                    .field()
+                    .map(|_| DerivedColumnId::from_residual(provenance.residual())),
+                backend_row: form.hard_equality_rows.len() + canonical_index,
+                backend_column: expected_violation_variable,
+                cone: QpConeRole::Nonnegative,
+            })
+            .collect::<Vec<_>>();
         if row.canonical_index != canonical_index
             || row.provenance != *inequality.provenance()
             || row.derived_block
@@ -2093,6 +2203,45 @@ fn verifies_qp_form_provenance(
             || row.coefficients != expected
             || row.rhs != inequality.upper_form_bound()
             || row.violation_variable != expected_violation_variable
+            || row.provenance_edges != expected_provenance_edges
+        {
+            return Ok(false);
+        }
+    }
+    for (soft_index, (row, (canonical_index, inequality))) in form
+        .violation_nonnegative_rows
+        .iter()
+        .zip(
+            problem
+                .affine_inequalities
+                .iter()
+                .enumerate()
+                .filter(|(_, inequality)| inequality.violation_channel().is_some()),
+        )
+        .enumerate()
+    {
+        let expected_variable = form.variables - form.soft_violation_variables + soft_index;
+        let provenance = inequality.provenance();
+        let mut expected_coefficients = vec![0.0; form.variables];
+        expected_coefficients[expected_variable] = -1.0;
+        if inequality.source_provenances().len() != 1
+            || inequality.source_provenances().first() != Some(provenance)
+            || row.coefficients != expected_coefficients
+            || row.rhs != 0.0
+            || row.violation_variable != expected_variable
+            || row.provenance_edge
+                != (QpProvenanceEdge {
+                    provenance: provenance.clone(),
+                    derived_block: DerivedBlockId::from_residual(provenance.residual()),
+                    derived_row: DerivedRowId::from_residual(provenance.residual()),
+                    derived_column: Some(DerivedColumnId::from_residual(provenance.residual())),
+                    backend_row: form.hard_equality_rows.len()
+                        + form.affine_inequality_rows.len()
+                        + soft_index,
+                    backend_column: Some(expected_variable),
+                    cone: QpConeRole::Nonnegative,
+                })
+            || canonical_index >= problem.affine_inequalities.len()
         {
             return Ok(false);
         }
@@ -2149,7 +2298,7 @@ fn verifies_qp_form_provenance(
         .chain(
             form.violation_nonnegative_rows
                 .iter()
-                .flat_map(|row| row.iter().copied()),
+                .flat_map(|row| row.coefficients.iter().copied()),
         )
         .collect::<Vec<_>>();
     let expected_rhs = form
@@ -2157,10 +2306,7 @@ fn verifies_qp_form_provenance(
         .iter()
         .chain(&form.affine_inequality_rows)
         .map(|row| row.rhs)
-        .chain(std::iter::repeat_n(
-            0.0,
-            form.violation_nonnegative_rows.len(),
-        ))
+        .chain(form.violation_nonnegative_rows.iter().map(|row| row.rhs))
         .collect::<Vec<_>>();
     Ok(form.constraints == expected_constraints && form.constraint_rhs == expected_rhs)
 }
@@ -2251,7 +2397,8 @@ mod tests {
     use crate::cubic::GlobalAnisotropyMetric;
     use crate::cubic_equality::{
         CanonicalAffineInequality, CanonicalEqualityParticipation, CanonicalHardEquality,
-        CanonicalSoftEquality, CanonicalSoftLoss, CanonicalSoftObjective, CubicCanonicalProblem,
+        CanonicalSoftEquality, CanonicalSoftLoss, CanonicalSoftObjective,
+        CanonicalViolationChannel, CanonicalViolationLoss, CubicCanonicalProblem,
         SemanticLatentDefinition,
     };
     use crate::functional::{
@@ -2391,6 +2538,38 @@ mod tests {
         problem
     }
 
+    fn soft_bounded_manufactured_problem() -> CubicCanonicalProblem {
+        let mut problem = manufactured_problem();
+        let equality_use = problem.equalities[8].field().unwrap();
+        let bound_use = FunctionalUse::new(
+            equality_use.functional().clone(),
+            UsageProvenance::new(
+                SourceId::new("soft-upper"),
+                None,
+                RelationId::new("soft-upper-relation"),
+                ResidualId::new("soft-upper-residual"),
+                SemanticRolePath::new("affine-upper/soft-value"),
+            ),
+        );
+        problem
+            .affine_inequalities
+            .push(CanonicalAffineInequality::new(
+                Some(bound_use.clone()),
+                Vec::new(),
+                bound_use.provenance().clone(),
+                FunctionalDimension::FieldValue,
+                CanonicalInequalitySense::Upper,
+                MANUFACTURED_TARGETS[8] - 0.25,
+                Some(CanonicalViolationChannel::new(
+                    ResidualId::new("soft-upper-residual"),
+                    CanonicalViolationLoss::QuadraticPenalty { weight: 2.0 },
+                )),
+            ));
+        problem.field_energy_normalization = FieldEnergyNormalization::try_new(1.0)
+            .expect("a soft bound requires positive field-energy normalization");
+        problem
+    }
+
     fn add_shared_latent_and_soft_objective(problem: &mut CubicCanonicalProblem) {
         let latent_provenance = UsageProvenance::new(
             SourceId::new("latent-gauge"),
@@ -2519,6 +2698,38 @@ mod tests {
             CubicEqualityCore::solve_canonical(bounded, GlobalAnisotropyMetric::identity(),)
                 .expect_err("the Equality entry point must not ignore an affine inequality"),
             CubicEqualityFailure::AffineInequalityRequiresConvexQp
+        );
+    }
+
+    #[test]
+    fn soft_bound_capacity_includes_violation_variable_and_nonnegative_row() {
+        let problem = soft_bounded_manufactured_problem();
+        let base_variables = canonical_fitting_uses(
+            &problem.equalities,
+            &problem.soft_equalities,
+            &problem.affine_inequalities,
+        )
+        .len()
+            + problem.semantic_latents.len();
+        let solver_equalities = problem
+            .equalities
+            .iter()
+            .filter(|equality| {
+                equality.participation() == CanonicalEqualityParticipation::SolverConstraint
+            })
+            .count();
+
+        let solution = CubicExecutionCore::solve(problem, GlobalAnisotropyMetric::identity())
+            .expect("the soft-bound QP should fit within its exact capacity plan");
+        let qp = solution.qp.expect("a soft bound selects the QP route");
+
+        assert_eq!(qp.capacity.variables, base_variables + 1);
+        assert_eq!(qp.capacity.constraints, solver_equalities + 2);
+        assert_eq!(solution.affine_inequalities.len(), 1);
+        assert!(
+            solution.affine_inequalities[0]
+                .recovered_violation_channel
+                .is_some()
         );
     }
 

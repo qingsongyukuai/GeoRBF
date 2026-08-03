@@ -32,14 +32,15 @@ use crate::diagnostics::{
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
     BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
     CanonicalAcceptanceEvidenceParts, CapacityEvidence, CapacityFailureKind,
-    ConvexResidualEvidence as PublicConvexResidualEvidence, CubicAnalysisEvidence,
-    CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts, InertiaEvidence,
-    InfeasibilityCertificateEvidence, InterpretableRankDeficiencyEvidence,
-    InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
-    RankDecision, RankDeficiencyConcept, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
-    RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence,
-    ResidualDimension, ScalingFailureReason, ScalingSummary, SideConditionEvidence,
-    SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
+    ConvexResidualEvidence as PublicConvexResidualEvidence, ConvexResidualEvidenceParts,
+    CubicAnalysisEvidence, CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts,
+    InertiaEvidence, InfeasibilityCertificateEvidence, InfeasibilityCertificateEvidenceParts,
+    InterpretableRankDeficiencyEvidence, InterpretableRankDeficiencyEvidenceParts,
+    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
+    RankEvidenceDomain, RankEvidenceParts, RecoveryVerificationEvidence,
+    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
+    ScalingFailureReason, ScalingSummary, SideConditionEvidence, SolveAttemptKind,
+    SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
     SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence,
 };
@@ -1984,6 +1985,8 @@ impl EqualityLowering {
                 bound: canonical_scalar_bits(inequality.bound()),
             };
             if let Some(index) = self.canonical_bound_index_by_key.get(&key) {
+                self.canonical_affine_inequalities[*index]
+                    .add_source_provenance(inequality.provenance().clone());
                 *index
             } else {
                 let index = self.canonical_affine_inequalities.len();
@@ -4034,13 +4037,13 @@ fn public_qp_attempts(attempts: &[QpAttemptRecord]) -> Vec<SolveAttemptRecord> {
                 refinement_steps: 0,
                 residual: None,
                 convex_residual: attempt.residuals.map(|residual| {
-                    PublicConvexResidualEvidence::new([
-                        residual.primal,
-                        residual.dual,
-                        residual.stationarity,
-                        residual.complementarity,
-                        residual.relative_gap,
-                    ])
+                    PublicConvexResidualEvidence::new(ConvexResidualEvidenceParts {
+                        primal: residual.primal,
+                        dual: residual.dual,
+                        stationarity: residual.stationarity,
+                        complementarity: residual.complementarity,
+                        relative_gap: residual.relative_gap,
+                    })
                 }),
                 certificate_present: matches!(
                     attempt.backend.termination,
@@ -4083,7 +4086,7 @@ fn public_qp_backend_fingerprint(backend: &ClarabelAttemptEvidence) -> BackendFi
         schema_version: 1,
         crate_name: backend.backend.crate_name,
         crate_version: backend.backend.crate_version,
-        features: ["serde", "default-features-disabled"],
+        features: backend.backend.features.to_vec(),
         algorithm: "Clarabel-QP/qdldl",
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
@@ -4097,7 +4100,7 @@ fn public_backend_fingerprint(backend: &InternalBackendFingerprint) -> BackendFi
         schema_version: backend.schema_version,
         crate_name: backend.crate_name,
         crate_version: backend.crate_version,
-        features: backend.features,
+        features: backend.features.to_vec(),
         algorithm: backend.algorithm,
         target_arch: backend.target_arch,
         target_os: backend.target_os,
@@ -4433,18 +4436,16 @@ fn public_qp_recovery_evidence(
 fn public_infeasibility_certificate(
     evidence: ValidatedInfeasibilityEvidence,
 ) -> InfeasibilityCertificateEvidence {
-    InfeasibilityCertificateEvidence::new(
-        [
-            evidence.normalized_ray_norm,
-            evidence.stationarity_residual,
-            evidence.dual_cone_violation,
-            evidence.separation_margin,
-            evidence.residual_limit,
-            evidence.separation_limit,
-        ],
-        evidence.finite,
-        true,
-    )
+    InfeasibilityCertificateEvidence::new(InfeasibilityCertificateEvidenceParts {
+        finite: evidence.finite,
+        normalized_ray_norm: evidence.normalized_ray_norm,
+        stationarity_residual: evidence.stationarity_residual,
+        dual_cone_violation: evidence.dual_cone_violation,
+        separation_margin: evidence.separation_margin,
+        residual_limit: evidence.residual_limit,
+        separation_limit: evidence.separation_limit,
+        backend_invoked: true,
+    })
 }
 
 fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis {

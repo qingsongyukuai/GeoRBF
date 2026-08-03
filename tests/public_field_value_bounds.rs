@@ -167,6 +167,15 @@ fn hard_lower_upper_and_interval_fit_through_the_public_qp_path() {
         .unwrap();
 
     let success = builder.build().unwrap().fit().unwrap();
+    let backend = success.report().backend_fingerprint().unwrap();
+    assert_eq!(
+        backend
+            .features()
+            .iter()
+            .map(|feature| feature.as_ref())
+            .collect::<Vec<_>>(),
+        ["serde"]
+    );
     for (location, expected) in [
         (point(0.0, 0.0, 0.0), 0.0),
         (point(1.0, 0.0, 0.0), 1.0),

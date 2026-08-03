@@ -31,8 +31,11 @@ Bounds lower into the one physical `CubicCanonicalProblem` as affine
 inequalities. Lower sides are normalized to upper-form backend rows by a sign
 change; the canonical relation itself retains its physical sense and bound.
 Identical hard sides share one canonical/backend relation while all source
-relations remain available for reporting. Soft sides are never merged, so
-duplicate evidence contributes independent violation variables and loss terms.
+relations remain attached to that relation through complete source-to-canonical
+and canonical-to-backend provenance edges. Soft sides are never merged, so
+duplicate evidence contributes independent violation variables and loss terms;
+their augmented rows and nonnegativity rows each retain their source, derived
+block/row/column, backend row/column, and cone role.
 
 The capability-driven executor from issue 29 selects Clarabel QP whenever the
 canonical problem contains a bound. Every soft side adds exactly one explicit
@@ -64,6 +67,11 @@ within the fixed numerical-policy limit, and normalized `-b^T z` exceeds the
 fixed strict-separation margin. Invalid or absent rays remain numerical
 failures. Valid evidence is exposed as
 `FitReport::infeasibility_certificate`; no failed fit can publish a model.
+Every legal Field Value Bound objective is a sum of nonnegative FieldEnergy and
+positive-weight violation losses, so it cannot have a recession direction with
+negative objective. Consequently a backend dual-infeasibility candidate is not
+promoted to an `UnboundedProblem` diagnosis for this capability; it remains an
+unverified numerical failure.
 
 ## Conformance evidence
 
