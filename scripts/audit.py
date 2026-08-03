@@ -48,8 +48,9 @@ FORBIDDEN_FEATURE_FRAGMENTS = (
     "pardiso",
     "sdp",
 )
-AUDITED_LOCKFILE_SHA256 = "2d88c646b11670707a4be6f56e322ee6ac2737494a42db4f02367c0783b6e2bb"
+AUDITED_LOCKFILE_SHA256 = "e71d0af024e1398a0b5161a1edd632e1b11ab675edbef8c65490af5ea90d7aca"
 AUDITED_BUILD_SCRIPTS = {
+    "clarabel 0.11.1",
     "crunchy 0.2.4",
     "getrandom 0.3.4",
     "libc 0.2.189",
@@ -64,9 +65,13 @@ AUDITED_BUILD_SCRIPTS = {
     "proc-macro2 1.0.107",
     "pulp 0.22.3",
     "quote 1.0.47",
+    "serde 1.0.229",
+    "serde_core 1.0.229",
+    "serde_json 1.0.151",
     "syn 1.0.109",
     "thiserror 1.0.69",
     "zerocopy 0.8.55",
+    "zmij 1.0.23",
 }
 
 
@@ -74,11 +79,9 @@ def run(*command: str) -> str:
     return subprocess.run(command, check=True, text=True, capture_output=True).stdout
 
 
-def canonical_text_sha256(path: Path) -> str:
-    """Hash UTF-8 text after normalizing platform-specific line endings."""
-    text = path.read_text(encoding="utf-8")
-    canonical_text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+def byte_sha256(path: Path) -> str:
+    """Hash the checked-out LF bytes governed by the repository attributes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main() -> int:
@@ -122,7 +125,7 @@ def main() -> int:
     }
     failures: list[str] = []
     lockfile = Path(__file__).resolve().parents[1] / "Cargo.lock"
-    lockfile_sha256 = canonical_text_sha256(lockfile)
+    lockfile_sha256 = byte_sha256(lockfile)
     if lockfile_sha256 != AUDITED_LOCKFILE_SHA256:
         failures.append(
             "lockfile identity is not in the audited pure-Rust envelope: "
@@ -142,7 +145,7 @@ def main() -> int:
     direct_dependencies = {
         dependency["name"] for dependency in root["dependencies"] if dependency["kind"] is None
     }
-    if direct_dependencies != {"faer"}:
+    if direct_dependencies != {"clarabel", "faer"}:
         failures.append(f"unexpected production dependencies: {sorted(direct_dependencies)}")
 
     for package in selected_packages:
@@ -170,6 +173,18 @@ def main() -> int:
         failures.append(
             "unexpected faer version: "
             + ",".join(package["version"] for package in selected_faer)
+        )
+    if selected_features.get("clarabel") != ["serde"]:
+        failures.append(
+            f"unexpected clarabel features: {selected_features.get('clarabel')}"
+        )
+    selected_clarabel = [
+        package for package in selected_packages if package["name"] == "clarabel"
+    ]
+    if len(selected_clarabel) != 1 or selected_clarabel[0]["version"] != "0.11.1":
+        failures.append(
+            "unexpected clarabel version: "
+            + ",".join(package["version"] for package in selected_clarabel)
         )
 
     build_scripts = sorted(
@@ -199,7 +214,9 @@ def main() -> int:
     print(f"audit.target={host}")
     print(f"audit.packages={len(selected_packages)}")
     print(f"audit.lockfile.sha256={lockfile_sha256}")
-    print("audit.product.dependencies=faer")
+    print("audit.product.dependencies=clarabel,faer")
+    print(f"audit.clarabel.version={selected_clarabel[0]['version']}")
+    print("audit.clarabel.features=serde")
     print(f"audit.faer.version={selected_faer[0]['version']}")
     print("audit.faer.features=linalg,std")
     print("audit.native_links=none")

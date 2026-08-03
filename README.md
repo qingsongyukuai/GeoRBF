@@ -212,3 +212,6 @@ The first v0.2 soft-objective tracer and its requirement mapping are recorded in
 [#27](docs/implementation/27-soft-field-value-objective.md).
 Complete first-order residual blocks and named covariance groups are recorded in
 [#28](docs/implementation/28-soft-first-order-residual-blocks.md).
+The crate-internal Cubic Convex QP execution seam and its Clarabel evidence are
+recorded in [#29](docs/implementation/29-cubic-convex-qp-execution.md); it adds
+no public affine-bound relation or public backend type.

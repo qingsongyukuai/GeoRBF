@@ -21,6 +21,7 @@ impl NumericalPolicyId {
 pub(crate) struct EqualityKktNumericalPolicy {
     pub(crate) id: NumericalPolicyId,
     pub(crate) backend_standard_form_backward_error_limit: f64,
+    pub(crate) convex_backend_residual_limit: f64,
     pub(crate) spectral_reject_multiplier: f64,
     pub(crate) spectral_accept_multiplier: f64,
     pub(crate) reduced_symmetry_multiplier: f64,
@@ -40,6 +41,7 @@ pub(crate) struct EqualityKktNumericalPolicy {
 pub(crate) const EQUALITY_KKT_POLICY_V1: EqualityKktNumericalPolicy = EqualityKktNumericalPolicy {
     id: NumericalPolicyId("georbf-v1"),
     backend_standard_form_backward_error_limit: 1.0e-11,
+    convex_backend_residual_limit: 1.0e-8,
     spectral_reject_multiplier: 64.0,
     spectral_accept_multiplier: 4096.0,
     reduced_symmetry_multiplier: 256.0,

@@ -931,6 +931,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     let fitting_uses = canonical_fitting_uses(
         &lowering.canonical_equalities,
         &lowering.canonical_soft_equalities,
+        &[],
     );
     let exact_problem_size = ProblemSize::cubic_equality(CubicProblemSizeParts {
         input_observations: snapshot.inner.observations.len(),
@@ -1287,6 +1288,7 @@ fn fit_snapshot_after_preflight(
     let solution = match CubicEqualityCore::solve_canonical(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
+            affine_inequalities: Vec::new(),
             soft_equalities: lowering.canonical_soft_equalities.clone(),
             soft_objectives: lowering.canonical_soft_objectives.clone(),
             semantic_latents: lowering.semantic_latents.clone(),
@@ -3104,6 +3106,12 @@ fn public_capacity(evidence: &CapacityExceededEvidence) -> CapacityEvidence {
             (CapacityFailureKind::ArithmeticOverflow, None)
         }
         CapacityExceededReason::LimitExceeded {
+            planned_peak_bytes, ..
+        } => (
+            CapacityFailureKind::LimitExceeded,
+            Some(*planned_peak_bytes),
+        ),
+        CapacityExceededReason::ConvexQpLimitExceeded {
             planned_peak_bytes, ..
         } => (
             CapacityFailureKind::LimitExceeded,

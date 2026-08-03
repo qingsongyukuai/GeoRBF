@@ -5,9 +5,13 @@ pub mod advanced;
 #[allow(dead_code)]
 mod capacity;
 #[allow(dead_code)]
+mod clarabel_backend;
+#[allow(dead_code)]
 mod cubic;
 #[allow(dead_code)]
 mod cubic_equality;
+#[allow(dead_code)]
+mod cubic_execution;
 pub mod diagnostics;
 #[allow(dead_code)]
 mod faer_backend;

@@ -31,6 +31,10 @@ pub(crate) enum CapacityComponent {
     FaerSingularValuesWorkspace,
     FaerInertiaWorkspace,
     FaerSvdRescueWorkspace,
+    ConvexQpDimension,
+    ConvexQpDense,
+    ConvexQpCsc,
+    ClarabelFactorWorkspace,
     Recovery,
     Report,
     Peak,
@@ -54,6 +58,10 @@ pub(crate) enum CapacityExceededReason {
     LimitExceeded {
         planned_peak_bytes: u64,
         components: Box<CapacityComponents>,
+    },
+    ConvexQpLimitExceeded {
+        planned_peak_bytes: u64,
+        components: Box<ConvexQpCapacityComponents>,
     },
 }
 
@@ -107,6 +115,25 @@ pub(crate) struct EqualityCapacityPlan {
     pub(crate) peak_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConvexQpCapacityComponents {
+    pub(crate) canonical_bytes: u64,
+    pub(crate) dense_form_bytes: u64,
+    pub(crate) csc_realization_bytes: u64,
+    pub(crate) factor_workspace_bytes: u64,
+    pub(crate) recovery_bytes: u64,
+    pub(crate) report_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConvexQpCapacityPlan {
+    pub(crate) variables: usize,
+    pub(crate) constraints: usize,
+    pub(crate) canonical_relations: usize,
+    pub(crate) components: ConvexQpCapacityComponents,
+    pub(crate) peak_bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EqualityCapacityShape {
     pub(crate) primal_variables: usize,
@@ -132,6 +159,179 @@ pub(crate) fn plan_equality_capacity(
         canonical_relations: equality_constraints,
         source_lowering: SourceStorageShape::default(),
         source_report: SourceStorageShape::default(),
+    })
+}
+
+pub(crate) fn plan_convex_qp_capacity(
+    variables: usize,
+    constraints: usize,
+    canonical_relations: usize,
+) -> Result<ConvexQpCapacityPlan, CapacityExceededEvidence> {
+    let variables_u64 = usize_as_u64(variables, CapacityComponent::ConvexQpDimension)?;
+    let constraints_u64 = usize_as_u64(constraints, CapacityComponent::ConvexQpDimension)?;
+    let relations_u64 = usize_as_u64(canonical_relations, CapacityComponent::Canonical)?;
+    let factor_dimension = variables.checked_add(constraints).ok_or_else(|| {
+        overflow(
+            CapacityComponent::ConvexQpDimension,
+            ArithmeticOperation::Add,
+            usize_as_evidence(variables),
+            usize_as_evidence(constraints),
+        )
+    })?;
+    let factor_dimension_u64 =
+        usize_as_u64(factor_dimension, CapacityComponent::ClarabelFactorWorkspace)?;
+    let scalar_bytes = size_of::<f64>() as u64;
+    let index_bytes = size_of::<usize>() as u64;
+
+    let canonical_scalars =
+        checked_add(CapacityComponent::Canonical, variables_u64, relations_u64)?;
+    let canonical_bytes = checked_add(
+        CapacityComponent::Canonical,
+        checked_mul(
+            CapacityComponent::Canonical,
+            canonical_scalars,
+            scalar_bytes,
+        )?,
+        checked_mul(
+            CapacityComponent::Canonical,
+            relations_u64,
+            SOURCE_LOWERING_FIXED_BYTES_PER_RELATION,
+        )?,
+    )?;
+
+    let hessian_scalars = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        variables_u64,
+        variables_u64,
+    )?;
+    let constraint_scalars = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        constraints_u64,
+        variables_u64,
+    )?;
+    let dense_vector_scalars = checked_sum(
+        CapacityComponent::ConvexQpDense,
+        &[
+            checked_mul(CapacityComponent::ConvexQpDense, variables_u64, 2)?,
+            checked_mul(CapacityComponent::ConvexQpDense, constraints_u64, 3)?,
+        ],
+    )?;
+    let dense_form_bytes = checked_mul(
+        CapacityComponent::ConvexQpDense,
+        checked_sum(
+            CapacityComponent::ConvexQpDense,
+            &[hessian_scalars, constraint_scalars, dense_vector_scalars],
+        )?,
+        scalar_bytes,
+    )?;
+
+    let upper_hessian_entries = checked_mul(
+        CapacityComponent::ConvexQpCsc,
+        variables_u64,
+        checked_add(CapacityComponent::ConvexQpCsc, variables_u64, 1)?,
+    )? / 2;
+    let constraint_entries = checked_mul(
+        CapacityComponent::ConvexQpCsc,
+        constraints_u64,
+        variables_u64,
+    )?;
+    let csc_entries = checked_add(
+        CapacityComponent::ConvexQpCsc,
+        upper_hessian_entries,
+        constraint_entries,
+    )?;
+    let csc_entry_bytes = checked_add(CapacityComponent::ConvexQpCsc, scalar_bytes, index_bytes)?;
+    let column_pointers = checked_mul(
+        CapacityComponent::ConvexQpCsc,
+        checked_mul(CapacityComponent::ConvexQpCsc, variables_u64, 2)?,
+        index_bytes,
+    )?;
+    let csc_realization_bytes = checked_add(
+        CapacityComponent::ConvexQpCsc,
+        checked_mul(CapacityComponent::ConvexQpCsc, csc_entries, csc_entry_bytes)?,
+        column_pointers,
+    )?;
+
+    // Clarabel's qdldl workspace is private. Charge four dense-equivalent
+    // KKT blocks plus index vectors, a conservative upper bound for this
+    // deliberately dense product seam.
+    let factor_square = checked_mul(
+        CapacityComponent::ClarabelFactorWorkspace,
+        factor_dimension_u64,
+        factor_dimension_u64,
+    )?;
+    let factor_workspace_bytes = checked_add(
+        CapacityComponent::ClarabelFactorWorkspace,
+        checked_mul(
+            CapacityComponent::ClarabelFactorWorkspace,
+            checked_mul(CapacityComponent::ClarabelFactorWorkspace, factor_square, 4)?,
+            checked_add(
+                CapacityComponent::ClarabelFactorWorkspace,
+                scalar_bytes,
+                index_bytes,
+            )?,
+        )?,
+        checked_mul(
+            CapacityComponent::ClarabelFactorWorkspace,
+            factor_dimension_u64,
+            checked_mul(CapacityComponent::ClarabelFactorWorkspace, index_bytes, 8)?,
+        )?,
+    )?;
+
+    let recovery_bytes = checked_mul(
+        CapacityComponent::Recovery,
+        checked_add(
+            CapacityComponent::Recovery,
+            checked_mul(CapacityComponent::Recovery, variables_u64, 4)?,
+            checked_mul(CapacityComponent::Recovery, constraints_u64, 5)?,
+        )?,
+        scalar_bytes,
+    )?;
+    let report_bytes = checked_add(
+        CapacityComponent::Report,
+        REPORT_FIXED_BYTES,
+        checked_mul(
+            CapacityComponent::Report,
+            relations_u64,
+            SOURCE_REPORT_FIXED_BYTES_PER_RELATION,
+        )?,
+    )?;
+    let components = ConvexQpCapacityComponents {
+        canonical_bytes,
+        dense_form_bytes,
+        csc_realization_bytes,
+        factor_workspace_bytes,
+        recovery_bytes,
+        report_bytes,
+    };
+    let peak_bytes = checked_sum(
+        CapacityComponent::Peak,
+        &[
+            canonical_bytes,
+            dense_form_bytes,
+            csc_realization_bytes,
+            factor_workspace_bytes,
+            recovery_bytes,
+            report_bytes,
+        ],
+    )?;
+    if peak_bytes > CAPACITY_LIMIT_BYTES {
+        return Err(CapacityExceededEvidence {
+            limit_bytes: CAPACITY_LIMIT_BYTES,
+            large_allocation_attempted: false,
+            backend_invocation_attempted: false,
+            reason: CapacityExceededReason::ConvexQpLimitExceeded {
+                planned_peak_bytes: peak_bytes,
+                components: Box::new(components),
+            },
+        });
+    }
+    Ok(ConvexQpCapacityPlan {
+        variables,
+        constraints,
+        canonical_relations,
+        components,
+        peak_bytes,
     })
 }
 
@@ -545,5 +745,61 @@ mod tests {
                 right: u64::MAX,
             }
         );
+    }
+
+    #[test]
+    fn convex_qp_plan_accounts_for_every_materialization_before_backend_entry() {
+        let plan = plan_convex_qp_capacity(10, 11, 12)
+            .expect("the manufactured dense QP should fit the product limit");
+
+        assert_eq!(plan.variables, 10);
+        assert_eq!(plan.constraints, 11);
+        assert_eq!(plan.canonical_relations, 12);
+        assert!(plan.components.canonical_bytes > 0);
+        assert!(plan.components.dense_form_bytes > 0);
+        assert!(plan.components.csc_realization_bytes > 0);
+        assert!(plan.components.factor_workspace_bytes > 0);
+        assert!(plan.components.recovery_bytes > 0);
+        assert!(plan.components.report_bytes > 0);
+        assert!(plan.peak_bytes <= CAPACITY_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn convex_qp_over_limit_is_rejected_without_allocation_or_backend_entry() {
+        let evidence = plan_convex_qp_capacity(20_000, 20_000, 20_000)
+            .expect_err("an oversized dense QP must fail its checked capacity preflight");
+
+        assert!(!evidence.large_allocation_attempted);
+        assert!(!evidence.backend_invocation_attempted);
+        assert_eq!(evidence.limit_bytes, CAPACITY_LIMIT_BYTES);
+        match evidence.reason {
+            CapacityExceededReason::ConvexQpLimitExceeded {
+                planned_peak_bytes,
+                components,
+            } => {
+                assert!(planned_peak_bytes > CAPACITY_LIMIT_BYTES);
+                assert!(components.dense_form_bytes > 0);
+                assert!(components.csc_realization_bytes > 0);
+                assert!(components.factor_workspace_bytes > 0);
+            }
+            other => panic!("unexpected capacity failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convex_qp_shape_arithmetic_overflow_returns_structured_evidence() {
+        let evidence = plan_convex_qp_capacity(usize::MAX, usize::MAX, usize::MAX)
+            .expect_err("unrepresentable QP dimensions must fail deterministically");
+
+        assert!(!evidence.large_allocation_attempted);
+        assert!(!evidence.backend_invocation_attempted);
+        assert!(matches!(
+            evidence.reason,
+            CapacityExceededReason::ArithmeticOverflow {
+                component: CapacityComponent::ConvexQpDimension,
+                operation: ArithmeticOperation::Add,
+                ..
+            }
+        ));
     }
 }

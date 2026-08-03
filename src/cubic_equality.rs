@@ -3,6 +3,8 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_scratch,
     apply_block_householder_sequence_on_the_left_in_place_with_conj,
+    apply_block_householder_sequence_transpose_on_the_left_in_place_scratch,
+    apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj,
 };
 use faer::prelude::*;
 #[cfg(test)]
@@ -23,7 +25,7 @@ use crate::numerical::{
     EQUALITY_KKT_POLICY_V1, SpectralAnalysisFailure, SpectralRankDecision, analyze_spectral_rank,
 };
 
-const POLYNOMIAL_DIMENSION: usize = 4;
+pub(crate) const POLYNOMIAL_DIMENSION: usize = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DenseMatrix {
@@ -33,7 +35,11 @@ pub(crate) struct DenseMatrix {
 }
 
 impl DenseMatrix {
-    fn from_fn(rows: usize, columns: usize, mut value: impl FnMut(usize, usize) -> f64) -> Self {
+    pub(crate) fn from_fn(
+        rows: usize,
+        columns: usize,
+        mut value: impl FnMut(usize, usize) -> f64,
+    ) -> Self {
         let mut values = Vec::with_capacity(rows * columns);
         for row in 0..rows {
             for column in 0..columns {
@@ -51,19 +57,19 @@ impl DenseMatrix {
         (self.rows, self.columns)
     }
 
-    fn get(&self, row: usize, column: usize) -> f64 {
+    pub(crate) fn get(&self, row: usize, column: usize) -> f64 {
         self.values[row * self.columns + column]
     }
 
-    fn set(&mut self, row: usize, column: usize, value: f64) {
+    pub(crate) fn set(&mut self, row: usize, column: usize, value: f64) {
         self.values[row * self.columns + column] = value;
     }
 
-    fn values(&self) -> &[f64] {
+    pub(crate) fn values(&self) -> &[f64] {
         &self.values
     }
 
-    fn multiply_vector(&self, vector: &[f64]) -> Vec<f64> {
+    pub(crate) fn multiply_vector(&self, vector: &[f64]) -> Vec<f64> {
         debug_assert_eq!(self.columns, vector.len());
         (0..self.rows)
             .map(|row| {
@@ -179,7 +185,7 @@ impl CubicSolveCoordinateTransform {
             .collect()
     }
 
-    fn to_standard_field_coefficients(self, physical: &[f64]) -> Vec<f64> {
+    pub(crate) fn to_standard_field_coefficients(self, physical: &[f64]) -> Vec<f64> {
         let kernel_scale = self.length.powi(3);
         physical
             .iter()
@@ -205,7 +211,7 @@ impl CubicSolveCoordinateTransform {
         standard_tolerance
     }
 
-    fn to_physical_side_condition(self, standard: [f64; 4]) -> [f64; 4] {
+    pub(crate) fn to_physical_side_condition(self, standard: [f64; 4]) -> [f64; 4] {
         let field_scale = self.length.powi(3);
         [
             standard[0] / field_scale,
@@ -215,7 +221,7 @@ impl CubicSolveCoordinateTransform {
         ]
     }
 
-    fn to_standard_side_condition(self, physical: [f64; 4]) -> [f64; 4] {
+    pub(crate) fn to_standard_side_condition(self, physical: [f64; 4]) -> [f64; 4] {
         let field_scale = self.length.powi(3);
         let constant = field_scale * physical[0];
         [
@@ -226,7 +232,7 @@ impl CubicSolveCoordinateTransform {
         ]
     }
 
-    fn to_physical_side_condition_tolerances(self, standard: [f64; 4]) -> [f64; 4] {
+    pub(crate) fn to_physical_side_condition_tolerances(self, standard: [f64; 4]) -> [f64; 4] {
         let field_scale = self.length.powi(3);
         [
             standard[0] / field_scale,
@@ -236,7 +242,7 @@ impl CubicSolveCoordinateTransform {
         ]
     }
 
-    fn is_valid_recovery_map(self) -> bool {
+    pub(crate) fn is_valid_recovery_map(self) -> bool {
         self.center.iter().all(|value| value.is_finite())
             && self.length.is_finite()
             && self.length > 0.0
@@ -399,6 +405,8 @@ pub(crate) struct CubicRepresentation {
     coordinates: CubicSolveCoordinateTransform,
     kernel: DenseMatrix,
     polynomial: DenseMatrix,
+    null_space: HouseholderNullSpace,
+    reduced_kernel: DenseMatrix,
     evidence: CpdEvidence,
     field_energy_normalization: FieldEnergyNormalization,
 }
@@ -461,6 +469,8 @@ impl CubicRepresentation {
             coordinates,
             kernel,
             polynomial,
+            null_space,
+            reduced_kernel: reduced,
             evidence: CpdEvidence {
                 fitting_functional_count: functionals.len(),
                 polynomial_dimension: POLYNOMIAL_DIMENSION,
@@ -495,6 +505,22 @@ impl CubicRepresentation {
         &self.polynomial
     }
 
+    pub(crate) fn reduced_kernel_pairing(&self) -> &DenseMatrix {
+        &self.reduced_kernel
+    }
+
+    pub(crate) fn null_space(&self) -> &HouseholderNullSpace {
+        &self.null_space
+    }
+
+    pub(crate) fn fitting_uses(&self) -> &[FunctionalUse] {
+        &self.fitting_uses
+    }
+
+    pub(crate) fn metric(&self) -> &GlobalAnisotropyMetric {
+        &self.metric
+    }
+
     pub(crate) fn solve_coordinate_transform(&self) -> CubicSolveCoordinateTransform {
         self.coordinates
     }
@@ -503,7 +529,10 @@ impl CubicRepresentation {
         self.field_energy_normalization
     }
 
-    fn set_field_energy_normalization(&mut self, normalization: FieldEnergyNormalization) {
+    pub(crate) fn set_field_energy_normalization(
+        &mut self,
+        normalization: FieldEnergyNormalization,
+    ) {
         self.field_energy_normalization = normalization;
     }
 }
@@ -531,6 +560,7 @@ pub(crate) fn preflight_polynomial_analysis_failure(
 pub(crate) fn canonical_fitting_uses(
     equalities: &[CanonicalHardEquality],
     soft_equalities: &[CanonicalSoftEquality],
+    affine_inequalities: &[CanonicalAffineInequality],
 ) -> Vec<FunctionalUse> {
     let mut fitting_uses = Vec::<FunctionalUse>::new();
     for usage in equalities
@@ -540,6 +570,11 @@ pub(crate) fn canonical_fitting_uses(
         })
         .filter_map(CanonicalHardEquality::field)
         .chain(soft_equalities.iter().map(CanonicalSoftEquality::field))
+        .chain(
+            affine_inequalities
+                .iter()
+                .filter_map(CanonicalAffineInequality::field),
+        )
     {
         if !fitting_uses
             .iter()
@@ -579,7 +614,8 @@ fn assemble_polynomial_pairing(
     Ok((coordinates, standard_functionals, polynomial))
 }
 
-struct HouseholderNullSpace {
+#[derive(Debug, Clone)]
+pub(crate) struct HouseholderNullSpace {
     basis: Mat<f64>,
     coefficients: Mat<f64>,
     ambient_dimension: usize,
@@ -602,11 +638,11 @@ impl HouseholderNullSpace {
         })
     }
 
-    fn reduced_dimension(&self) -> usize {
+    pub(crate) fn reduced_dimension(&self) -> usize {
         self.ambient_dimension - self.polynomial_rank
     }
 
-    fn expand(&self, reduced: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
+    pub(crate) fn expand(&self, reduced: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
         debug_assert_eq!(reduced.len(), self.reduced_dimension());
         let mut embedded = Mat::<f64>::zeros(self.ambient_dimension, 1);
         for (index, value) in reduced.iter().enumerate() {
@@ -629,6 +665,27 @@ impl HouseholderNullSpace {
         );
         Ok((0..self.ambient_dimension)
             .map(|row| embedded[(row, 0)])
+            .collect())
+    }
+
+    pub(crate) fn project(&self, ambient: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
+        debug_assert_eq!(ambient.len(), self.ambient_dimension);
+        let mut transformed = Mat::<f64>::from_fn(self.ambient_dimension, 1, |row, _| ambient[row]);
+        let requirement = apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<
+            f64,
+        >(self.ambient_dimension, self.coefficients.nrows(), 1);
+        let mut memory = MemBuffer::try_new(requirement)
+            .map_err(|_| RepresentationFailure::NullSpaceWorkspaceAllocation)?;
+        apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+            self.basis.as_ref(),
+            self.coefficients.as_ref(),
+            Conj::No,
+            transformed.as_mut(),
+            faer_backend::parallelism(),
+            MemStack::new(&mut memory),
+        );
+        Ok((self.polynomial_rank..self.ambient_dimension)
+            .map(|row| transformed[(row, 0)])
             .collect())
     }
 }
@@ -1140,7 +1197,7 @@ impl CanonicalHardEquality {
         self.participation = CanonicalEqualityParticipation::SolverConstraint;
     }
 
-    fn constant_shift_response(&self) -> f64 {
+    pub(crate) fn constant_shift_response(&self) -> f64 {
         self.field
             .as_ref()
             .map(|usage| {
@@ -1159,7 +1216,85 @@ impl CanonicalHardEquality {
                 .sum::<f64>()
     }
 
-    fn evaluate(&self, field: &RecoveredCubicField, latents: &[f64]) -> f64 {
+    pub(crate) fn evaluate(&self, field: &RecoveredCubicField, latents: &[f64]) -> f64 {
+        self.field
+            .as_ref()
+            .map(|usage| field.evaluate_functional(usage.functional()))
+            .unwrap_or(0.0)
+            + self
+                .latent_coefficients
+                .iter()
+                .map(|term| term.coefficient * latents[term.latent])
+                .sum::<f64>()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalAffineInequality {
+    field: Option<FunctionalUse>,
+    latent_coefficients: Vec<SemanticLatentCoefficient>,
+    provenance: UsageProvenance,
+    dimension: FunctionalDimension,
+    upper_bound: f64,
+}
+
+impl CanonicalAffineInequality {
+    pub(crate) fn upper_bound(
+        field: Option<FunctionalUse>,
+        latent_coefficients: Vec<SemanticLatentCoefficient>,
+        provenance: UsageProvenance,
+        dimension: FunctionalDimension,
+        upper_bound: f64,
+    ) -> Self {
+        Self {
+            field,
+            latent_coefficients,
+            provenance,
+            dimension,
+            upper_bound,
+        }
+    }
+
+    pub(crate) fn field(&self) -> Option<&FunctionalUse> {
+        self.field.as_ref()
+    }
+
+    pub(crate) fn latent_coefficients(&self) -> &[SemanticLatentCoefficient] {
+        &self.latent_coefficients
+    }
+
+    pub(crate) fn provenance(&self) -> &UsageProvenance {
+        &self.provenance
+    }
+
+    pub(crate) fn dimension(&self) -> FunctionalDimension {
+        self.dimension
+    }
+
+    pub(crate) fn bound(&self) -> f64 {
+        self.upper_bound
+    }
+
+    pub(crate) fn constant_shift_response(&self) -> f64 {
+        self.field
+            .as_ref()
+            .map(|usage| {
+                usage
+                    .functional()
+                    .terms()
+                    .iter()
+                    .map(|term| term.value_coefficient())
+                    .sum::<f64>()
+            })
+            .unwrap_or(0.0)
+            + self
+                .latent_coefficients
+                .iter()
+                .map(|term| term.coefficient)
+                .sum::<f64>()
+    }
+
+    pub(crate) fn evaluate(&self, field: &RecoveredCubicField, latents: &[f64]) -> f64 {
         self.field
             .as_ref()
             .map(|usage| field.evaluate_functional(usage.functional()))
@@ -1213,7 +1348,7 @@ impl CanonicalSoftLoss {
         }
     }
 
-    fn whitening_matrix(&self, dimension: usize) -> Vec<f64> {
+    pub(crate) fn whitening_matrix(&self, dimension: usize) -> Vec<f64> {
         match self {
             Self::QuadraticPenalty { weight } => diagonal_matrix(dimension, weight.sqrt()),
             Self::StandardDeviation { standard_deviation } => {
@@ -1223,7 +1358,7 @@ impl CanonicalSoftLoss {
         }
     }
 
-    fn inverse_whitening_matrix(&self, dimension: usize) -> Vec<f64> {
+    pub(crate) fn inverse_whitening_matrix(&self, dimension: usize) -> Vec<f64> {
         match self {
             Self::QuadraticPenalty { weight } => diagonal_matrix(dimension, 1.0 / weight.sqrt()),
             Self::StandardDeviation { standard_deviation } => {
@@ -1235,7 +1370,7 @@ impl CanonicalSoftLoss {
         }
     }
 
-    fn is_valid(&self, dimension: usize) -> bool {
+    pub(crate) fn is_valid(&self, dimension: usize) -> bool {
         match self {
             Self::QuadraticPenalty { weight } => weight.is_finite() && *weight > 0.0,
             Self::StandardDeviation { standard_deviation } => {
@@ -1260,7 +1395,7 @@ impl CanonicalSoftLoss {
         }
     }
 
-    fn residual_reference_scale(&self) -> f64 {
+    pub(crate) fn residual_reference_scale(&self) -> f64 {
         match self {
             Self::QuadraticPenalty { weight } => 1.0 / weight.sqrt(),
             Self::StandardDeviation { standard_deviation } => *standard_deviation,
@@ -1408,11 +1543,11 @@ impl CanonicalSoftEquality {
         self.target
     }
 
-    fn evaluate(&self, field: &RecoveredCubicField) -> f64 {
+    pub(crate) fn evaluate(&self, field: &RecoveredCubicField) -> f64 {
         field.evaluate_functional(self.field.functional())
     }
 
-    fn constant_shift_response(&self) -> f64 {
+    pub(crate) fn constant_shift_response(&self) -> f64 {
         self.field
             .functional()
             .terms()
@@ -1447,7 +1582,11 @@ pub(crate) enum CanonicalSoftResidualBlockKind {
 }
 
 impl CanonicalSoftResidualBlockKind {
-    fn is_valid(&self, residual_count: usize, covariance_group: Option<&GroupId>) -> bool {
+    pub(crate) fn is_valid(
+        &self,
+        residual_count: usize,
+        covariance_group: Option<&GroupId>,
+    ) -> bool {
         match self {
             Self::Independent(member) => {
                 covariance_group.is_none() && member.component_count() == residual_count
@@ -1508,11 +1647,16 @@ impl CanonicalSoftObjective {
     pub(crate) fn covariance_group(&self) -> Option<&GroupId> {
         self.covariance_group.as_ref()
     }
+
+    pub(crate) fn block_kind(&self) -> &CanonicalSoftResidualBlockKind {
+        &self.block_kind
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CubicCanonicalProblem {
     pub(crate) equalities: Vec<CanonicalHardEquality>,
+    pub(crate) affine_inequalities: Vec<CanonicalAffineInequality>,
     pub(crate) soft_equalities: Vec<CanonicalSoftEquality>,
     pub(crate) soft_objectives: Vec<CanonicalSoftObjective>,
     pub(crate) semantic_latents: Vec<SemanticLatentDefinition>,
@@ -1577,6 +1721,25 @@ pub(crate) struct RecoveredCubicField {
 }
 
 impl RecoveredCubicField {
+    pub(crate) fn from_standard_candidate(
+        representation: &CubicRepresentation,
+        standard_coefficients: &[f64],
+        standard_polynomial: [f64; POLYNOMIAL_DIMENSION],
+    ) -> Self {
+        Self {
+            representers: representation
+                .fitting_uses
+                .iter()
+                .map(|usage| usage.functional().clone())
+                .collect(),
+            metric: representation.metric.clone(),
+            coefficients: representation
+                .coordinates
+                .to_physical_field_coefficients(standard_coefficients),
+            physical_polynomial: representation.coordinates.to_physical(standard_polynomial),
+        }
+    }
+
     pub(crate) fn coefficients(&self) -> &[f64] {
         &self.coefficients
     }
@@ -1625,7 +1788,7 @@ impl RecoveredCubicField {
             .sum()
     }
 
-    fn native_cubic_energy(&self) -> f64 {
+    pub(crate) fn native_cubic_energy(&self) -> f64 {
         self.coefficients
             .iter()
             .enumerate()
@@ -1690,7 +1853,7 @@ pub(crate) struct FunctionalViolationEnvelope {
 }
 
 impl FunctionalViolationEnvelope {
-    fn from_dimensioned_residuals(
+    pub(crate) fn from_dimensioned_residuals(
         residuals: impl IntoIterator<Item = (FunctionalDimension, f64)>,
     ) -> Self {
         residuals
@@ -1742,7 +1905,7 @@ pub(crate) struct PhysicalSideConditionEvidence {
 }
 
 impl PhysicalSideConditionEvidence {
-    fn is_within_policy(self) -> bool {
+    pub(crate) fn is_within_policy(self) -> bool {
         self.components
             .into_iter()
             .zip(self.physical_tolerances)
@@ -1902,6 +2065,7 @@ impl CubicEqualityCore {
                     .into_iter()
                     .map(CanonicalHardEquality::from_field_only)
                     .collect(),
+                affine_inequalities: Vec::new(),
                 soft_equalities: Vec::new(),
                 soft_objectives: Vec::new(),
                 semantic_latents: Vec::new(),
@@ -1954,7 +2118,11 @@ impl CubicEqualityCore {
                 equality: problem.equalities.len(),
             });
         }
-        let fitting_uses = canonical_fitting_uses(&problem.equalities, &problem.soft_equalities);
+        let fitting_uses = canonical_fitting_uses(
+            &problem.equalities,
+            &problem.soft_equalities,
+            &problem.affine_inequalities,
+        );
         let mut representation = CubicRepresentation::new(fitting_uses, metric)
             .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
         representation.set_field_energy_normalization(problem.field_energy_normalization);
@@ -3027,6 +3195,7 @@ mod tests {
                     CanonicalHardEquality::from_field_only(HardEquality::new(usage, target))
                 })
                 .collect(),
+            affine_inequalities: Vec::new(),
             soft_equalities: Vec::new(),
             soft_objectives: Vec::new(),
             semantic_latents: Vec::new(),
@@ -3244,6 +3413,7 @@ mod tests {
         ));
         let problem = CubicCanonicalProblem {
             equalities: equalities.clone(),
+            affine_inequalities: Vec::new(),
             soft_equalities: Vec::new(),
             soft_objectives: Vec::new(),
             semantic_latents: vec![SemanticLatentDefinition {
@@ -3795,7 +3965,11 @@ mod tests {
         ));
         problem.soft_equalities.push(soft);
         let mut representation = CubicRepresentation::new(
-            canonical_fitting_uses(&problem.equalities, &problem.soft_equalities),
+            canonical_fitting_uses(
+                &problem.equalities,
+                &problem.soft_equalities,
+                &problem.affine_inequalities,
+            ),
             GlobalAnisotropyMetric::identity(),
         )
         .expect("the mixed hard/soft representation is valid");
@@ -3854,7 +4028,11 @@ mod tests {
             ));
         problem.soft_equalities = soft_equalities;
         let mut representation = CubicRepresentation::new(
-            canonical_fitting_uses(&problem.equalities, &problem.soft_equalities),
+            canonical_fitting_uses(
+                &problem.equalities,
+                &problem.soft_equalities,
+                &problem.affine_inequalities,
+            ),
             GlobalAnisotropyMetric::identity(),
         )
         .expect("the mixed hard/soft representation is valid");
