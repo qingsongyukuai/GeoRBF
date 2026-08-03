@@ -3,7 +3,11 @@
 GeoRBF is a Rust library for fitting implicit geological scalar fields from
 geological observations.
 
-Version 0.1.0 exposes complete public Cubic Equality tracers. Callers declare
+Version 0.1.0 exposes complete public Cubic Equality tracers. The current v0.2
+development surface adds the first complete soft tracer: a Field
+Value Observation may carry either a checked positive `QuadraticPenalty` or a
+checked positive statistical `StandardDeviation`, while the problem supplies
+an explicit checked `FieldEnergyNormalization`. Callers otherwise declare
 an input coordinate frame and units; add hard absolute field-value and complete
 gradient observations, unoriented tangent directions, or atomically built
 shared level sets and geological horizons; choose an explicit additive field
@@ -81,6 +85,46 @@ assert_eq!(samples.len(), 2);
 The input boundary is sealed: downstream crates cannot add custom observation,
 solver, matrix, or backend inputs to `ProblemBuilder`.
 
+## Soft Field Value objective
+
+Soft Field Value configuration uses named constructors rather than a generic
+enforcement or loss enum. A soft problem must explicitly set the physical
+FieldEnergy scale before it can become an immutable snapshot:
+
+```rust,no_run
+use georbf::geometry::{
+    FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel,
+};
+use georbf::kernel::FieldEnergyNormalization;
+use georbf::observation::{FieldValueObservation, QuadraticPenalty};
+use georbf::{Point3, ProblemBuilder, SourceId};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let frame = InputCoordinateFrame::try_new(
+    ["east", "north", "elevation"],
+    Handedness::Right,
+    LengthUnitLabel::new("m"),
+)?;
+let mut problem = ProblemBuilder::new(frame, FieldUnitLabel::new("field-unit"));
+problem.add(FieldValueObservation::try_with_quadratic_penalty(
+    SourceId::new("soft-value"),
+    Point3::try_new(0.0, 0.0, 0.0)?,
+    1.25,
+    QuadraticPenalty::try_new(2.0)?,
+)?)?;
+problem.set_field_energy_normalization(FieldEnergyNormalization::try_new(3.0)?)?;
+let snapshot = problem.build()?;
+# let _ = snapshot;
+# Ok(())
+# }
+```
+
+`FitReport::soft_field_values` returns original-unit targets, recovered values
+and residuals, typed penalty/statistical configuration, and each independent
+loss contribution. `field_energy` and `total_objective` are independently
+recomputed during recovery; a failed objective or provenance round trip returns
+a structured fit failure and never a model.
+
 ```compile_fail
 struct CustomInput;
 
@@ -115,3 +159,5 @@ tracers in [#19](docs/implementation/19-public-absolute-field-tracer.md) and
 query model in [#24](docs/implementation/24-immutable-model-batch-query.md).
 The cumulative release evidence and traceability audit are recorded in
 [#25](docs/implementation/25-equality-spine-release.md).
+The first v0.2 soft-objective tracer and its requirement mapping are recorded in
+[#27](docs/implementation/27-soft-field-value-objective.md).

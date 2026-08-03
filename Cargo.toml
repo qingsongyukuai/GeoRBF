@@ -26,6 +26,7 @@ include = [
     "/docs/implementation/23-equality-structured-diagnostics-fit-report.md",
     "/docs/implementation/24-immutable-model-batch-query.md",
     "/docs/implementation/25-equality-spine-release.md",
+    "/docs/implementation/27-soft-field-value-objective.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/v0.1.0/**",
 ]

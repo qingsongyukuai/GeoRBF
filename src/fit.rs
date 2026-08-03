@@ -10,12 +10,13 @@ use crate::capacity::{
 };
 use crate::cubic_equality::{
     AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
-    CanonicalHardEquality, CanonicalRelationToleranceEvidence, CpdEvidence, CubicCanonicalProblem,
+    CanonicalHardEquality, CanonicalRelationToleranceEvidence, CanonicalSoftEquality,
+    CanonicalSoftLoss, CanonicalSoftObjective, CpdEvidence, CubicCanonicalProblem,
     CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
     RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
     RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
-    preflight_polynomial_analysis_failure, solver_fitting_uses,
+    canonical_fitting_uses, preflight_polynomial_analysis_failure,
 };
 use crate::diagnostics::{
     AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
@@ -51,7 +52,9 @@ use crate::kkt::{
 };
 use crate::model::SolvedModel;
 use crate::numerical::NumericalPolicyId;
-use crate::observation::ObservationInput;
+use crate::observation::{
+    FieldValueConfiguration, ObservationInput, QuadraticPenalty, StandardDeviation,
+};
 use crate::problem::{ProblemSnapshot, ThreadBudget};
 use crate::relation::AdditiveFieldGaugeReference;
 
@@ -111,37 +114,48 @@ impl Error for FitFailure {}
 pub struct ProblemSize {
     input_observations: usize,
     scalar_hard_relations: usize,
+    scalar_soft_relations: usize,
     canonical_hard_equalities: Option<usize>,
+    canonical_soft_equalities: Option<usize>,
     center_coefficients: Option<usize>,
     semantic_latents: usize,
     auxiliary_variables: usize,
+    quadratic_objective_terms: usize,
     cone_blocks: usize,
     primal_variables: Option<usize>,
     equality_constraints: Option<usize>,
     kkt_dimension: Option<usize>,
 }
 
+struct CubicProblemSizeParts {
+    input_observations: usize,
+    scalar_hard_relations: usize,
+    scalar_soft_relations: usize,
+    canonical_hard_equalities: usize,
+    canonical_soft_equalities: usize,
+    center_coefficients: usize,
+    semantic_latents: usize,
+    solver_hard_equalities: usize,
+}
+
 impl ProblemSize {
-    fn cubic_equality(
-        input_observations: usize,
-        scalar_hard_relations: usize,
-        canonical_hard_equalities: usize,
-        center_coefficients: usize,
-        semantic_latents: usize,
-        solver_hard_equalities: usize,
-    ) -> Option<Self> {
-        let primal_variables = center_coefficients
+    fn cubic_equality(parts: CubicProblemSizeParts) -> Option<Self> {
+        let primal_variables = parts
+            .center_coefficients
             .checked_add(4)?
-            .checked_add(semantic_latents)?;
-        let equality_constraints = solver_hard_equalities.checked_add(4)?;
+            .checked_add(parts.semantic_latents)?;
+        let equality_constraints = parts.solver_hard_equalities.checked_add(4)?;
         let kkt_dimension = primal_variables.checked_add(equality_constraints)?;
         Some(Self {
-            input_observations,
-            scalar_hard_relations,
-            canonical_hard_equalities: Some(canonical_hard_equalities),
-            center_coefficients: Some(center_coefficients),
-            semantic_latents,
+            input_observations: parts.input_observations,
+            scalar_hard_relations: parts.scalar_hard_relations,
+            scalar_soft_relations: parts.scalar_soft_relations,
+            canonical_hard_equalities: Some(parts.canonical_hard_equalities),
+            canonical_soft_equalities: Some(parts.canonical_soft_equalities),
+            center_coefficients: Some(parts.center_coefficients),
+            semantic_latents: parts.semantic_latents,
             auxiliary_variables: 0,
+            quadratic_objective_terms: parts.canonical_soft_equalities,
             cone_blocks: 0,
             primal_variables: Some(primal_variables),
             equality_constraints: Some(equality_constraints),
@@ -159,10 +173,20 @@ impl ProblemSize {
         self.scalar_hard_relations
     }
 
+    /// Returns independently retained scalar soft residual channels.
+    pub fn scalar_soft_relations(self) -> usize {
+        self.scalar_soft_relations
+    }
+
     /// Returns the exact hard equalities retained after duplicate merging, or
     /// `None` when fit stopped before canonical lowering.
     pub fn canonical_hard_equalities(self) -> Option<usize> {
         self.canonical_hard_equalities
+    }
+
+    /// Returns canonical soft equality residuals, or `None` before lowering.
+    pub fn canonical_soft_equalities(self) -> Option<usize> {
+        self.canonical_soft_equalities
     }
 
     /// Returns the representer-center coefficient count, or `None` before
@@ -179,6 +203,11 @@ impl ProblemSize {
     /// Returns the auxiliary-variable count.
     pub fn auxiliary_variables(self) -> usize {
         self.auxiliary_variables
+    }
+
+    /// Returns quadratic soft-loss terms in the physical objective.
+    pub fn quadratic_objective_terms(self) -> usize {
+        self.quadratic_objective_terms
     }
 
     /// Returns the conic block count.
@@ -222,6 +251,65 @@ pub struct HardRelationAssessment {
     scaled_kkt_tolerance: Option<f64>,
     recovered_physical_tolerance: f64,
     tolerance_round_trip_error: f64,
+}
+
+/// Recovered physical residual and objective contribution for one soft field
+/// value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoftFieldValueAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    target: f64,
+    recovered_value: f64,
+    residual: f64,
+    quadratic_penalty: Option<QuadraticPenalty>,
+    standard_deviation: Option<StandardDeviation>,
+    loss: f64,
+}
+
+impl SoftFieldValueAssessment {
+    /// Returns the caller-owned source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable field-value residual role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the observed field value in the caller's units.
+    pub fn target(&self) -> f64 {
+        self.target
+    }
+
+    /// Returns the independently recovered field value in caller units.
+    pub fn recovered_value(&self) -> f64 {
+        self.recovered_value
+    }
+
+    /// Returns recovered value minus target in field-value units.
+    pub fn residual(&self) -> f64 {
+        self.residual
+    }
+
+    /// Returns the non-statistical penalty when that path configured this
+    /// relation.
+    pub fn quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.quadratic_penalty
+    }
+
+    /// Returns the statistical standard deviation when that path configured
+    /// this relation.
+    pub fn standard_deviation(&self) -> Option<StandardDeviation> {
+        self.standard_deviation
+    }
+
+    /// Returns this independent residual's dimensionless objective
+    /// contribution.
+    pub fn loss(&self) -> f64 {
+        self.loss
+    }
 }
 
 impl HardRelationAssessment {
@@ -337,6 +425,7 @@ pub struct FitReport {
     numerical_policy: NumericalPolicyId,
     requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
+    soft_field_values: Vec<SoftFieldValueAssessment>,
     shared_level_values: Vec<SharedLevelValue>,
     field_energy: Option<f64>,
     total_objective: Option<f64>,
@@ -368,7 +457,7 @@ impl FitReport {
         &self.resolved_kernel
     }
 
-    /// Returns the resolved dimensionless FieldEnergy normalization.
+    /// Returns the resolved physical FieldEnergy normalization.
     pub fn field_energy_normalization(&self) -> FieldEnergyNormalization {
         self.field_energy_normalization
     }
@@ -386,6 +475,11 @@ impl FitReport {
     /// Returns physical hard-relation recovery assessments in stable order.
     pub fn hard_relations(&self) -> &[HardRelationAssessment] {
         &self.hard_relations
+    }
+
+    /// Returns soft Field Value assessments in stable SourceId order.
+    pub fn soft_field_values(&self) -> &[SoftFieldValueAssessment] {
+        &self.soft_field_values
     }
 
     /// Returns every recovered shared-level semantic latent in GroupId order.
@@ -502,11 +596,15 @@ impl FitReport {
 }
 
 pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, FitFailure> {
-    let scalar_relation_count = scalar_relation_count(snapshot).unwrap_or(usize::MAX);
+    let scalar_relation_counts = scalar_relation_counts(snapshot).unwrap_or(ScalarRelationCounts {
+        hard: usize::MAX,
+        soft: usize::MAX,
+    });
+    let scalar_relation_count = scalar_relation_counts.total().unwrap_or(usize::MAX);
     let source_identifier_bytes = source_identifier_bytes(snapshot).unwrap_or(usize::MAX);
     let conservative_problem_size = conservative_problem_size(
         snapshot.inner.observations.len(),
-        scalar_relation_count,
+        scalar_relation_counts,
         snapshot.inner.shared_level_sets.len(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
@@ -579,15 +677,20 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         });
     }
     let lowering = lower_snapshot(snapshot);
-    let fitting_uses = solver_fitting_uses(&lowering.canonical_equalities);
-    let exact_problem_size = ProblemSize::cubic_equality(
-        snapshot.inner.observations.len(),
-        scalar_relation_count,
-        lowering.canonical_equalities.len(),
-        fitting_uses.len(),
-        lowering.semantic_latents.len(),
-        lowering.solver_equality_count(),
+    let fitting_uses = canonical_fitting_uses(
+        &lowering.canonical_equalities,
+        &lowering.canonical_soft_equalities,
     );
+    let exact_problem_size = ProblemSize::cubic_equality(CubicProblemSizeParts {
+        input_observations: snapshot.inner.observations.len(),
+        scalar_hard_relations: scalar_relation_counts.hard,
+        scalar_soft_relations: scalar_relation_counts.soft,
+        canonical_hard_equalities: lowering.canonical_equalities.len(),
+        canonical_soft_equalities: lowering.canonical_soft_equalities.len(),
+        center_coefficients: fitting_uses.len(),
+        semantic_latents: lowering.semantic_latents.len(),
+        solver_hard_equalities: lowering.solver_equality_count(),
+    });
     if let Some(problem_size) = exact_problem_size {
         preflight_report.problem_size = problem_size;
     }
@@ -653,6 +756,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
+        soft_field_values: Vec::new(),
         shared_level_values: Vec::new(),
         field_energy: None,
         total_objective: None,
@@ -674,28 +778,44 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
     }
 }
 
-fn scalar_relation_count(snapshot: &ProblemSnapshot) -> Option<usize> {
-    snapshot
+#[derive(Debug, Clone, Copy)]
+struct ScalarRelationCounts {
+    hard: usize,
+    soft: usize,
+}
+
+impl ScalarRelationCounts {
+    fn total(self) -> Option<usize> {
+        self.hard.checked_add(self.soft)
+    }
+}
+
+fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCounts> {
+    let (observation_hard, observation_soft) = snapshot.inner.observations.iter().try_fold(
+        (0_usize, 0_usize),
+        |(hard, soft), observation| match observation {
+            ObservationInput::FieldValue(value) if value.configuration().is_soft() => {
+                Some((hard, soft.checked_add(1)?))
+            }
+            ObservationInput::FieldValue(_) | ObservationInput::TangentDirection(_) => {
+                Some((hard.checked_add(1)?, soft))
+            }
+            ObservationInput::Gradient(_) => Some((hard.checked_add(3)?, soft)),
+        },
+    )?;
+    let group_hard = snapshot
         .inner
-        .observations
+        .shared_level_sets
         .iter()
-        .try_fold(0_usize, |count, observation| {
-            count.checked_add(match observation {
-                ObservationInput::FieldValue(_) => 1,
-                ObservationInput::Gradient(_) => 3,
-                ObservationInput::TangentDirection(_) => 1,
-            })
-        })?
-        .checked_add(
-            snapshot
-                .inner
-                .shared_level_sets
-                .iter()
-                .try_fold(0_usize, |count, group| {
-                    count.checked_add(group.members().len())
-                })?,
-        )?
-        .checked_add(snapshot.inner.additive_field_gauges.len())
+        .try_fold(0_usize, |count, group| {
+            count.checked_add(group.members().len())
+        })?;
+    Some(ScalarRelationCounts {
+        hard: observation_hard
+            .checked_add(group_hard)?
+            .checked_add(snapshot.inner.additive_field_gauges.len())?,
+        soft: observation_soft,
+    })
 }
 
 fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
@@ -758,16 +878,19 @@ fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> 
 
 fn conservative_problem_size(
     input_observations: usize,
-    scalar_relations: usize,
+    scalar_relations: ScalarRelationCounts,
     semantic_latents: usize,
 ) -> ProblemSize {
     ProblemSize {
         input_observations,
-        scalar_hard_relations: scalar_relations,
+        scalar_hard_relations: scalar_relations.hard,
+        scalar_soft_relations: scalar_relations.soft,
         canonical_hard_equalities: None,
+        canonical_soft_equalities: None,
         center_coefficients: None,
         semantic_latents,
         auxiliary_variables: 0,
+        quadratic_objective_terms: scalar_relations.soft,
         cone_blocks: 0,
         primal_variables: None,
         equality_constraints: None,
@@ -792,7 +915,12 @@ fn plan_snapshot_capacity(
         return Err(plan_equality_capacity(usize::MAX, usize::MAX)
             .expect_err("maximal dimensions must overflow the capacity plan"));
     };
-    let Some(canonical_relations) = lowering.canonical_equalities.len().checked_add(4) else {
+    let Some(canonical_relations) = lowering
+        .canonical_equalities
+        .len()
+        .checked_add(lowering.canonical_soft_equalities.len())
+        .and_then(|value| value.checked_add(4))
+    else {
         return Err(plan_equality_capacity(usize::MAX, usize::MAX)
             .expect_err("maximal dimensions must overflow the capacity plan"));
     };
@@ -858,7 +986,10 @@ fn fit_snapshot_after_preflight(
     let solution = match CubicEqualityCore::solve_canonical(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
+            soft_equalities: lowering.canonical_soft_equalities.clone(),
+            soft_objectives: lowering.canonical_soft_objectives.clone(),
             semantic_latents: lowering.semantic_latents.clone(),
+            field_energy_normalization: snapshot.inner.field_energy_normalization,
         },
         snapshot.inner.global_anisotropy_metric.as_cubic_metric(),
     ) {
@@ -910,6 +1041,7 @@ struct ScalarObservation {
     functional: ScalarFunctionalDescriptor,
     semantic_role: SemanticRolePath,
     target: f64,
+    field_value_configuration: FieldValueConfiguration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -960,6 +1092,7 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                 functional: ScalarFunctionalDescriptor::field_value(),
                 semantic_role: SemanticRolePath::new("field-value-observation/value"),
                 target: observation.value(),
+                field_value_configuration: observation.configuration(),
             }],
             ObservationInput::Gradient(observation) => observation
                 .gradient()
@@ -975,6 +1108,7 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                         "gradient-observation/component/{axis}"
                     )),
                     target,
+                    field_value_configuration: FieldValueConfiguration::Hard,
                 })
                 .collect(),
             ObservationInput::TangentDirection(observation) => vec![ScalarObservation {
@@ -988,6 +1122,7 @@ fn scalar_observations(observations: &[ObservationInput]) -> Vec<ScalarObservati
                     "tangent-direction-observation/directional-derivative",
                 ),
                 target: 0.0,
+                field_value_configuration: FieldValueConfiguration::Hard,
             }],
         })
         .collect()
@@ -1003,6 +1138,8 @@ struct SourceHardRelation {
 struct EqualityLowering {
     source_relations: Vec<SourceHardRelation>,
     canonical_equalities: Vec<CanonicalHardEquality>,
+    canonical_soft_equalities: Vec<CanonicalSoftEquality>,
+    canonical_soft_objectives: Vec<CanonicalSoftObjective>,
     canonical_index_by_key: BTreeMap<CanonicalEqualityKey, (usize, f64)>,
     direct_input_conflicts: Vec<DirectInputConflictEvidence>,
     relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
@@ -1014,11 +1151,22 @@ impl EqualityLowering {
         Self {
             source_relations: Vec::new(),
             canonical_equalities: Vec::new(),
+            canonical_soft_equalities: Vec::new(),
+            canonical_soft_objectives: Vec::new(),
             canonical_index_by_key: BTreeMap::new(),
             direct_input_conflicts: Vec::new(),
             relation_graph_conflicts: Vec::new(),
             semantic_latents: Vec::new(),
         }
+    }
+
+    fn push_soft(&mut self, equality: CanonicalSoftEquality, loss: CanonicalSoftLoss) {
+        self.canonical_soft_objectives
+            .push(CanonicalSoftObjective::new(
+                equality.provenance().residual().clone(),
+                loss,
+            ));
+        self.canonical_soft_equalities.push(equality);
     }
 
     fn push_source(&mut self, equality: CanonicalHardEquality) {
@@ -1439,6 +1587,23 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
     let mut value_constraints = CanonicalValueConstraintForest::default();
     for observation in scalar_observations(&snapshot.inner.observations) {
+        let soft_loss = match observation.field_value_configuration {
+            FieldValueConfiguration::Hard => None,
+            FieldValueConfiguration::QuadraticPenalty(penalty) => {
+                Some(CanonicalSoftLoss::QuadraticPenalty {
+                    weight: penalty.weight(),
+                })
+            }
+            FieldValueConfiguration::StandardDeviation(standard_deviation) => {
+                Some(CanonicalSoftLoss::StandardDeviation {
+                    standard_deviation: standard_deviation.value(),
+                })
+            }
+        };
+        if let Some(loss) = soft_loss {
+            lowering.push_soft(soft_field_equality(&observation), loss);
+            continue;
+        }
         let edge =
             (observation.functional.dimension == FunctionalDimension::FieldValue).then(|| {
                 value_constraints.add_absolute_support(
@@ -1560,6 +1725,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                         functional: ScalarFunctionalDescriptor::field_value(),
                         semantic_role: role,
                         target: gauge.value(),
+                        field_value_configuration: FieldValueConfiguration::Hard,
                     },
                     participation,
                 ));
@@ -1627,6 +1793,27 @@ fn field_equality(
     )
 }
 
+fn soft_field_equality(observation: &ScalarObservation) -> CanonicalSoftEquality {
+    let provenance = relation_provenance(
+        observation.source_id.clone(),
+        observation.group_id.clone(),
+        observation.semantic_role.clone(),
+    );
+    let functional = CanonicalFunctional::new(
+        observation.functional.dimension,
+        vec![FunctionalTerm::new(
+            observation.support,
+            observation.functional.value_coefficient,
+            observation.functional.gradient_coefficient,
+        )],
+    )
+    .expect("checked public observations lower to a finite nonzero functional");
+    CanonicalSoftEquality::new(
+        FunctionalUse::new(functional, provenance),
+        observation.target,
+    )
+}
+
 fn relation_provenance(
     source_id: SourceId,
     group_id: Option<GroupId>,
@@ -1656,10 +1843,13 @@ fn success_report(
     let problem_size = ProblemSize {
         input_observations: planned_problem_size.input_observations,
         scalar_hard_relations: planned_problem_size.scalar_hard_relations,
+        scalar_soft_relations: planned_problem_size.scalar_soft_relations,
         canonical_hard_equalities: Some(solution.assembly.canonical_hard_equalities),
+        canonical_soft_equalities: Some(solution.soft_equalities.len()),
         center_coefficients: Some(solution.assembly.field_coefficients),
         semantic_latents: solution.assembly.semantic_latents,
         auxiliary_variables: 0,
+        quadratic_objective_terms: solution.soft_equalities.len(),
         cone_blocks: 0,
         primal_variables: Some(solution.assembly.primal_variables),
         equality_constraints: Some(
@@ -1680,6 +1870,16 @@ fn success_report(
             .cmp(&right.source_id)
             .then_with(|| left.semantic_role.cmp(&right.semantic_role))
     });
+    let mut soft_field_values = solution
+        .soft_equalities
+        .iter()
+        .map(soft_field_value_assessment)
+        .collect::<Vec<_>>();
+    soft_field_values.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
     let backend_fingerprint = public_backend_fingerprint(&solution.backend.backend);
     let attempts = public_attempts(&solution.backend.attempts);
     FitReport {
@@ -1689,6 +1889,7 @@ fn success_report(
         numerical_policy: solution.backend.numerical_policy,
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
+        soft_field_values,
         shared_level_values: shared_level_values.to_vec(),
         field_energy: Some(solution.field_energy),
         total_objective: Some(solution.total_objective),
@@ -1746,6 +1947,37 @@ fn hard_relation_assessment(
     }
 }
 
+fn soft_field_value_assessment(
+    relation: &crate::cubic_equality::RecoveredSoftEquality,
+) -> SoftFieldValueAssessment {
+    let (quadratic_penalty, standard_deviation) = match relation.loss {
+        CanonicalSoftLoss::QuadraticPenalty { weight } => (
+            Some(
+                QuadraticPenalty::try_new(weight)
+                    .expect("canonical quadratic penalties retain checked public values"),
+            ),
+            None,
+        ),
+        CanonicalSoftLoss::StandardDeviation { standard_deviation } => (
+            None,
+            Some(
+                StandardDeviation::try_new(standard_deviation)
+                    .expect("canonical standard deviations retain checked public values"),
+            ),
+        ),
+    };
+    SoftFieldValueAssessment {
+        source_id: relation.provenance.source().clone(),
+        semantic_role: relation.provenance.semantic_role().clone(),
+        target: relation.target,
+        recovered_value: relation.value,
+        residual: relation.residual,
+        quadratic_penalty,
+        standard_deviation,
+        loss: relation.objective_contribution,
+    }
+}
+
 fn failure_report(
     mut report: FitReport,
     failure: &CubicEqualityFailure,
@@ -1782,6 +2014,18 @@ fn failure_report(
             ));
             report.canonical_acceptance = public_failure_acceptance(evidence);
             report.hard_relations = public_failed_hard_relations(evidence, source_relations);
+            report.soft_field_values = evidence
+                .soft_equalities
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(soft_field_value_assessment)
+                .collect();
+            report.soft_field_values.sort_by(|left, right| {
+                left.source_id
+                    .cmp(&right.source_id)
+                    .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+            });
             report.recovery_verification = Some(public_recovery_evidence(evidence));
         }
         CubicEqualityFailure::EmptyEqualitySet | CubicEqualityFailure::NonFiniteTarget { .. } => {}
@@ -2202,6 +2446,11 @@ fn public_failure_acceptance(
             polynomial_round_trip_error: evidence.polynomial_round_trip_error,
             field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
             field_energy_round_trip_error: evidence.field_energy_round_trip_error,
+            objective_round_trip_error: evidence.objective_round_trip_error,
+            objective_verified: evidence.objective_round_trip_error.is_some()
+                && !evidence
+                    .reasons
+                    .contains(&crate::cubic_equality::RecoveryVerificationFailureReason::ObjectiveRoundTripViolation),
             tolerance_round_trip_error: evidence.tolerance_round_trip_error,
         },
     ))
@@ -2426,6 +2675,8 @@ fn public_success_acceptance(solution: &CubicEqualitySolution) -> CanonicalAccep
         polynomial_round_trip_error: Some(solution.polynomial_round_trip_error),
         field_coefficient_round_trip_error: Some(solution.field_coefficient_round_trip_error),
         field_energy_round_trip_error: Some(solution.field_energy_round_trip_error),
+        objective_round_trip_error: Some(solution.objective_round_trip_error),
+        objective_verified: solution.objective_verified,
         tolerance_round_trip_error: Some(solution.tolerance_round_trip_error),
     })
 }
@@ -2442,6 +2693,7 @@ fn public_recovery_evidence(
         polynomial_round_trip_error: evidence.polynomial_round_trip_error,
         field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
         field_energy_round_trip_error: evidence.field_energy_round_trip_error,
+        objective_round_trip_error: evidence.objective_round_trip_error,
         tolerance_round_trip_error: evidence.tolerance_round_trip_error,
         no_model_produced: evidence.no_model_produced,
     })
@@ -2545,7 +2797,19 @@ mod tests {
             .expect_err("report storage arithmetic remains checked before allocation");
         assert!(!evidence.large_allocation_attempted);
         assert!(!evidence.backend_invocation_attempted);
-        assert!(ProblemSize::cubic_equality(0, 0, 0, usize::MAX, 1, 0).is_none());
+        assert!(
+            ProblemSize::cubic_equality(CubicProblemSizeParts {
+                input_observations: 0,
+                scalar_hard_relations: 0,
+                scalar_soft_relations: 0,
+                canonical_hard_equalities: 0,
+                canonical_soft_equalities: 0,
+                center_coefficients: usize::MAX,
+                semantic_latents: 1,
+                solver_hard_equalities: 0,
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -2568,11 +2832,13 @@ mod tests {
                 round_trip_error: 9.0e-12,
             }),
             hard_equalities: None,
+            soft_equalities: None,
             relation_tolerances: None,
             hard_equality_violations: None,
             polynomial_round_trip_error: None,
             field_coefficient_round_trip_error: None,
             field_energy_round_trip_error: None,
+            objective_round_trip_error: None,
             tolerance_round_trip_error: None,
             recovery_finite: Some(true),
             provenance_verified: Some(true),

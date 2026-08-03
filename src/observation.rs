@@ -8,12 +8,103 @@ use crate::geometry::{Point3, Vector3};
 use crate::math::canonical_zero;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
 
-/// A hard observation of an absolute scalar field value at one point.
+/// A non-statistical weight for one quadratic field-value residual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadraticPenalty {
+    weight: f64,
+}
+
+impl QuadraticPenalty {
+    /// Creates a finite, strictly positive quadratic penalty weight.
+    pub fn try_new(weight: f64) -> Result<Self, QuadraticPenaltyError> {
+        if !weight.is_finite() {
+            return Err(QuadraticPenaltyError::NotFinite);
+        }
+        if weight <= 0.0 {
+            return Err(QuadraticPenaltyError::NotPositive);
+        }
+        Ok(Self { weight })
+    }
+
+    /// Returns the penalty weight in inverse squared field-value units.
+    pub fn weight(self) -> f64 {
+        self.weight
+    }
+}
+
+/// A rejected quadratic-penalty weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QuadraticPenaltyError {
+    /// The weight was NaN or infinite.
+    NotFinite,
+    /// The weight was zero or negative.
+    NotPositive,
+}
+
+impl fmt::Display for QuadraticPenaltyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => formatter.write_str("quadratic penalty is not finite"),
+            Self::NotPositive => formatter.write_str("quadratic penalty is not positive"),
+        }
+    }
+}
+
+impl Error for QuadraticPenaltyError {}
+
+/// A statistical standard deviation for one scalar field-value residual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StandardDeviation {
+    value: f64,
+}
+
+impl StandardDeviation {
+    /// Creates a finite, strictly positive standard deviation.
+    pub fn try_new(value: f64) -> Result<Self, StandardDeviationError> {
+        if !value.is_finite() {
+            return Err(StandardDeviationError::NotFinite);
+        }
+        if value <= 0.0 {
+            return Err(StandardDeviationError::NotPositive);
+        }
+        Ok(Self { value })
+    }
+
+    /// Returns the standard deviation in field-value units.
+    pub fn value(self) -> f64 {
+        self.value
+    }
+}
+
+/// A rejected statistical standard deviation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StandardDeviationError {
+    /// The standard deviation was NaN or infinite.
+    NotFinite,
+    /// The standard deviation was zero or negative.
+    NotPositive,
+}
+
+impl fmt::Display for StandardDeviationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => formatter.write_str("standard deviation is not finite"),
+            Self::NotPositive => formatter.write_str("standard deviation is not positive"),
+        }
+    }
+}
+
+impl Error for StandardDeviationError {}
+
+/// A hard or explicitly weighted soft observation of an absolute field value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldValueObservation {
     source_id: SourceId,
     location: Point3,
     value: f64,
+    configuration: FieldValueConfiguration,
 }
 
 impl FieldValueObservation {
@@ -23,6 +114,46 @@ impl FieldValueObservation {
         location: Point3,
         value: f64,
     ) -> Result<Self, ObservationError> {
+        Self::new(source_id, location, value, FieldValueConfiguration::Hard)
+    }
+
+    /// Creates a soft field-value observation with a non-statistical
+    /// quadratic penalty.
+    pub fn try_with_quadratic_penalty(
+        source_id: SourceId,
+        location: Point3,
+        value: f64,
+        penalty: QuadraticPenalty,
+    ) -> Result<Self, ObservationError> {
+        Self::new(
+            source_id,
+            location,
+            value,
+            FieldValueConfiguration::QuadraticPenalty(penalty),
+        )
+    }
+
+    /// Creates a soft field-value observation with statistical uncertainty.
+    pub fn try_with_standard_deviation(
+        source_id: SourceId,
+        location: Point3,
+        value: f64,
+        standard_deviation: StandardDeviation,
+    ) -> Result<Self, ObservationError> {
+        Self::new(
+            source_id,
+            location,
+            value,
+            FieldValueConfiguration::StandardDeviation(standard_deviation),
+        )
+    }
+
+    fn new(
+        source_id: SourceId,
+        location: Point3,
+        value: f64,
+        configuration: FieldValueConfiguration,
+    ) -> Result<Self, ObservationError> {
         if !value.is_finite() {
             return Err(ObservationError::NonFiniteFieldValue);
         }
@@ -30,6 +161,7 @@ impl FieldValueObservation {
             source_id,
             location,
             value,
+            configuration,
         })
     }
 
@@ -46,6 +178,23 @@ impl FieldValueObservation {
     /// Returns the observed absolute field value.
     pub fn value(&self) -> f64 {
         self.value
+    }
+
+    pub(crate) fn configuration(&self) -> FieldValueConfiguration {
+        self.configuration
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FieldValueConfiguration {
+    Hard,
+    QuadraticPenalty(QuadraticPenalty),
+    StandardDeviation(StandardDeviation),
+}
+
+impl FieldValueConfiguration {
+    pub(crate) fn is_soft(self) -> bool {
+        !matches!(self, Self::Hard)
     }
 }
 

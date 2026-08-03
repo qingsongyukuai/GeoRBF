@@ -16,6 +16,7 @@ use crate::functional::{
     FunctionalTerm, FunctionalUse, GroupId, ResidualId, SourceId, UsageProvenance,
 };
 use crate::geometry::FieldUnitLabel;
+use crate::kernel::FieldEnergyNormalization;
 use crate::kkt::{EqualityKktSystem, KktFailure, KktSolveEvidence, solve_equality_kkt};
 use crate::math::dot3;
 use crate::numerical::{
@@ -301,50 +302,6 @@ pub(crate) struct PolynomialRankEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct CubicFieldEnergyNormalization {
-    factor: f64,
-}
-
-impl CubicFieldEnergyNormalization {
-    fn all_hard() -> Self {
-        Self { factor: 1.0 }
-    }
-
-    pub(crate) fn factor(self) -> f64 {
-        self.factor
-    }
-
-    pub(crate) fn for_rescaled_units(
-        self,
-        length_scale: f64,
-        field_scale: f64,
-    ) -> Result<Self, FieldEnergyNormalizationError> {
-        if !length_scale.is_finite() || length_scale <= 0.0 {
-            return Err(FieldEnergyNormalizationError::InvalidLengthScale);
-        }
-        if !field_scale.is_finite() || field_scale <= 0.0 {
-            return Err(FieldEnergyNormalizationError::InvalidFieldScale);
-        }
-        let factor = self.factor * length_scale.powi(3) / field_scale.powi(2);
-        if !factor.is_finite() || factor <= 0.0 {
-            return Err(FieldEnergyNormalizationError::NonFiniteRescaledFactor);
-        }
-        Ok(Self { factor })
-    }
-
-    pub(crate) fn dimensionless_energy(self, native_cubic_energy: f64) -> f64 {
-        self.factor * native_cubic_energy
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FieldEnergyNormalizationError {
-    InvalidLengthScale,
-    InvalidFieldScale,
-    NonFiniteRescaledFactor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AnalysisExecutionEvidence {
     pub(crate) solver_invoked: bool,
     pub(crate) hidden_regularization_applied: bool,
@@ -443,7 +400,7 @@ pub(crate) struct CubicRepresentation {
     kernel: DenseMatrix,
     polynomial: DenseMatrix,
     evidence: CpdEvidence,
-    field_energy_normalization: CubicFieldEnergyNormalization,
+    field_energy_normalization: FieldEnergyNormalization,
 }
 
 impl CubicRepresentation {
@@ -522,7 +479,7 @@ impl CubicRepresentation {
                 solve_coordinate_length: coordinates.length(),
                 degenerate_extent: coordinates.degenerate_extent(),
             },
-            field_energy_normalization: CubicFieldEnergyNormalization::all_hard(),
+            field_energy_normalization: FieldEnergyNormalization::all_hard(),
         })
     }
 
@@ -542,8 +499,12 @@ impl CubicRepresentation {
         self.coordinates
     }
 
-    pub(crate) fn field_energy_normalization(&self) -> CubicFieldEnergyNormalization {
+    pub(crate) fn field_energy_normalization(&self) -> FieldEnergyNormalization {
         self.field_energy_normalization
+    }
+
+    fn set_field_energy_normalization(&mut self, normalization: FieldEnergyNormalization) {
+        self.field_energy_normalization = normalization;
     }
 }
 
@@ -567,7 +528,10 @@ pub(crate) fn preflight_polynomial_analysis_failure(
     }
 }
 
-pub(crate) fn solver_fitting_uses(equalities: &[CanonicalHardEquality]) -> Vec<FunctionalUse> {
+pub(crate) fn canonical_fitting_uses(
+    equalities: &[CanonicalHardEquality],
+    soft_equalities: &[CanonicalSoftEquality],
+) -> Vec<FunctionalUse> {
     let mut fitting_uses = Vec::<FunctionalUse>::new();
     for usage in equalities
         .iter()
@@ -575,6 +539,7 @@ pub(crate) fn solver_fitting_uses(equalities: &[CanonicalHardEquality]) -> Vec<F
             equality.participation() == CanonicalEqualityParticipation::SolverConstraint
         })
         .filter_map(CanonicalHardEquality::field)
+        .chain(soft_equalities.iter().map(CanonicalSoftEquality::field))
     {
         if !fitting_uses
             .iter()
@@ -1207,10 +1172,114 @@ impl CanonicalHardEquality {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CanonicalSoftLoss {
+    QuadraticPenalty { weight: f64 },
+    StandardDeviation { standard_deviation: f64 },
+}
+
+impl CanonicalSoftLoss {
+    pub(crate) fn precision(self) -> f64 {
+        match self {
+            Self::QuadraticPenalty { weight } => weight,
+            Self::StandardDeviation { standard_deviation } => 1.0 / standard_deviation.powi(2),
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        match self {
+            Self::QuadraticPenalty { weight } => weight.is_finite() && weight > 0.0,
+            Self::StandardDeviation { standard_deviation } => {
+                standard_deviation.is_finite() && standard_deviation > 0.0
+            }
+        }
+    }
+
+    fn residual_reference_scale(self) -> f64 {
+        match self {
+            Self::QuadraticPenalty { weight } => 1.0 / weight.sqrt(),
+            Self::StandardDeviation { standard_deviation } => standard_deviation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalSoftEquality {
+    field: FunctionalUse,
+    provenance: UsageProvenance,
+    dimension: FunctionalDimension,
+    target: f64,
+}
+
+impl CanonicalSoftEquality {
+    pub(crate) fn new(field: FunctionalUse, target: f64) -> Self {
+        let provenance = field.provenance().clone();
+        let dimension = field.functional().dimension();
+        Self {
+            field,
+            provenance,
+            dimension,
+            target,
+        }
+    }
+
+    pub(crate) fn field(&self) -> &FunctionalUse {
+        &self.field
+    }
+
+    pub(crate) fn provenance(&self) -> &UsageProvenance {
+        &self.provenance
+    }
+
+    pub(crate) fn dimension(&self) -> FunctionalDimension {
+        self.dimension
+    }
+
+    pub(crate) fn target(&self) -> f64 {
+        self.target
+    }
+
+    fn evaluate(&self, field: &RecoveredCubicField) -> f64 {
+        field.evaluate_functional(self.field.functional())
+    }
+
+    fn constant_shift_response(&self) -> f64 {
+        self.field
+            .functional()
+            .terms()
+            .iter()
+            .map(|term| term.value_coefficient())
+            .sum()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalSoftObjective {
+    residual: ResidualId,
+    loss: CanonicalSoftLoss,
+}
+
+impl CanonicalSoftObjective {
+    pub(crate) fn new(residual: ResidualId, loss: CanonicalSoftLoss) -> Self {
+        Self { residual, loss }
+    }
+
+    pub(crate) fn residual(&self) -> &ResidualId {
+        &self.residual
+    }
+
+    pub(crate) fn loss(&self) -> CanonicalSoftLoss {
+        self.loss
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CubicCanonicalProblem {
     pub(crate) equalities: Vec<CanonicalHardEquality>,
+    pub(crate) soft_equalities: Vec<CanonicalSoftEquality>,
+    pub(crate) soft_objectives: Vec<CanonicalSoftObjective>,
     pub(crate) semantic_latents: Vec<SemanticLatentDefinition>,
+    pub(crate) field_energy_normalization: FieldEnergyNormalization,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1223,6 +1292,7 @@ pub(crate) struct EqualityAssemblyEvidence {
     pub(crate) hard_equalities: usize,
     pub(crate) canonical_hard_equalities: usize,
     hard_equality_rows: Vec<AssembledHardEqualityRow>,
+    soft_objective_rows: Vec<AssembledSoftObjectiveRow>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1237,6 +1307,18 @@ struct AssembledHardEqualityRow {
     derived_column: Option<DerivedColumnId>,
     standard_jacobian_row: Vec<f64>,
     rhs: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AssembledSoftObjectiveRow {
+    canonical_index: usize,
+    objective_index: usize,
+    fitting_functional_index: usize,
+    provenance: UsageProvenance,
+    residual: ResidualId,
+    target: f64,
+    canonical_precision: f64,
+    standard_precision: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1333,6 +1415,17 @@ pub(crate) struct RecoveredHardEquality {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecoveredSoftEquality {
+    pub(crate) provenance: UsageProvenance,
+    pub(crate) dimension: FunctionalDimension,
+    pub(crate) target: f64,
+    pub(crate) value: f64,
+    pub(crate) residual: f64,
+    pub(crate) loss: CanonicalSoftLoss,
+    pub(crate) objective_contribution: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RecoveredSemanticLatent {
     pub(crate) group_id: GroupId,
     pub(crate) field_unit: FieldUnitLabel,
@@ -1415,6 +1508,7 @@ pub(crate) struct CubicEqualitySolution {
     pub(crate) field: RecoveredCubicField,
     pub(crate) semantic_latents: Vec<RecoveredSemanticLatent>,
     pub(crate) hard_equalities: Vec<RecoveredHardEquality>,
+    pub(crate) soft_equalities: Vec<RecoveredSoftEquality>,
     pub(crate) side_condition: PhysicalSideConditionEvidence,
     pub(crate) hard_equality_violations: FunctionalViolationEnvelope,
     pub(crate) relation_tolerances: Vec<CanonicalRelationToleranceEvidence>,
@@ -1422,6 +1516,8 @@ pub(crate) struct CubicEqualitySolution {
     pub(crate) polynomial_round_trip_error: f64,
     pub(crate) field_coefficient_round_trip_error: f64,
     pub(crate) field_energy_round_trip_error: f64,
+    pub(crate) objective_round_trip_error: f64,
+    pub(crate) objective_verified: bool,
     pub(crate) recovery_finite: bool,
     pub(crate) provenance_verified: bool,
     pub(crate) semantic_latent_count: usize,
@@ -1451,6 +1547,9 @@ pub enum RecoveryVerificationFailureReason {
     FieldCoefficientRoundTripViolation,
     /// FieldEnergy recovery exceeded its round-trip limit.
     FieldEnergyRoundTripViolation,
+    /// The independently recovered physical objective disagreed with the
+    /// standard-form objective.
+    ObjectiveRoundTripViolation,
     /// Relation-tolerance recovery exceeded its round-trip limit.
     ToleranceRoundTripViolation,
 }
@@ -1460,11 +1559,13 @@ pub(crate) struct RecoveryVerificationFailureEvidence {
     pub(crate) reasons: Vec<RecoveryVerificationFailureReason>,
     pub(crate) side_condition: Option<PhysicalSideConditionEvidence>,
     pub(crate) hard_equalities: Option<Vec<RecoveredHardEquality>>,
+    pub(crate) soft_equalities: Option<Vec<RecoveredSoftEquality>>,
     pub(crate) relation_tolerances: Option<Vec<CanonicalRelationToleranceEvidence>>,
     pub(crate) hard_equality_violations: Option<FunctionalViolationEnvelope>,
     pub(crate) polynomial_round_trip_error: Option<f64>,
     pub(crate) field_coefficient_round_trip_error: Option<f64>,
     pub(crate) field_energy_round_trip_error: Option<f64>,
+    pub(crate) objective_round_trip_error: Option<f64>,
     pub(crate) tolerance_round_trip_error: Option<f64>,
     pub(crate) recovery_finite: Option<bool>,
     pub(crate) provenance_verified: Option<bool>,
@@ -1477,11 +1578,13 @@ impl RecoveryVerificationFailureEvidence {
             reasons: vec![reason],
             side_condition: None,
             hard_equalities: None,
+            soft_equalities: None,
             relation_tolerances: None,
             hard_equality_violations: None,
             polynomial_round_trip_error: None,
             field_coefficient_round_trip_error: None,
             field_energy_round_trip_error: None,
+            objective_round_trip_error: None,
             tolerance_round_trip_error: None,
             recovery_finite: None,
             provenance_verified: None,
@@ -1541,7 +1644,10 @@ impl CubicEqualityCore {
                     .into_iter()
                     .map(CanonicalHardEquality::from_field_only)
                     .collect(),
+                soft_equalities: Vec::new(),
+                soft_objectives: Vec::new(),
                 semantic_latents: Vec::new(),
+                field_energy_normalization: FieldEnergyNormalization::all_hard(),
             },
             metric,
         )
@@ -1551,7 +1657,7 @@ impl CubicEqualityCore {
         problem: CubicCanonicalProblem,
         metric: GlobalAnisotropyMetric,
     ) -> Result<CubicEqualitySolution, CubicEqualityFailure> {
-        if problem.equalities.is_empty() {
+        if problem.equalities.is_empty() && problem.soft_equalities.is_empty() {
             return Err(CubicEqualityFailure::EmptyEqualitySet);
         }
         for (index, equality) in problem.equalities.iter().enumerate() {
@@ -1563,9 +1669,25 @@ impl CubicEqualityCore {
                 return Err(CubicEqualityFailure::NonFiniteTarget { equality: index });
             }
         }
-        let fitting_uses = solver_fitting_uses(&problem.equalities);
-        let representation = CubicRepresentation::new(fitting_uses, metric)
+        if problem.soft_equalities.len() != problem.soft_objectives.len()
+            || problem
+                .soft_equalities
+                .iter()
+                .zip(&problem.soft_objectives)
+                .any(|(relation, objective)| {
+                    !relation.target.is_finite()
+                        || !objective.loss.is_valid()
+                        || relation.provenance.residual() != &objective.residual
+                })
+        {
+            return Err(CubicEqualityFailure::NonFiniteTarget {
+                equality: problem.equalities.len(),
+            });
+        }
+        let fitting_uses = canonical_fitting_uses(&problem.equalities, &problem.soft_equalities);
+        let mut representation = CubicRepresentation::new(fitting_uses, metric)
             .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
+        representation.set_field_energy_normalization(problem.field_energy_normalization);
         #[cfg(test)]
         if let Some(failure) = take_injected_kkt_failure() {
             return Err(CubicEqualityFailure::Backend {
@@ -1594,12 +1716,51 @@ fn solve_standard_form(
     let latent_offset = coefficient_count + POLYNOMIAL_DIMENSION;
     let primal_variables = latent_offset + problem.semantic_latents.len();
     let equality_constraints = POLYNOMIAL_DIMENSION + solver_equalities.len();
+    let soft_objective_rows = problem
+        .soft_equalities
+        .iter()
+        .zip(&problem.soft_objectives)
+        .enumerate()
+        .map(|(index, (relation, objective))| AssembledSoftObjectiveRow {
+            canonical_index: index,
+            objective_index: index,
+            fitting_functional_index: representation
+                .fitting_uses
+                .iter()
+                .position(|usage| usage.functional() == relation.field.functional())
+                .expect("every soft field functional enters the representer span"),
+            provenance: relation.provenance.clone(),
+            residual: objective.residual.clone(),
+            target: relation.target,
+            canonical_precision: objective.loss.precision(),
+            standard_precision: objective.loss.precision(),
+        })
+        .collect::<Vec<_>>();
+    let field_energy_scale = representation.field_energy_normalization.factor()
+        / representation.coordinates.length().powi(3);
     let hessian = DenseMatrix::from_fn(primal_variables, primal_variables, |row, column| {
-        if row < coefficient_count && column < coefficient_count {
-            representation.kernel.get(row, column)
+        let field_energy = if row < coefficient_count && column < coefficient_count {
+            field_energy_scale * representation.kernel.get(row, column)
         } else {
             0.0
-        }
+        };
+        field_energy
+            + soft_objective_rows
+                .iter()
+                .map(|objective| {
+                    objective.standard_precision
+                        * standard_field_affine_coefficient(
+                            representation,
+                            row,
+                            objective.fitting_functional_index,
+                        )
+                        * standard_field_affine_coefficient(
+                            representation,
+                            column,
+                            objective.fitting_functional_index,
+                        )
+                })
+                .sum::<f64>()
     });
     let equality_jacobian =
         DenseMatrix::from_fn(equality_constraints, primal_variables, |row, column| {
@@ -1611,49 +1772,30 @@ fn solve_standard_form(
                 }
             } else {
                 let (_, equality) = solver_equalities[row - POLYNOMIAL_DIMENSION];
-                if column < coefficient_count {
-                    equality
-                        .field
-                        .as_ref()
-                        .map(|field| {
-                            let functional = representation
-                                .fitting_uses
-                                .iter()
-                                .position(|use_| use_.functional() == field.functional())
-                                .expect(
-                                    "every solver field functional enters the representer span",
-                                );
-                            representation.kernel.get(functional, column)
-                        })
-                        .unwrap_or(0.0)
-                } else if column < latent_offset {
-                    equality
-                        .field
-                        .as_ref()
-                        .map(|field| {
-                            let functional = representation
-                                .fitting_uses
-                                .iter()
-                                .position(|use_| use_.functional() == field.functional())
-                                .expect(
-                                    "every solver field functional enters the representer span",
-                                );
-                            representation
-                                .polynomial
-                                .get(functional, column - coefficient_count)
-                        })
-                        .unwrap_or(0.0)
-                } else {
-                    equality
-                        .latent_coefficients
-                        .iter()
-                        .find(|term| term.latent == column - latent_offset)
-                        .map(|term| term.coefficient)
-                        .unwrap_or(0.0)
-                }
+                standard_affine_coefficient(
+                    representation,
+                    column,
+                    equality.field.as_ref(),
+                    &equality.latent_coefficients,
+                )
             }
         });
-    let stationarity_rhs = vec![0.0; primal_variables];
+    let stationarity_rhs = (0..primal_variables)
+        .map(|column| {
+            soft_objective_rows
+                .iter()
+                .map(|objective| {
+                    objective.standard_precision
+                        * objective.target
+                        * standard_field_affine_coefficient(
+                            representation,
+                            column,
+                            objective.fitting_functional_index,
+                        )
+                })
+                .sum()
+        })
+        .collect::<Vec<_>>();
     let equality_rhs = std::iter::repeat_n(0.0, POLYNOMIAL_DIMENSION)
         .chain(
             solver_equalities
@@ -1707,9 +1849,83 @@ fn solve_standard_form(
             hard_equalities: solver_equalities.len(),
             canonical_hard_equalities: problem.equalities.len(),
             hard_equality_rows,
+            soft_objective_rows,
         },
         backend,
     ))
+}
+
+fn standard_affine_row(
+    representation: &CubicRepresentation,
+    primal_variables: usize,
+    field: Option<&FunctionalUse>,
+    latent_coefficients: &[SemanticLatentCoefficient],
+) -> Vec<f64> {
+    (0..primal_variables)
+        .map(|column| {
+            standard_affine_coefficient(representation, column, field, latent_coefficients)
+        })
+        .collect()
+}
+
+fn standard_affine_coefficient(
+    representation: &CubicRepresentation,
+    column: usize,
+    field: Option<&FunctionalUse>,
+    latent_coefficients: &[SemanticLatentCoefficient],
+) -> f64 {
+    let coefficient_count = representation.kernel.rows;
+    let latent_offset = coefficient_count + POLYNOMIAL_DIMENSION;
+    if column < latent_offset {
+        field
+            .map(|field| {
+                let functional = representation
+                    .fitting_uses
+                    .iter()
+                    .position(|use_| use_.functional() == field.functional())
+                    .expect("every objective or hard field functional enters the representer span");
+                standard_field_affine_coefficient(representation, column, functional)
+            })
+            .unwrap_or(0.0)
+    } else {
+        latent_coefficients
+            .iter()
+            .find(|term| term.latent == column - latent_offset)
+            .map(|term| term.coefficient)
+            .unwrap_or(0.0)
+    }
+}
+
+fn standard_field_affine_coefficient(
+    representation: &CubicRepresentation,
+    column: usize,
+    fitting_functional_index: usize,
+) -> f64 {
+    let coefficient_count = representation.kernel.rows;
+    if column < coefficient_count {
+        representation.kernel.get(fitting_functional_index, column)
+    } else if column < coefficient_count + POLYNOMIAL_DIMENSION {
+        representation
+            .polynomial
+            .get(fitting_functional_index, column - coefficient_count)
+    } else {
+        0.0
+    }
+}
+
+fn standard_field_affine_value(
+    representation: &CubicRepresentation,
+    fitting_functional_index: usize,
+    candidate: &[f64],
+) -> f64 {
+    candidate
+        .iter()
+        .enumerate()
+        .map(|(column, value)| {
+            standard_field_affine_coefficient(representation, column, fitting_functional_index)
+                * value
+        })
+        .sum()
 }
 
 fn verifies_assembled_provenance_and_rows(
@@ -1727,11 +1943,12 @@ fn verifies_assembled_provenance_and_rows(
         })
         .collect::<Vec<_>>();
     if assembly.hard_equality_rows.len() != solver_equalities.len()
+        || assembly.soft_objective_rows.len() != problem.soft_equalities.len()
         || backend.equality_multipliers.len() != assembly.side_conditions + assembly.hard_equalities
     {
         return false;
     }
-    assembly
+    let hard_rows_verified = assembly
         .hard_equality_rows
         .iter()
         .zip(solver_equalities)
@@ -1753,7 +1970,27 @@ fn verifies_assembled_provenance_and_rows(
                         .map(|_| DerivedColumnId::from_residual(equality.provenance.residual()))
                 && row.rhs == equality.target
                 && row.standard_jacobian_row == expected
-        })
+        });
+    let soft_rows_verified = assembly
+        .soft_objective_rows
+        .iter()
+        .zip(problem.soft_equalities.iter().zip(&problem.soft_objectives))
+        .enumerate()
+        .all(|(index, (row, (relation, objective)))| {
+            row.canonical_index == index
+                && row.objective_index == index
+                && representation
+                    .fitting_uses
+                    .get(row.fitting_functional_index)
+                    .is_some_and(|usage| usage.functional() == relation.field.functional())
+                && row.provenance == relation.provenance
+                && row.residual == *relation.provenance.residual()
+                && row.residual == *objective.residual()
+                && row.target == relation.target
+                && row.canonical_precision == objective.loss.precision()
+                && row.standard_precision == row.canonical_precision
+        });
+    hard_rows_verified && soft_rows_verified
 }
 
 fn expected_hard_equality_row(
@@ -1761,48 +1998,12 @@ fn expected_hard_equality_row(
     problem: &CubicCanonicalProblem,
     equality: &CanonicalHardEquality,
 ) -> Vec<f64> {
-    let coefficient_count = representation.kernel.rows;
-    let latent_offset = coefficient_count + POLYNOMIAL_DIMENSION;
-    (0..latent_offset + problem.semantic_latents.len())
-        .map(|column| {
-            if column < coefficient_count {
-                equality
-                    .field
-                    .as_ref()
-                    .map(|field| {
-                        let functional = representation
-                            .fitting_uses
-                            .iter()
-                            .position(|use_| use_.functional() == field.functional())
-                            .expect("every solver field functional enters the representer span");
-                        representation.kernel.get(functional, column)
-                    })
-                    .unwrap_or(0.0)
-            } else if column < latent_offset {
-                equality
-                    .field
-                    .as_ref()
-                    .map(|field| {
-                        let functional = representation
-                            .fitting_uses
-                            .iter()
-                            .position(|use_| use_.functional() == field.functional())
-                            .expect("every solver field functional enters the representer span");
-                        representation
-                            .polynomial
-                            .get(functional, column - coefficient_count)
-                    })
-                    .unwrap_or(0.0)
-            } else {
-                equality
-                    .latent_coefficients
-                    .iter()
-                    .find(|term| term.latent == column - latent_offset)
-                    .map(|term| term.coefficient)
-                    .unwrap_or(0.0)
-            }
-        })
-        .collect()
+    standard_affine_row(
+        representation,
+        representation.kernel.rows + POLYNOMIAL_DIMENSION + problem.semantic_latents.len(),
+        equality.field.as_ref(),
+        &equality.latent_coefficients,
+    )
 }
 
 fn recover_and_verify(
@@ -1880,6 +2081,24 @@ fn recover_and_verify(
             }
         })
         .collect::<Vec<_>>();
+    let soft_equalities = problem
+        .soft_equalities
+        .iter()
+        .zip(&problem.soft_objectives)
+        .map(|(relation, objective)| {
+            let value = relation.evaluate(&field);
+            let residual = value - relation.target;
+            RecoveredSoftEquality {
+                provenance: relation.provenance.clone(),
+                dimension: relation.dimension,
+                target: relation.target,
+                value,
+                residual,
+                loss: objective.loss,
+                objective_contribution: 0.5 * objective.loss.precision() * residual.powi(2),
+            }
+        })
+        .collect::<Vec<_>>();
     let standard_side_components = std::array::from_fn(|column| {
         (0..coefficient_count)
             .map(|row| representation.polynomial.get(row, column) * standard_coefficients[row])
@@ -1937,17 +2156,37 @@ fn recover_and_verify(
         relative_slice_error(&recovered_standard_coefficients, standard_coefficients);
 
     let native_cubic_energy = field.native_cubic_energy();
-    let field_energy = representation
-        .field_energy_normalization
-        .dimensionless_energy(native_cubic_energy);
+    let field_energy = representation.field_energy_normalization.factor() * native_cubic_energy;
     let standard_energy = dot_product(
         standard_coefficients,
         &representation.kernel.multiply_vector(standard_coefficients),
     );
-    let recovered_energy = standard_energy / representation.coordinates.length().powi(3);
+    let recovered_energy = representation.field_energy_normalization.factor() * standard_energy
+        / representation.coordinates.length().powi(3);
     let field_energy_round_trip_error =
         (field_energy - recovered_energy).abs() / recovered_energy.abs().max(1.0);
-    let total_objective = 0.5 * field_energy;
+    let soft_loss = soft_equalities
+        .iter()
+        .map(|relation| relation.objective_contribution)
+        .sum::<f64>();
+    let total_objective = 0.5 * field_energy + soft_loss;
+    let standard_soft_loss = assembly
+        .soft_objective_rows
+        .iter()
+        .map(|objective| {
+            let residual = standard_field_affine_value(
+                &representation,
+                objective.fitting_functional_index,
+                &backend.candidate,
+            ) - objective.target;
+            0.5 * objective.standard_precision * residual.powi(2)
+        })
+        .sum::<f64>();
+    let standard_total_objective = 0.5 * recovered_energy + standard_soft_loss;
+    let objective_round_trip_error = (total_objective - standard_total_objective).abs()
+        / standard_total_objective.abs().max(1.0);
+    let objective_verified =
+        objective_round_trip_error <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit;
     let relation_tolerances =
         canonical_relation_tolerances(&representation, &problem, field_energy, &assembly, &backend);
     let tolerance_round_trip_error = relation_tolerances
@@ -1962,6 +2201,11 @@ fn recover_and_verify(
         && hard_equalities
             .iter()
             .all(|equality| equality.value.is_finite() && equality.residual.is_finite())
+        && soft_equalities.iter().all(|equality| {
+            equality.value.is_finite()
+                && equality.residual.is_finite()
+                && equality.objective_contribution.is_finite()
+        })
         && semantic_latents
             .iter()
             .all(|latent| latent.value.is_finite())
@@ -1977,6 +2221,7 @@ fn recover_and_verify(
         && field_coefficient_round_trip_error.is_finite()
         && field_energy.is_finite()
         && field_energy_round_trip_error.is_finite()
+        && objective_round_trip_error.is_finite()
         && relation_tolerances.iter().all(|evidence| {
             evidence.characteristic_scale.is_finite()
                 && evidence.relation_reference_scale.is_finite()
@@ -2014,6 +2259,9 @@ fn recover_and_verify(
     if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::FieldEnergyRoundTripViolation);
     }
+    if !objective_verified {
+        reasons.push(RecoveryVerificationFailureReason::ObjectiveRoundTripViolation);
+    }
     if tolerance_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::ToleranceRoundTripViolation);
     }
@@ -2023,11 +2271,13 @@ fn recover_and_verify(
                 reasons,
                 side_condition: Some(side_condition),
                 hard_equalities: Some(hard_equalities),
+                soft_equalities: Some(soft_equalities),
                 relation_tolerances: Some(relation_tolerances),
                 hard_equality_violations: Some(hard_equality_violations),
                 polynomial_round_trip_error: Some(polynomial_round_trip_error),
                 field_coefficient_round_trip_error: Some(field_coefficient_round_trip_error),
                 field_energy_round_trip_error: Some(field_energy_round_trip_error),
+                objective_round_trip_error: Some(objective_round_trip_error),
                 tolerance_round_trip_error: Some(tolerance_round_trip_error),
                 recovery_finite: Some(recovery_finite),
                 provenance_verified: Some(provenance_verified),
@@ -2045,6 +2295,7 @@ fn recover_and_verify(
         field,
         semantic_latents,
         hard_equalities,
+        soft_equalities,
         side_condition,
         hard_equality_violations,
         relation_tolerances,
@@ -2052,6 +2303,8 @@ fn recover_and_verify(
         polynomial_round_trip_error,
         field_coefficient_round_trip_error,
         field_energy_round_trip_error,
+        objective_round_trip_error,
+        objective_verified,
         recovery_finite,
         provenance_verified,
         semantic_latent_count: problem.semantic_latents.len(),
@@ -2077,6 +2330,17 @@ fn canonical_relation_tolerances(
         .map(|equality| {
             (equality.target - equality.constant_shift_response() * field_value_gauge_offset).abs()
         })
+        .chain(
+            problem
+                .soft_equalities
+                .iter()
+                .filter(|equality| equality.dimension == FunctionalDimension::FieldValue)
+                .map(|equality| {
+                    (equality.target
+                        - equality.constant_shift_response() * field_value_gauge_offset)
+                        .abs()
+                }),
+        )
         .fold(0.0_f64, f64::max);
     let derivative_implied_field_scale = representation.coordinates.length()
         * problem
@@ -2084,11 +2348,33 @@ fn canonical_relation_tolerances(
             .iter()
             .filter(|equality| equality.dimension == FunctionalDimension::FieldValuePerLength)
             .map(|equality| equality.target.abs())
+            .chain(
+                problem
+                    .soft_equalities
+                    .iter()
+                    .filter(|equality| {
+                        equality.dimension == FunctionalDimension::FieldValuePerLength
+                    })
+                    .map(|equality| equality.target.abs()),
+            )
             .fold(0.0_f64, f64::max);
-    let field_scale = (field_energy.abs() * representation.coordinates.length().powi(3))
+    let soft_loss_implied_field_scale = problem
+        .soft_equalities
+        .iter()
+        .zip(&problem.soft_objectives)
+        .map(|(relation, objective)| match relation.dimension {
+            FunctionalDimension::FieldValue => objective.loss.residual_reference_scale(),
+            FunctionalDimension::FieldValuePerLength => {
+                representation.coordinates.length() * objective.loss.residual_reference_scale()
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    let native_field_energy = field_energy / problem.field_energy_normalization.factor();
+    let field_scale = (native_field_energy.abs() * representation.coordinates.length().powi(3))
         .sqrt()
         .max(value_implied_field_scale)
-        .max(derivative_implied_field_scale);
+        .max(derivative_implied_field_scale)
+        .max(soft_loss_implied_field_scale);
     let mut standard_by_kkt_row = vec![0.0; backend.scaling.cumulative_exponents.len()];
     let mut tolerance_plans = problem
         .equalities
@@ -2175,38 +2461,37 @@ fn tolerance_scales_for_dimension(
 }
 
 fn canonical_gauge_offset(problem: &CubicCanonicalProblem, dimension: FunctionalDimension) -> f64 {
-    let responses = problem
-        .equalities
-        .iter()
-        .map(|equality| {
-            if equality.dimension == dimension {
-                equality.constant_shift_response()
-            } else {
-                0.0
-            }
-        })
-        .collect::<Vec<_>>();
-    let response_scale = responses
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0_f64, f64::max);
-    let target_scale = problem
+    let response_targets = problem
         .equalities
         .iter()
         .filter(|equality| equality.dimension == dimension)
-        .map(|equality| equality.target.abs())
+        .map(|equality| (equality.constant_shift_response(), equality.target))
+        .chain(
+            problem
+                .soft_equalities
+                .iter()
+                .filter(|equality| equality.dimension == dimension)
+                .map(|equality| (equality.constant_shift_response(), equality.target)),
+        )
+        .collect::<Vec<_>>();
+    let response_scale = response_targets
+        .iter()
+        .map(|(response, _)| response.abs())
+        .fold(0.0_f64, f64::max);
+    let target_scale = response_targets
+        .iter()
+        .map(|(_, target)| target.abs())
         .fold(0.0_f64, f64::max);
     if response_scale == 0.0 || target_scale == 0.0 {
         return 0.0;
     }
-    let numerator = responses
+    let numerator = response_targets
         .iter()
-        .zip(&problem.equalities)
-        .map(|(response, equality)| (response / response_scale) * (equality.target / target_scale))
+        .map(|(response, target)| (response / response_scale) * (target / target_scale))
         .sum::<f64>();
-    let denominator = responses
+    let denominator = response_targets
         .iter()
-        .map(|response| (response / response_scale).powi(2))
+        .map(|(response, _)| (response / response_scale).powi(2))
         .sum::<f64>();
     target_scale / response_scale * numerator / denominator
 }
@@ -2344,7 +2629,10 @@ mod tests {
                     CanonicalHardEquality::from_field_only(HardEquality::new(usage, target))
                 })
                 .collect(),
+            soft_equalities: Vec::new(),
+            soft_objectives: Vec::new(),
             semantic_latents: Vec::new(),
+            field_energy_normalization: FieldEnergyNormalization::all_hard(),
         }
     }
 
@@ -2367,13 +2655,14 @@ mod tests {
         assert!(evidence.affine_reproduction_error <= 1.0e-11);
         let normalization = representation.field_energy_normalization();
         assert_eq!(normalization.factor(), 1.0);
-        let transformed = normalization
-            .for_rescaled_units(2.0, 4.0)
-            .expect("finite positive unit scales preserve normalization validity");
+        let transformed = FieldEnergyNormalization::try_new(
+            normalization.factor() * 2.0_f64.powi(3) / 4.0_f64.powi(2),
+        )
+        .expect("finite positive unit scales preserve normalization validity");
         assert_close(transformed.factor(), 0.5, 1.0e-15);
         assert_close(
-            transformed.dimensionless_energy(6.0),
-            normalization.dimensionless_energy(3.0),
+            transformed.factor() * 6.0,
+            normalization.factor() * 3.0,
             1.0e-15,
         );
 
@@ -2557,11 +2846,14 @@ mod tests {
         ));
         let problem = CubicCanonicalProblem {
             equalities: equalities.clone(),
+            soft_equalities: Vec::new(),
+            soft_objectives: Vec::new(),
             semantic_latents: vec![SemanticLatentDefinition {
                 group_id: group_id.clone(),
                 field_unit: FieldUnitLabel::new("manufactured-unit"),
                 member_source_ids: vec![SourceId::new("issue-17-manufactured-0")],
             }],
+            field_energy_normalization: FieldEnergyNormalization::all_hard(),
         };
 
         let solution =
@@ -3085,6 +3377,50 @@ mod tests {
                     evidence.reasons,
                     vec![RecoveryVerificationFailureReason::ProvenanceMismatch]
                 );
+                assert!(evidence.no_model_produced);
+            }
+            other => panic!("unexpected failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damaged_soft_objective_provenance_is_rejected_even_for_an_exact_fit() {
+        let hard_uses = usages();
+        let soft_use = hard_uses.last().unwrap().clone();
+        let soft_target = *MANUFACTURED_TARGETS.last().unwrap();
+        let mut problem = canonical_problem(hard_uses, MANUFACTURED_TARGETS.to_vec());
+        problem.field_energy_normalization = FieldEnergyNormalization::try_new(3.0).unwrap();
+        let soft = CanonicalSoftEquality::new(soft_use, soft_target);
+        problem.soft_objectives.push(CanonicalSoftObjective::new(
+            soft.provenance().residual().clone(),
+            CanonicalSoftLoss::QuadraticPenalty { weight: 2.0 },
+        ));
+        problem.soft_equalities.push(soft);
+        let mut representation = CubicRepresentation::new(
+            canonical_fitting_uses(&problem.equalities, &problem.soft_equalities),
+            GlobalAnisotropyMetric::identity(),
+        )
+        .expect("the mixed hard/soft representation is valid");
+        representation.set_field_energy_normalization(problem.field_energy_normalization);
+        let (mut assembly, backend) = solve_standard_form(&representation, &problem)
+            .expect("the undamaged objective should produce a backend candidate");
+        let residual = standard_field_affine_value(
+            &representation,
+            assembly.soft_objective_rows[0].fitting_functional_index,
+            &backend.candidate,
+        ) - soft_target;
+        assert!(residual.abs() <= 1.0e-11, "residual={residual:e}");
+        assembly.soft_objective_rows[0].standard_precision *= 2.0;
+
+        let failure = recover_and_verify(representation, problem, assembly, backend)
+            .expect_err("a damaged objective recovery map must not produce a model");
+        match failure {
+            CubicEqualityFailure::RecoveryVerification { evidence, .. } => {
+                assert_eq!(
+                    evidence.reasons,
+                    vec![RecoveryVerificationFailureReason::ProvenanceMismatch]
+                );
+                assert!(evidence.objective_round_trip_error.is_none());
                 assert!(evidence.no_model_produced);
             }
             other => panic!("unexpected failure: {other:?}"),

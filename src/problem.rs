@@ -88,6 +88,7 @@ pub struct ProblemBuilder {
     additive_field_gauges: Vec<AdditiveFieldGauge>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
+    field_energy_normalization: Option<FieldEnergyNormalization>,
     global_anisotropy_metric: Option<GlobalAnisotropyMetric>,
     fit_configuration: FitConfiguration,
 }
@@ -103,6 +104,7 @@ impl ProblemBuilder {
             additive_field_gauges: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
+            field_energy_normalization: None,
             global_anisotropy_metric: None,
             fit_configuration: FitConfiguration::default(),
         }
@@ -125,6 +127,18 @@ impl ProblemBuilder {
         Ok(())
     }
 
+    /// Sets the physical scale between FieldEnergy and soft losses.
+    pub fn set_field_energy_normalization(
+        &mut self,
+        normalization: FieldEnergyNormalization,
+    ) -> Result<(), BuilderConfigurationError> {
+        if self.field_energy_normalization.is_some() {
+            return Err(BuilderConfigurationError::FieldEnergyNormalizationAlreadySet);
+        }
+        self.field_energy_normalization = Some(normalization);
+        Ok(())
+    }
+
     /// Replaces the complete fit configuration before snapshot creation.
     pub fn set_fit_configuration(&mut self, configuration: FitConfiguration) {
         self.fit_configuration = configuration;
@@ -135,6 +149,16 @@ impl ProblemBuilder {
         let mut errors = Vec::new();
         if self.source_ids.is_empty() {
             errors.push(BuildError::NoObservations);
+        }
+        let has_soft_relation = self.observations.iter().any(|observation| {
+            matches!(
+                observation,
+                ObservationInput::FieldValue(field_value)
+                    if field_value.configuration().is_soft()
+            )
+        });
+        if has_soft_relation && self.field_energy_normalization.is_none() {
+            errors.push(BuildError::MissingFieldEnergyNormalization);
         }
         let mut dangling_references = self
             .additive_field_gauges
@@ -185,7 +209,9 @@ impl ProblemBuilder {
             additive_field_gauges: self.additive_field_gauges,
             source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
-            field_energy_normalization: FieldEnergyNormalization::all_hard(),
+            field_energy_normalization: self
+                .field_energy_normalization
+                .unwrap_or_else(FieldEnergyNormalization::all_hard),
             global_anisotropy_metric: self
                 .global_anisotropy_metric
                 .unwrap_or_else(GlobalAnisotropyMetric::identity),
@@ -278,7 +304,7 @@ impl ProblemSnapshot {
         &self.inner.resolved_kernel
     }
 
-    /// Returns the resolved all-hard FieldEnergy normalization.
+    /// Returns the resolved FieldEnergy normalization, including the all-hard default.
     pub fn field_energy_normalization(&self) -> FieldEnergyNormalization {
         self.inner.field_energy_normalization
     }
@@ -367,6 +393,8 @@ impl Error for AddError {}
 pub enum BuilderConfigurationError {
     /// The problem already has its one global anisotropy metric.
     GlobalAnisotropyMetricAlreadySet,
+    /// The problem already has its one FieldEnergy normalization.
+    FieldEnergyNormalizationAlreadySet,
 }
 
 impl fmt::Display for BuilderConfigurationError {
@@ -374,6 +402,9 @@ impl fmt::Display for BuilderConfigurationError {
         match self {
             Self::GlobalAnisotropyMetricAlreadySet => {
                 formatter.write_str("a global anisotropy metric is already set")
+            }
+            Self::FieldEnergyNormalizationAlreadySet => {
+                formatter.write_str("a FieldEnergy normalization is already set")
             }
         }
     }
@@ -387,6 +418,8 @@ impl Error for BuilderConfigurationError {}
 pub enum BuildError {
     /// The problem contains no observations.
     NoObservations,
+    /// At least one soft relation exists without an explicit FieldEnergy scale.
+    MissingFieldEnergyNormalization,
     /// The current public Cubic Equality path is intentionally sequential.
     UnsupportedThreadBudget { requested: usize },
     /// A relation references a GroupId absent from the completed snapshot.
