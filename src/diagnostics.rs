@@ -27,6 +27,8 @@ pub enum ProblemDiagnosis {
     BackendContractViolation,
     /// Backend-standard form passed, but physical recovery verification failed.
     RecoveryVerificationFailure,
+    /// The convex feasible set is empty under an independently validated certificate.
+    InfeasibleProblem,
     /// Numerical execution failed without proving a stronger diagnosis.
     NumericalFailure,
 }
@@ -37,6 +39,67 @@ pub struct UnidentifiedAdditiveGaugeEvidence {
     source_ids: Box<[SourceId]>,
     group_ids: Box<[GroupId]>,
     backend_invoked: bool,
+}
+
+/// Independently validated Farkas-ray evidence for convex infeasibility.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InfeasibilityCertificateEvidence {
+    finite: bool,
+    normalized_ray_norm: f64,
+    stationarity_residual: f64,
+    dual_cone_violation: f64,
+    separation_margin: f64,
+    residual_limit: f64,
+    separation_limit: f64,
+    backend_invoked: bool,
+}
+
+impl InfeasibilityCertificateEvidence {
+    pub(crate) fn new(values: [f64; 6], finite: bool, backend_invoked: bool) -> Self {
+        Self {
+            normalized_ray_norm: values[0],
+            stationarity_residual: values[1],
+            dual_cone_violation: values[2],
+            separation_margin: values[3],
+            residual_limit: values[4],
+            separation_limit: values[5],
+            finite,
+            backend_invoked,
+        }
+    }
+
+    /// Reports whether every retained certificate quantity is finite.
+    pub fn finite(self) -> bool {
+        self.finite
+    }
+    /// Returns the infinity norm after deterministic ray normalization.
+    pub fn normalized_ray_norm(self) -> f64 {
+        self.normalized_ray_norm
+    }
+    /// Returns the normalized `A^T z` residual.
+    pub fn stationarity_residual(self) -> f64 {
+        self.stationarity_residual
+    }
+    /// Returns the largest violation of the dual cone.
+    pub fn dual_cone_violation(self) -> f64 {
+        self.dual_cone_violation
+    }
+    /// Returns normalized strict separation `-b^T z`.
+    pub fn separation_margin(self) -> f64 {
+        self.separation_margin
+    }
+    /// Returns the fixed residual and cone-violation limit.
+    pub fn residual_limit(self) -> f64 {
+        self.residual_limit
+    }
+    /// Returns the fixed minimum strict-separation margin.
+    pub fn separation_limit(self) -> f64 {
+        self.separation_limit
+    }
+    /// Reports that the backend supplied the candidate ray.
+    pub fn backend_invoked(self) -> bool {
+        self.backend_invoked
+    }
 }
 
 impl UnidentifiedAdditiveGaugeEvidence {
@@ -1150,6 +1213,10 @@ pub enum SolveAttemptKind {
     BunchKaufmanRefinement,
     /// Full-SVD rescue after the primary candidate was rejected.
     FullSvdRescue,
+    /// Clarabel's standard deterministic QP profile.
+    ClarabelStandard,
+    /// Clarabel's robust deterministic QP retry profile.
+    ClarabelRobust,
 }
 
 /// Resolved settings for one backend attempt.
@@ -1202,6 +1269,24 @@ impl BackendAttemptSettings {
             settings_id: Some(settings_id.into()),
             left_vectors: Some(left_vectors.into()),
             right_vectors: Some(right_vectors.into()),
+        }
+    }
+
+    pub(crate) fn clarabel(kind: SolveAttemptKind, settings_id: impl Into<Box<str>>) -> Self {
+        debug_assert!(matches!(
+            kind,
+            SolveAttemptKind::ClarabelStandard | SolveAttemptKind::ClarabelRobust
+        ));
+        Self {
+            kind,
+            pivoting: None,
+            block_size: None,
+            parallelism_threshold: None,
+            factor_workspace_source: None,
+            maximum_refinement_steps: None,
+            settings_id: Some(settings_id.into()),
+            left_vectors: None,
+            right_vectors: None,
         }
     }
 
@@ -1347,6 +1432,59 @@ pub enum AttemptFailureCategory {
     ScalingRoundTripExceeded,
     /// The backend decomposition itself failed numerically.
     BackendDecompositionFailure,
+    /// A QP candidate exceeded a convex residual acceptance limit.
+    ConvexResidualExceeded,
+    /// The backend did not honor the one-thread contract.
+    ThreadContractViolation,
+    /// The backend identity or complete settings fingerprint changed.
+    BackendFingerprintMismatch,
+    /// The termination did not carry a verified candidate or certificate.
+    UnverifiedTermination,
+    /// A claimed primal-infeasibility ray failed independent validation.
+    InvalidInfeasibilityCertificate,
+}
+
+/// Independently recomputed dimensionless residuals for a convex candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConvexResidualEvidence {
+    primal: f64,
+    dual: f64,
+    stationarity: f64,
+    complementarity: f64,
+    relative_gap: f64,
+}
+
+impl ConvexResidualEvidence {
+    pub(crate) fn new(values: [f64; 5]) -> Self {
+        Self {
+            primal: values[0],
+            dual: values[1],
+            stationarity: values[2],
+            complementarity: values[3],
+            relative_gap: values[4],
+        }
+    }
+
+    /// Returns the scaled primal residual.
+    pub fn primal(self) -> f64 {
+        self.primal
+    }
+    /// Returns the scaled dual-cone residual.
+    pub fn dual(self) -> f64 {
+        self.dual
+    }
+    /// Returns the scaled stationarity residual.
+    pub fn stationarity(self) -> f64 {
+        self.stationarity
+    }
+    /// Returns the scaled complementarity residual.
+    pub fn complementarity(self) -> f64 {
+        self.complementarity
+    }
+    /// Returns the relative primal-dual gap.
+    pub fn relative_gap(self) -> f64 {
+        self.relative_gap
+    }
 }
 
 /// Structured reason why an attempt or execution path was rejected.
@@ -1396,6 +1534,7 @@ pub struct SolveAttemptRecord {
     scaling: ScalingSummary,
     refinement_steps: usize,
     residual: Option<LinearResidualEvidence>,
+    convex_residual: Option<ConvexResidualEvidence>,
     certificate_present: bool,
     failure_reason: Option<AttemptFailureEvidence>,
     backend_fingerprint: BackendFingerprint,
@@ -1409,6 +1548,7 @@ pub(crate) struct SolveAttemptRecordParts {
     pub(crate) scaling: ScalingSummary,
     pub(crate) refinement_steps: usize,
     pub(crate) residual: Option<LinearResidualEvidence>,
+    pub(crate) convex_residual: Option<ConvexResidualEvidence>,
     pub(crate) certificate_present: bool,
     pub(crate) failure_reason: Option<AttemptFailureEvidence>,
     pub(crate) backend_fingerprint: BackendFingerprint,
@@ -1424,6 +1564,7 @@ impl SolveAttemptRecord {
             scaling: parts.scaling,
             refinement_steps: parts.refinement_steps,
             residual: parts.residual,
+            convex_residual: parts.convex_residual,
             certificate_present: parts.certificate_present,
             failure_reason: parts.failure_reason,
             backend_fingerprint: parts.backend_fingerprint,
@@ -1463,6 +1604,11 @@ impl SolveAttemptRecord {
     /// Returns complete residual evidence when a candidate was produced.
     pub fn residual(&self) -> Option<LinearResidualEvidence> {
         self.residual
+    }
+
+    /// Returns independently recomputed convex residuals for a QP attempt.
+    pub fn convex_residual(&self) -> Option<ConvexResidualEvidence> {
+        self.convex_residual
     }
 
     /// Returns normalized backward error when the attempt produced a candidate.

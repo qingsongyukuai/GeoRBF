@@ -5,14 +5,14 @@ use crate::clarabel_backend::{
 };
 use crate::cubic::GlobalAnisotropyMetric;
 use crate::cubic_equality::{
-    CanonicalEqualityParticipation, CanonicalRelationToleranceEvidence,
-    CanonicalSoftResidualBlockKind, CpdEvidence, CubicCanonicalProblem, CubicEqualityCore,
-    CubicEqualityFailure, CubicEqualitySolution, CubicRepresentation, FunctionalViolationEnvelope,
-    POLYNOMIAL_DIMENSION, PhysicalSideConditionEvidence, RecoveredCubicField,
-    RecoveredHardEquality, RecoveredSemanticLatent, RecoveredSoftEquality, RecoveredSoftObjective,
-    RepresentationFailure, SemanticLatentCoefficient, canonical_characteristic_field_scale,
-    canonical_fitting_uses, canonical_gauge_offset, dense_matrix_vector_product, dot_product,
-    relative_slice_error,
+    CanonicalEqualityParticipation, CanonicalInequalitySense, CanonicalRelationToleranceEvidence,
+    CanonicalSoftResidualBlockKind, CanonicalViolationLoss, CpdEvidence, CubicCanonicalProblem,
+    CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, CubicRepresentation,
+    FunctionalViolationEnvelope, POLYNOMIAL_DIMENSION, PhysicalSideConditionEvidence,
+    RecoveredCubicField, RecoveredHardEquality, RecoveredSemanticLatent, RecoveredSoftEquality,
+    RecoveredSoftObjective, RepresentationFailure, SemanticLatentCoefficient,
+    canonical_characteristic_field_scale, canonical_fitting_uses, canonical_gauge_offset,
+    dense_matrix_vector_product, dot_product, relative_slice_error,
 };
 use crate::functional::{
     DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, GroupId, ResidualId,
@@ -39,11 +39,16 @@ pub(crate) struct CubicAlgebraicPlan {
 pub(crate) struct RecoveredAffineInequality {
     pub(crate) provenance: UsageProvenance,
     pub(crate) dimension: FunctionalDimension,
-    pub(crate) upper_bound: f64,
+    pub(crate) sense: CanonicalInequalitySense,
+    pub(crate) bound: f64,
     pub(crate) value: f64,
     pub(crate) slack: f64,
     pub(crate) tolerance: f64,
     pub(crate) violation: f64,
+    pub(crate) recovered_violation_channel: Option<f64>,
+    pub(crate) violation_loss: Option<CanonicalViolationLoss>,
+    pub(crate) objective_contribution: Option<f64>,
+    pub(crate) backend_slack: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -84,6 +89,18 @@ pub(crate) enum QpAttemptFailureReason {
     ThreadContractViolation,
     BackendFingerprintMismatch,
     UnverifiedTermination,
+    InvalidInfeasibilityCertificate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ValidatedInfeasibilityEvidence {
+    pub(crate) finite: bool,
+    pub(crate) normalized_ray_norm: f64,
+    pub(crate) stationarity_residual: f64,
+    pub(crate) dual_cone_violation: f64,
+    pub(crate) separation_margin: f64,
+    pub(crate) residual_limit: f64,
+    pub(crate) separation_limit: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +109,7 @@ pub(crate) struct QpAttemptRecord {
     pub(crate) georbf_scaling: QpScalingEvidence,
     pub(crate) georbf_scaling_round_trip_error: f64,
     pub(crate) residuals: Option<ConvexResidualEvidence>,
+    pub(crate) infeasibility_certificate: Option<ValidatedInfeasibilityEvidence>,
     pub(crate) failure_reason: Option<QpAttemptFailureReason>,
 }
 
@@ -242,6 +260,10 @@ pub(crate) enum CubicExecutionFailure {
     AttemptsExhausted {
         attempts: Vec<QpAttemptRecord>,
     },
+    ValidatedInfeasible {
+        evidence: ValidatedInfeasibilityEvidence,
+        attempts: Vec<QpAttemptRecord>,
+    },
     RecoveryVerification {
         evidence: Box<QpRecoveryFailureEvidence>,
         attempts: Vec<QpAttemptRecord>,
@@ -259,6 +281,7 @@ pub(crate) enum QpFaultInjection {
     BackendStandardForm,
     Objective,
     StandardRetry,
+    InfeasibilityCertificate,
 }
 
 #[cfg(test)]
@@ -345,6 +368,7 @@ struct QpCanonicalRow {
     derived_column: Option<DerivedColumnId>,
     coefficients: Vec<f64>,
     rhs: f64,
+    violation_variable: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -371,6 +395,7 @@ struct ConvexQpForm {
     reduced_field_variables: usize,
     polynomial_variables: usize,
     semantic_latents: usize,
+    soft_violation_variables: usize,
     hessian: Vec<f64>,
     linear_objective: Vec<f64>,
     constraints: Vec<f64>,
@@ -379,6 +404,7 @@ struct ConvexQpForm {
     inequality_constraints: usize,
     hard_equality_rows: Vec<QpCanonicalRow>,
     affine_inequality_rows: Vec<QpCanonicalRow>,
+    violation_nonnegative_rows: Vec<Vec<f64>>,
     soft_objective_blocks: Vec<QpSoftObjectiveBlock>,
     capacity: ConvexQpCapacityPlan,
 }
@@ -413,6 +439,15 @@ fn solve_convex_qp(
     let variables = fitting_uses
         .len()
         .checked_add(problem.semantic_latents.len())
+        .and_then(|count| {
+            count.checked_add(
+                problem
+                    .affine_inequalities
+                    .iter()
+                    .filter(|relation| relation.violation_channel().is_some())
+                    .count(),
+            )
+        })
         .ok_or(QpAssemblyFailureReason::InvalidShape)
         .map_err(CubicExecutionFailure::Assembly)?;
     let equality_constraints = problem
@@ -424,6 +459,15 @@ fn solve_convex_qp(
         .count();
     let constraints = equality_constraints
         .checked_add(problem.affine_inequalities.len())
+        .and_then(|count| {
+            count.checked_add(
+                problem
+                    .affine_inequalities
+                    .iter()
+                    .filter(|relation| relation.violation_channel().is_some())
+                    .count(),
+            )
+        })
         .ok_or(QpAssemblyFailureReason::InvalidShape)
         .map_err(CubicExecutionFailure::Assembly)?;
     let canonical_relations = problem
@@ -449,7 +493,7 @@ fn solve_convex_qp(
         scaled.round_trip_error = 1.0e-2;
     }
     let (candidate, residuals, attempts, accepted_attempt, internal_scaling_error) =
-        execute_qp_attempts(&scaled, fault)?;
+        execute_qp_attempts(&form, &scaled, fault)?;
     recover_and_verify_qp(
         plan,
         representation,
@@ -483,6 +527,9 @@ fn validate_qp_problem(problem: &CubicCanonicalProblem) -> Result<(), CubicExecu
             || inequality.latent_coefficients().iter().any(|term| {
                 !term.coefficient.is_finite() || term.latent >= problem.semantic_latents.len()
             })
+            || inequality
+                .violation_channel()
+                .is_some_and(|channel| !channel.loss().is_valid())
     }) {
         return Err(CubicExecutionFailure::Assembly(
             QpAssemblyFailureReason::InvalidCanonicalProblem,
@@ -523,9 +570,15 @@ fn assemble_qp_form(
     capacity: ConvexQpCapacityPlan,
 ) -> Result<ConvexQpForm, CubicExecutionFailure> {
     let reduced_field_variables = representation.null_space().reduced_dimension();
+    let soft_violation_variables = problem
+        .affine_inequalities
+        .iter()
+        .filter(|relation| relation.violation_channel().is_some())
+        .count();
     let variables = reduced_field_variables
         .checked_add(POLYNOMIAL_DIMENSION)
         .and_then(|count| count.checked_add(problem.semantic_latents.len()))
+        .and_then(|count| count.checked_add(soft_violation_variables))
         .ok_or(QpAssemblyFailureReason::InvalidShape)
         .map_err(CubicExecutionFailure::Assembly)?;
     if variables != capacity.variables {
@@ -558,10 +611,30 @@ fn assemble_qp_form(
                 equality.latent_coefficients(),
             )?,
             rhs: equality.target(),
+            violation_variable: None,
         });
     }
     let mut affine_inequality_rows = Vec::with_capacity(problem.affine_inequalities.len());
+    let base_variables = variables - soft_violation_variables;
+    let mut next_violation_variable = base_variables;
     for (canonical_index, inequality) in problem.affine_inequalities.iter().enumerate() {
+        let multiplier = inequality.sense().upper_form_multiplier();
+        let mut coefficients = reduced_affine_row(
+            representation,
+            problem,
+            inequality.field(),
+            inequality.latent_coefficients(),
+        )?;
+        coefficients.resize(variables, 0.0);
+        coefficients
+            .iter_mut()
+            .for_each(|entry| *entry *= multiplier);
+        let violation_variable = inequality.violation_channel().map(|_| {
+            let variable = next_violation_variable;
+            next_violation_variable += 1;
+            coefficients[variable] = -1.0;
+            variable
+        });
         affine_inequality_rows.push(QpCanonicalRow {
             canonical_index,
             provenance: inequality.provenance().clone(),
@@ -570,15 +643,20 @@ fn assemble_qp_form(
             derived_column: inequality
                 .field()
                 .map(|_| DerivedColumnId::from_residual(inequality.provenance().residual())),
-            coefficients: reduced_affine_row(
-                representation,
-                problem,
-                inequality.field(),
-                inequality.latent_coefficients(),
-            )?,
-            rhs: inequality.bound(),
+            coefficients,
+            rhs: inequality.upper_form_bound(),
+            violation_variable,
         });
     }
+    let violation_nonnegative_rows = affine_inequality_rows
+        .iter()
+        .filter_map(|row| row.violation_variable)
+        .map(|variable| {
+            let mut row = vec![0.0; variables];
+            row[variable] = -1.0;
+            row
+        })
+        .collect::<Vec<_>>();
     let soft_objective_blocks = assemble_qp_soft_objectives(representation, problem)?;
     let field_energy_scale = representation.field_energy_normalization().factor()
         / representation.solve_coordinate_transform().length().powi(3);
@@ -615,28 +693,56 @@ fn assemble_qp_form(
                 .sum::<f64>();
         }
     }
+    for (relation, row) in problem
+        .affine_inequalities
+        .iter()
+        .zip(&affine_inequality_rows)
+    {
+        let (Some(channel), Some(variable)) =
+            (relation.violation_channel(), row.violation_variable)
+        else {
+            continue;
+        };
+        match channel.loss() {
+            CanonicalViolationLoss::QuadraticPenalty { weight } => {
+                hessian[variable * variables + variable] += weight;
+            }
+            CanonicalViolationLoss::LinearViolationPenalty { weight } => {
+                linear_objective[variable] += weight;
+            }
+        }
+    }
     let rows = hard_equality_rows
         .iter()
         .chain(&affine_inequality_rows)
+        .map(|row| row.coefficients.as_slice())
+        .chain(violation_nonnegative_rows.iter().map(Vec::as_slice))
         .collect::<Vec<_>>();
     let constraints = rows
         .iter()
-        .flat_map(|row| row.coefficients.iter().copied())
+        .flat_map(|row| row.iter().copied())
         .collect::<Vec<_>>();
-    let constraint_rhs = rows.iter().map(|row| row.rhs).collect::<Vec<_>>();
+    let constraint_rhs = hard_equality_rows
+        .iter()
+        .map(|row| row.rhs)
+        .chain(affine_inequality_rows.iter().map(|row| row.rhs))
+        .chain(std::iter::repeat_n(0.0, violation_nonnegative_rows.len()))
+        .collect::<Vec<_>>();
     Ok(ConvexQpForm {
         variables,
         reduced_field_variables,
         polynomial_variables: POLYNOMIAL_DIMENSION,
         semantic_latents: problem.semantic_latents.len(),
+        soft_violation_variables,
         hessian,
         linear_objective,
         constraints,
         constraint_rhs,
         equality_constraints: hard_equality_rows.len(),
-        inequality_constraints: affine_inequality_rows.len(),
+        inequality_constraints: affine_inequality_rows.len() + violation_nonnegative_rows.len(),
         hard_equality_rows,
         affine_inequality_rows,
+        violation_nonnegative_rows,
         soft_objective_blocks,
         capacity,
     })
@@ -735,6 +841,14 @@ fn reduced_affine_row(
     for term in latent_coefficients {
         row[reduced_dimension + POLYNOMIAL_DIMENSION + term.latent] = term.coefficient;
     }
+    row.extend(std::iter::repeat_n(
+        0.0,
+        problem
+            .affine_inequalities
+            .iter()
+            .filter(|relation| relation.violation_channel().is_some())
+            .count(),
+    ));
     Ok(row)
 }
 
@@ -977,6 +1091,7 @@ fn recover_scaled_form_error(
 }
 
 fn execute_qp_attempts(
+    form: &ConvexQpForm,
     scaled: &ScaledQpForm,
     fault: Option<QpFaultInjection>,
 ) -> Result<
@@ -1014,15 +1129,34 @@ fn execute_qp_attempts(
             sequence,
         )
         .map_err(|failure| CubicExecutionFailure::BackendAdapter(Box::new(failure)))?;
+        if matches!(fault, Some(QpFaultInjection::InfeasibilityCertificate))
+            && matches!(
+                candidate.attempt.termination,
+                ClarabelTermination::PrimalInfeasible | ClarabelTermination::AlmostPrimalInfeasible
+            )
+        {
+            candidate.dual.fill(0.0);
+        }
         let finite = candidate
             .primal
             .iter()
             .chain(&candidate.dual)
             .chain(&candidate.slack)
             .all(|value| value.is_finite());
-        let mut residuals = finite.then(|| convex_residuals(scaled, &candidate));
         if sequence == 0 && matches!(fault, Some(QpFaultInjection::StandardRetry)) {
             candidate.attempt.termination = ClarabelTermination::AlmostSolved;
+        }
+        let candidate_termination = matches!(
+            candidate.attempt.termination,
+            ClarabelTermination::Solved | ClarabelTermination::AlmostSolved
+        );
+        let infeasibility_termination = matches!(
+            candidate.attempt.termination,
+            ClarabelTermination::PrimalInfeasible | ClarabelTermination::AlmostPrimalInfeasible
+        );
+        let mut residuals =
+            (finite && candidate_termination).then(|| convex_residuals(scaled, &candidate));
+        if sequence == 0 && matches!(fault, Some(QpFaultInjection::StandardRetry)) {
             residuals = residuals.map(|mut residuals| {
                 residuals.primal = 1.0;
                 residuals
@@ -1055,10 +1189,10 @@ fn execute_qp_attempts(
             residuals.is_finite()
                 && residuals.maximum() <= EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit
         });
-        let candidate_termination = matches!(
-            candidate.attempt.termination,
-            ClarabelTermination::Solved | ClarabelTermination::AlmostSolved
-        );
+        let infeasibility_certificate =
+            (finite && threads_verified && fingerprint_verified && infeasibility_termination)
+                .then(|| validate_primal_infeasibility_certificate(form, scaled, &candidate))
+                .flatten();
         let failure_reason = if !finite {
             Some(QpAttemptFailureReason::NonFiniteCandidate)
         } else if !threads_verified {
@@ -1067,8 +1201,14 @@ fn execute_qp_attempts(
             Some(QpAttemptFailureReason::BackendFingerprintMismatch)
         } else if candidate_termination && !residual_verified {
             Some(QpAttemptFailureReason::BackendResidualExceeded)
+        } else if infeasibility_termination && infeasibility_certificate.is_none() {
+            Some(QpAttemptFailureReason::InvalidInfeasibilityCertificate)
         } else if !candidate_termination {
-            Some(QpAttemptFailureReason::UnverifiedTermination)
+            if infeasibility_certificate.is_some() {
+                None
+            } else {
+                Some(QpAttemptFailureReason::UnverifiedTermination)
+            }
         } else {
             None
         };
@@ -1077,8 +1217,12 @@ fn execute_qp_attempts(
             georbf_scaling: scaled.scaling.clone(),
             georbf_scaling_round_trip_error: scaled.round_trip_error,
             residuals,
+            infeasibility_certificate,
             failure_reason,
         });
+        if let Some(evidence) = infeasibility_certificate {
+            return Err(CubicExecutionFailure::ValidatedInfeasible { evidence, attempts });
+        }
         if failure_reason.is_none() {
             return Ok((
                 candidate,
@@ -1108,6 +1252,99 @@ fn execute_qp_attempts(
         }
     }
     Err(CubicExecutionFailure::AttemptsExhausted { attempts })
+}
+
+fn validate_primal_infeasibility_certificate(
+    form: &ConvexQpForm,
+    scaled: &ScaledQpForm,
+    candidate: &ClarabelCandidateEnvelope,
+) -> Option<ValidatedInfeasibilityEvidence> {
+    let constraint_factors = scaled.scaling.constraint_factors();
+    if constraint_factors.len() != candidate.dual.len() {
+        return None;
+    }
+    let recovered_ray = candidate
+        .dual
+        .iter()
+        .zip(constraint_factors)
+        .map(|(value, factor)| value * factor)
+        .collect::<Vec<_>>();
+    validate_primal_infeasibility_ray(
+        form.variables,
+        &form.constraints,
+        &form.constraint_rhs,
+        form.equality_constraints,
+        &recovered_ray,
+    )
+}
+
+fn validate_primal_infeasibility_ray(
+    variables: usize,
+    constraints: &[f64],
+    constraint_rhs: &[f64],
+    equality_constraints: usize,
+    candidate_ray: &[f64],
+) -> Option<ValidatedInfeasibilityEvidence> {
+    let constraints_count = constraint_rhs.len();
+    if candidate_ray.len() != constraints_count
+        || constraints.len() != constraints_count.saturating_mul(variables)
+        || equality_constraints > constraints_count
+    {
+        return None;
+    }
+    let ray_norm = candidate_ray
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    if !ray_norm.is_finite() || ray_norm <= 0.0 {
+        return None;
+    }
+    let ray = candidate_ray
+        .iter()
+        .map(|value| value / ray_norm)
+        .collect::<Vec<_>>();
+    let normalized_ray_norm = ray.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    let matrix_scale = constraints
+        .iter()
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let stationarity_residual = (0..variables)
+        .map(|column| {
+            (0..constraints_count)
+                .map(|row| constraints[row * variables + column] * ray[row])
+                .sum::<f64>()
+                .abs()
+        })
+        .fold(0.0_f64, f64::max)
+        / matrix_scale;
+    let dual_cone_violation = ray[equality_constraints..]
+        .iter()
+        .map(|value| (-value).max(0.0))
+        .fold(0.0_f64, f64::max);
+    let rhs_scale = constraint_rhs
+        .iter()
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let separation_margin = -dot_product(constraint_rhs, &ray) / rhs_scale;
+    let evidence = ValidatedInfeasibilityEvidence {
+        finite: normalized_ray_norm.is_finite()
+            && stationarity_residual.is_finite()
+            && dual_cone_violation.is_finite()
+            && separation_margin.is_finite(),
+        normalized_ray_norm,
+        stationarity_residual,
+        dual_cone_violation,
+        separation_margin,
+        residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit,
+        separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit,
+    };
+    (evidence.finite
+        && (evidence.normalized_ray_norm - 1.0).abs()
+            <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+        && evidence.stationarity_residual <= evidence.residual_limit
+        && evidence.dual_cone_violation <= evidence.residual_limit
+        && evidence.separation_margin >= evidence.separation_limit)
+        .then_some(evidence)
 }
 
 fn convex_residuals(
@@ -1505,17 +1742,31 @@ fn recover_and_verify_qp(
     let affine_inequalities = problem
         .affine_inequalities
         .iter()
+        .zip(&form.affine_inequality_rows)
         .zip(&affine_relation_tolerances)
-        .map(|(relation, tolerance)| {
+        .map(|((relation, row), tolerance)| {
             let value = relation.evaluate(&field, &latent_values);
+            let margin = relation.physical_margin(value);
+            let recovered_violation_channel = row
+                .violation_variable
+                .map(|variable| unscaled_candidate[variable]);
+            let field_violation = (-margin).max(0.0);
+            let violation_loss = relation.violation_channel().map(|channel| channel.loss());
             RecoveredAffineInequality {
                 provenance: relation.provenance().clone(),
                 dimension: relation.dimension(),
-                upper_bound: relation.bound(),
+                sense: relation.sense(),
+                bound: relation.bound(),
                 value,
-                slack: relation.bound() - value,
+                slack: margin.max(0.0),
                 tolerance: tolerance.physical_tolerance,
-                violation: (value - relation.bound()).max(0.0),
+                violation: recovered_violation_channel.unwrap_or(field_violation),
+                recovered_violation_channel,
+                violation_loss,
+                objective_contribution: violation_loss
+                    .zip(recovered_violation_channel)
+                    .map(|(loss, recovered)| loss.objective_contribution(recovered)),
+                backend_slack: margin + recovered_violation_channel.unwrap_or(0.0),
             }
         })
         .collect::<Vec<_>>();
@@ -1539,9 +1790,20 @@ fn recover_and_verify_qp(
         .enumerate()
         .map(|(index, inequality)| {
             let backend_row = form.equality_constraints + index;
-            (unscaled_slacks[backend_row] - inequality.slack).abs()
-                / inequality.slack.abs().max(1.0)
+            (unscaled_slacks[backend_row] - inequality.backend_slack).abs()
+                / inequality.backend_slack.abs().max(1.0)
         })
+        .chain(
+            affine_inequalities
+                .iter()
+                .filter_map(|relation| relation.recovered_violation_channel)
+                .enumerate()
+                .map(|(index, violation)| {
+                    let backend_row =
+                        form.equality_constraints + form.affine_inequality_rows.len() + index;
+                    (unscaled_slacks[backend_row] - violation).abs() / violation.abs().max(1.0)
+                }),
+        )
         .fold(0.0_f64, f64::max);
     let recovered_standard_polynomial = representation
         .solve_coordinate_transform()
@@ -1561,7 +1823,11 @@ fn recover_and_verify_qp(
         .iter()
         .map(|objective| objective.objective_contribution)
         .sum::<f64>();
-    let total_objective = 0.5 * field_energy + soft_loss;
+    let violation_loss = affine_inequalities
+        .iter()
+        .filter_map(|relation| relation.objective_contribution)
+        .sum::<f64>();
+    let total_objective = 0.5 * field_energy + soft_loss + violation_loss;
     let standard_soft_loss = form
         .soft_objective_blocks
         .iter()
@@ -1581,7 +1847,23 @@ fn recover_and_verify_qp(
             0.5 * dot_product(&residual, &weighted)
         })
         .sum::<f64>();
-    let mut standard_total_objective = 0.5 * recovered_energy + standard_soft_loss;
+    let standard_violation_loss = problem
+        .affine_inequalities
+        .iter()
+        .zip(&form.affine_inequality_rows)
+        .filter_map(|(relation, row)| {
+            relation
+                .violation_channel()
+                .zip(row.violation_variable)
+                .map(|(channel, variable)| {
+                    channel
+                        .loss()
+                        .objective_contribution(unscaled_candidate[variable])
+                })
+        })
+        .sum::<f64>();
+    let mut standard_total_objective =
+        0.5 * recovered_energy + standard_soft_loss + standard_violation_loss;
     if matches!(fault, Some(QpFaultInjection::Objective)) {
         standard_total_objective += 1.0;
     }
@@ -1598,11 +1880,15 @@ fn recover_and_verify_qp(
                 .iter()
                 .flat_map(|equality| [equality.value, equality.residual]),
         )
-        .chain(
-            affine_inequalities
-                .iter()
-                .flat_map(|relation| [relation.value, relation.slack, relation.violation]),
-        )
+        .chain(affine_inequalities.iter().flat_map(|relation| {
+            [
+                relation.value,
+                relation.slack,
+                relation.violation,
+                relation.recovered_violation_channel.unwrap_or(0.0),
+                relation.objective_contribution.unwrap_or(0.0),
+            ]
+        }))
         .chain(
             soft_equalities
                 .iter()
@@ -1639,13 +1925,21 @@ fn recover_and_verify_qp(
     {
         reasons.push(QpRecoveryFailureReason::HardEqualityViolation);
     }
-    if affine_inequalities
-        .iter()
-        .any(|relation| relation.violation > relation.tolerance)
-    {
+    if affine_inequalities.iter().any(|relation| {
+        relation.violation_loss.is_none() && relation.violation > relation.tolerance
+            || relation
+                .recovered_violation_channel
+                .is_some_and(|recovered| {
+                    recovered < -relation.tolerance || relation.backend_slack < -relation.tolerance
+                })
+    }) {
         reasons.push(QpRecoveryFailureReason::AffineInequalityViolation);
     }
-    if backend_slack_mismatch > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    // The slack identity is a backend feasibility equation rather than a
+    // coordinate-recovery round trip.  Judge its solve residual with the
+    // backend residual policy; the independent physical relation check above
+    // still uses the tighter relation tolerance.
+    if backend_slack_mismatch > EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit {
         reasons.push(QpRecoveryFailureReason::BackendSlackMismatch);
     }
     if reduction_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
@@ -1725,7 +2019,10 @@ fn verifies_qp_form_provenance(
     if form.polynomial_variables != POLYNOMIAL_DIMENSION
         || form.semantic_latents != problem.semantic_latents.len()
         || form.hard_equality_rows.len() != form.equality_constraints
-        || form.affine_inequality_rows.len() != form.inequality_constraints
+        || form.affine_inequality_rows.len() != problem.affine_inequalities.len()
+        || form.affine_inequality_rows.len() + form.violation_nonnegative_rows.len()
+            != form.inequality_constraints
+        || form.violation_nonnegative_rows.len() != form.soft_violation_variables
         || form.soft_objective_blocks.len() != problem.soft_objectives.len()
     {
         return Ok(false);
@@ -1756,6 +2053,7 @@ fn verifies_qp_form_provenance(
                     .map(|_| DerivedColumnId::from_residual(equality.provenance().residual()))
             || row.coefficients != expected
             || row.rhs != equality.target()
+            || row.violation_variable.is_some()
         {
             return Ok(false);
         }
@@ -1765,12 +2063,24 @@ fn verifies_qp_form_provenance(
         .iter()
         .zip(problem.affine_inequalities.iter().enumerate())
     {
-        let expected = reduced_affine_row(
+        let mut expected = reduced_affine_row(
             representation,
             problem,
             inequality.field(),
             inequality.latent_coefficients(),
         )?;
+        let multiplier = inequality.sense().upper_form_multiplier();
+        expected.iter_mut().for_each(|entry| *entry *= multiplier);
+        let expected_violation_variable = inequality.violation_channel().map(|_| {
+            form.variables - form.soft_violation_variables
+                + problem.affine_inequalities[..canonical_index]
+                    .iter()
+                    .filter(|relation| relation.violation_channel().is_some())
+                    .count()
+        });
+        if let Some(variable) = expected_violation_variable {
+            expected[variable] = -1.0;
+        }
         if row.canonical_index != canonical_index
             || row.provenance != *inequality.provenance()
             || row.derived_block
@@ -1781,7 +2091,8 @@ fn verifies_qp_form_provenance(
                     .field()
                     .map(|_| DerivedColumnId::from_residual(inequality.provenance().residual()))
             || row.coefficients != expected
-            || row.rhs != inequality.bound()
+            || row.rhs != inequality.upper_form_bound()
+            || row.violation_variable != expected_violation_variable
         {
             return Ok(false);
         }
@@ -1835,12 +2146,21 @@ fn verifies_qp_form_provenance(
         .iter()
         .chain(&form.affine_inequality_rows)
         .flat_map(|row| row.coefficients.iter().copied())
+        .chain(
+            form.violation_nonnegative_rows
+                .iter()
+                .flat_map(|row| row.iter().copied()),
+        )
         .collect::<Vec<_>>();
     let expected_rhs = form
         .hard_equality_rows
         .iter()
         .chain(&form.affine_inequality_rows)
         .map(|row| row.rhs)
+        .chain(std::iter::repeat_n(
+            0.0,
+            form.violation_nonnegative_rows.len(),
+        ))
         .collect::<Vec<_>>();
     Ok(form.constraints == expected_constraints && form.constraint_rhs == expected_rhs)
 }
@@ -2572,5 +2892,50 @@ mod tests {
             1.0e-9
         );
         assert!(solution.canonical_acceptance_verified);
+    }
+
+    #[test]
+    fn farkas_validation_rejects_unseparated_nonstationary_and_wrong_cone_rays() {
+        // x <= 0 and x >= 1, written in Clarabel's A x + s = b form.
+        let form = ScaledQpForm {
+            hessian: vec![1.0],
+            linear_objective: vec![0.0],
+            constraints: vec![1.0, -1.0],
+            constraint_rhs: vec![0.0, -1.0],
+            equality_constraints: 0,
+            inequality_constraints: 2,
+            scaling: QpScalingEvidence {
+                rounds: Vec::new(),
+                cumulative_variable_exponents: vec![0],
+                cumulative_constraint_exponents: vec![0, 0],
+                saturated_outside_target: 0,
+            },
+            round_trip_error: 0.0,
+        };
+
+        let valid = validate_primal_infeasibility_ray(
+            form.linear_objective.len(),
+            &form.constraints,
+            &form.constraint_rhs,
+            form.equality_constraints,
+            &[1.0, 1.0],
+        )
+        .expect("the normalized positive ray proves the two bounds incompatible");
+        assert_eq!(valid.normalized_ray_norm, 1.0);
+        assert_eq!(valid.stationarity_residual, 0.0);
+        assert_eq!(valid.dual_cone_violation, 0.0);
+        assert_eq!(valid.separation_margin, 1.0);
+        for invalid in [[1.0, 0.0], [-1.0, -1.0], [0.0, 0.0]] {
+            assert!(
+                validate_primal_infeasibility_ray(
+                    form.linear_objective.len(),
+                    &form.constraints,
+                    &form.constraint_rhs,
+                    form.equality_constraints,
+                    &invalid,
+                )
+                .is_none()
+            );
+        }
     }
 }

@@ -8,30 +8,38 @@ use crate::capacity::{
     CapacityExceededEvidence, CapacityExceededReason, EqualityCapacityShape, SourceStorageShape,
     plan_equality_capacity, plan_equality_capacity_for,
 };
+use crate::clarabel_backend::{
+    ClarabelAttemptEvidence, ClarabelAttemptProfile, ClarabelTermination,
+};
 use crate::cubic_equality::{
-    AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalEqualityParticipation,
-    CanonicalHardEquality, CanonicalRelationToleranceEvidence, CanonicalSoftEquality,
-    CanonicalSoftLoss, CanonicalSoftObjective, CanonicalSoftResidualBlockKind,
-    CanonicalSoftResidualMemberKind, CpdEvidence, CubicCanonicalProblem, CubicEqualityFailure,
-    CubicEqualitySolution, PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
-    ReducedPairingFailureClassification, RepresentationFailure, SemanticLatentCoefficient,
-    SemanticLatentDefinition,
+    AlgebraicAnalysisStage as InternalCubicAnalysisStage, CanonicalAffineInequality,
+    CanonicalEqualityParticipation, CanonicalHardEquality, CanonicalInequalitySense,
+    CanonicalRelationToleranceEvidence, CanonicalSoftEquality, CanonicalSoftLoss,
+    CanonicalSoftObjective, CanonicalSoftResidualBlockKind, CanonicalSoftResidualMemberKind,
+    CanonicalViolationChannel, CanonicalViolationLoss, CpdEvidence, CubicCanonicalProblem,
+    CubicEqualityFailure, CubicEqualitySolution, PhysicalSideConditionEvidence,
+    RecoveryVerificationFailureEvidence, ReducedPairingFailureClassification,
+    RepresentationFailure, SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
     canonical_fitting_uses, preflight_polynomial_analysis_failure,
 };
-use crate::cubic_execution::CubicExecutionCore;
+use crate::cubic_execution::{
+    CubicExecutionCore, CubicExecutionFailure, CubicExecutionSolution, QpAttemptFailureReason,
+    QpAttemptRecord, RecoveredAffineInequality, ValidatedInfeasibilityEvidence,
+};
 use crate::diagnostics::{
     AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
     BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
-    CanonicalAcceptanceEvidenceParts, CapacityEvidence, CapacityFailureKind, CubicAnalysisEvidence,
+    CanonicalAcceptanceEvidenceParts, CapacityEvidence, CapacityFailureKind,
+    ConvexResidualEvidence as PublicConvexResidualEvidence, CubicAnalysisEvidence,
     CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts, InertiaEvidence,
-    InterpretableRankDeficiencyEvidence, InterpretableRankDeficiencyEvidenceParts,
-    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
-    RankEvidenceDomain, RankEvidenceParts, RecoveryVerificationEvidence,
-    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
-    ScalingFailureReason, ScalingSummary, SideConditionEvidence, SolveAttemptKind,
-    SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
+    InfeasibilityCertificateEvidence, InterpretableRankDeficiencyEvidence,
+    InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
+    RankDecision, RankDeficiencyConcept, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
+    RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence,
+    ResidualDimension, ScalingFailureReason, ScalingSummary, SideConditionEvidence,
+    SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
     SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence,
 };
@@ -59,7 +67,9 @@ use crate::observation::{
     ObservationInput, QuadraticPenalty, StandardDeviation, TangentConfiguration,
 };
 use crate::problem::{ProblemSnapshot, ThreadBudget};
-use crate::relation::AdditiveFieldGaugeReference;
+use crate::relation::{
+    AdditiveFieldGaugeReference, FieldValueBoundConfiguration, LinearViolationPenalty,
+};
 
 /// Successful fit output: one accepted model and its complete report.
 #[derive(Debug)]
@@ -124,6 +134,8 @@ pub struct ProblemSize {
     semantic_latents: usize,
     auxiliary_variables: usize,
     quadratic_objective_terms: usize,
+    linear_objective_terms: usize,
+    affine_inequality_constraints: usize,
     cone_blocks: usize,
     primal_variables: Option<usize>,
     equality_constraints: Option<usize>,
@@ -137,9 +149,12 @@ struct CubicProblemSizeParts {
     canonical_hard_equalities: usize,
     canonical_soft_equalities: usize,
     quadratic_objective_terms: usize,
+    linear_objective_terms: usize,
+    affine_inequality_constraints: usize,
     center_coefficients: usize,
     semantic_latents: usize,
     solver_hard_equalities: usize,
+    auxiliary_variables: usize,
 }
 
 impl ProblemSize {
@@ -158,12 +173,38 @@ impl ProblemSize {
             canonical_soft_equalities: Some(parts.canonical_soft_equalities),
             center_coefficients: Some(parts.center_coefficients),
             semantic_latents: parts.semantic_latents,
-            auxiliary_variables: 0,
+            auxiliary_variables: parts.auxiliary_variables,
             quadratic_objective_terms: parts.quadratic_objective_terms,
+            linear_objective_terms: parts.linear_objective_terms,
+            affine_inequality_constraints: parts.affine_inequality_constraints,
             cone_blocks: 0,
             primal_variables: Some(primal_variables),
             equality_constraints: Some(equality_constraints),
             kkt_dimension: Some(kkt_dimension),
+        })
+    }
+
+    fn cubic_qp(parts: CubicProblemSizeParts) -> Option<Self> {
+        let primal_variables = parts
+            .center_coefficients
+            .checked_add(parts.semantic_latents)?
+            .checked_add(parts.auxiliary_variables)?;
+        Some(Self {
+            input_observations: parts.input_observations,
+            scalar_hard_relations: parts.scalar_hard_relations,
+            scalar_soft_relations: parts.scalar_soft_relations,
+            canonical_hard_equalities: Some(parts.canonical_hard_equalities),
+            canonical_soft_equalities: Some(parts.canonical_soft_equalities),
+            center_coefficients: Some(parts.center_coefficients),
+            semantic_latents: parts.semantic_latents,
+            auxiliary_variables: parts.auxiliary_variables,
+            quadratic_objective_terms: parts.quadratic_objective_terms,
+            linear_objective_terms: parts.linear_objective_terms,
+            affine_inequality_constraints: parts.affine_inequality_constraints,
+            cone_blocks: 0,
+            primal_variables: Some(primal_variables),
+            equality_constraints: Some(parts.solver_hard_equalities),
+            kkt_dimension: None,
         })
     }
 
@@ -214,6 +255,16 @@ impl ProblemSize {
         self.quadratic_objective_terms
     }
 
+    /// Returns linear soft-violation terms in the physical objective.
+    pub fn linear_objective_terms(self) -> usize {
+        self.linear_objective_terms
+    }
+
+    /// Returns scalar affine-inequality rows before backend presolve.
+    pub fn affine_inequality_constraints(self) -> usize {
+        self.affine_inequality_constraints
+    }
+
     /// Returns the conic block count.
     pub fn cone_blocks(self) -> usize {
         self.cone_blocks
@@ -255,6 +306,105 @@ pub struct HardRelationAssessment {
     scaled_kkt_tolerance: Option<f64>,
     recovered_physical_tolerance: f64,
     tolerance_round_trip_error: f64,
+}
+
+/// Which side of a Field Value Bound one assessment describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum BoundSide {
+    /// A lower relation of the form `bound <= field`.
+    Lower,
+    /// An upper relation of the form `field <= bound`.
+    Upper,
+}
+
+/// Whether a recovered bound side lies on its accepted activity envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundActiveState {
+    /// The satisfaction slack is no larger than the physical relation tolerance.
+    Active,
+    /// The relation has physical satisfaction slack above its tolerance.
+    Inactive,
+}
+
+/// Physical recovery assessment for one independently identified bound side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldValueBoundAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    side: BoundSide,
+    bound: f64,
+    recovered_value: f64,
+    slack: f64,
+    violation: f64,
+    tolerance: f64,
+    active_state: BoundActiveState,
+    quadratic_penalty: Option<QuadraticPenalty>,
+    linear_violation_penalty: Option<LinearViolationPenalty>,
+    loss: Option<f64>,
+}
+
+impl FieldValueBoundAssessment {
+    /// Returns the caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable lower- or upper-side semantic role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns which side of the bound this assessment describes.
+    pub fn side(&self) -> BoundSide {
+        self.side
+    }
+
+    /// Returns the finite bound in field-value units.
+    pub fn bound(&self) -> f64 {
+        self.bound
+    }
+
+    /// Returns the independently recovered field value at the bound support.
+    pub fn recovered_value(&self) -> f64 {
+        self.recovered_value
+    }
+
+    /// Returns nonnegative physical satisfaction slack in field-value units.
+    pub fn slack(&self) -> f64 {
+        self.slack
+    }
+
+    /// Returns nonnegative physical violation in field-value units.
+    pub fn violation(&self) -> f64 {
+        self.violation
+    }
+
+    /// Returns the physical acceptance tolerance for this side.
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
+    /// Returns the stable active/inactive state derived in physical units.
+    pub fn active_state(&self) -> BoundActiveState {
+        self.active_state
+    }
+
+    /// Returns the configured quadratic violation penalty when present.
+    pub fn quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.quadratic_penalty
+    }
+
+    /// Returns the configured linear violation penalty when present.
+    pub fn linear_violation_penalty(&self) -> Option<LinearViolationPenalty> {
+        self.linear_violation_penalty
+    }
+
+    /// Returns this soft side's objective contribution; hard sides return `None`.
+    pub fn loss(&self) -> Option<f64> {
+        self.loss
+    }
 }
 
 /// Recovered physical residual and objective contribution for one soft field
@@ -643,6 +793,7 @@ pub struct FitReport {
     numerical_policy: NumericalPolicyId,
     requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
+    field_value_bounds: Vec<FieldValueBoundAssessment>,
     soft_field_values: Vec<SoftFieldValueAssessment>,
     soft_gradients: Vec<SoftGradientAssessment>,
     soft_tangents: Vec<SoftTangentAssessment>,
@@ -663,6 +814,7 @@ pub struct FitReport {
     canonical_acceptance: Option<CanonicalAcceptanceEvidence>,
     capacity: Option<CapacityEvidence>,
     analysis_failure: Option<AnalysisFailureEvidence>,
+    infeasibility_certificate: Option<InfeasibilityCertificateEvidence>,
     unidentified_additive_gauge: Option<UnidentifiedAdditiveGaugeEvidence>,
     uninformative_shared_level_sets: Vec<UninformativeSharedLevelSetEvidence>,
 }
@@ -696,6 +848,11 @@ impl FitReport {
     /// Returns physical hard-relation recovery assessments in stable order.
     pub fn hard_relations(&self) -> &[HardRelationAssessment] {
         &self.hard_relations
+    }
+
+    /// Returns lower/upper Field Value Bound assessments in SourceId/role order.
+    pub fn field_value_bounds(&self) -> &[FieldValueBoundAssessment] {
+        &self.field_value_bounds
     }
 
     /// Returns soft Field Value assessments in stable SourceId order.
@@ -815,6 +972,11 @@ impl FitReport {
         self.analysis_failure.as_ref()
     }
 
+    /// Returns independently validated Farkas-ray evidence for infeasibility.
+    pub fn infeasibility_certificate(&self) -> Option<InfeasibilityCertificateEvidence> {
+        self.infeasibility_certificate
+    }
+
     /// Returns structural evidence for a missing additive-field representative.
     pub fn unidentified_additive_gauge(&self) -> Option<&UnidentifiedAdditiveGaugeEvidence> {
         self.unidentified_additive_gauge.as_ref()
@@ -838,12 +1000,28 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     });
     let scalar_relation_count = scalar_relation_counts.total().unwrap_or(usize::MAX);
     let quadratic_objective_terms = quadratic_objective_term_count(snapshot).unwrap_or(usize::MAX);
+    let linear_objective_terms = linear_objective_term_count(snapshot).unwrap_or(usize::MAX);
+    let input_observations = snapshot
+        .inner
+        .observations
+        .len()
+        .checked_add(snapshot.inner.field_value_bounds.len())
+        .unwrap_or(usize::MAX);
     let source_identifier_bytes = source_identifier_bytes(snapshot).unwrap_or(usize::MAX);
     let conservative_problem_size = conservative_problem_size(
-        snapshot.inner.observations.len(),
+        input_observations,
         scalar_relation_counts,
         snapshot.inner.shared_level_sets.len(),
         quadratic_objective_terms,
+        linear_objective_terms,
+        snapshot
+            .inner
+            .field_value_bounds
+            .iter()
+            .map(|bound| {
+                usize::from(bound.lower().is_some()) + usize::from(bound.upper().is_some())
+            })
+            .sum(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
     let source_lifecycle_capacity =
@@ -883,7 +1061,8 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                 .iter()
                 .any(|member| matches!(member, CovarianceGroupMember::FieldValue(_)))
         })
-        || !snapshot.inner.additive_field_gauges.is_empty();
+        || !snapshot.inner.additive_field_gauges.is_empty()
+        || !snapshot.inner.field_value_bounds.is_empty();
     if !has_absolute_reference {
         let mut source_ids = snapshot
             .inner
@@ -932,32 +1111,50 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
     let fitting_uses = canonical_fitting_uses(
         &lowering.canonical_equalities,
         &lowering.canonical_soft_equalities,
-        &[],
+        &lowering.canonical_affine_inequalities,
     );
-    let exact_problem_size = ProblemSize::cubic_equality(CubicProblemSizeParts {
-        input_observations: snapshot.inner.observations.len(),
+    let problem_size_parts = CubicProblemSizeParts {
+        input_observations,
         scalar_hard_relations: scalar_relation_counts.hard,
         scalar_soft_relations: scalar_relation_counts.soft,
         canonical_hard_equalities: lowering.canonical_equalities.len(),
         canonical_soft_equalities: lowering.canonical_soft_equalities.len(),
-        quadratic_objective_terms: lowering.canonical_soft_objectives.len(),
+        quadratic_objective_terms,
+        linear_objective_terms,
+        affine_inequality_constraints: lowering.canonical_affine_inequalities.len()
+            + lowering
+                .canonical_affine_inequalities
+                .iter()
+                .filter(|relation| relation.violation_channel().is_some())
+                .count(),
         center_coefficients: fitting_uses.len(),
         semantic_latents: lowering.semantic_latents.len(),
         solver_hard_equalities: lowering.solver_equality_count(),
-    });
+        auxiliary_variables: lowering
+            .canonical_affine_inequalities
+            .iter()
+            .filter(|relation| relation.violation_channel().is_some())
+            .count(),
+    };
+    let exact_problem_size = if lowering.canonical_affine_inequalities.is_empty() {
+        ProblemSize::cubic_equality(problem_size_parts)
+    } else {
+        ProblemSize::cubic_qp(problem_size_parts)
+    };
     if let Some(problem_size) = exact_problem_size {
         preflight_report.problem_size = problem_size;
     }
     preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
     preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
     let capacity_failure = match source_lifecycle_capacity {
-        Ok(()) => plan_snapshot_capacity(
+        Ok(()) if lowering.canonical_affine_inequalities.is_empty() => plan_snapshot_capacity(
             &lowering,
             fitting_uses.len(),
             scalar_relation_count,
             source_identifier_bytes,
         )
         .err(),
+        Ok(()) => None,
         Err(evidence) => Some(evidence),
     };
     if let Some(evidence) = capacity_failure {
@@ -1010,6 +1207,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
+        field_value_bounds: Vec::new(),
         soft_field_values: Vec::new(),
         soft_gradients: Vec::new(),
         soft_tangents: Vec::new(),
@@ -1030,6 +1228,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         canonical_acceptance: None,
         capacity: None,
         analysis_failure: None,
+        infeasibility_certificate: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
     }
@@ -1080,11 +1279,29 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
         .try_fold(0_usize, |count, group| {
             count.checked_add(group.scalar_residual_count())
         })?;
+    let (bound_hard, bound_soft) = snapshot.inner.field_value_bounds.iter().try_fold(
+        (0_usize, 0_usize),
+        |(hard, soft), bound| {
+            bound.lower().into_iter().chain(bound.upper()).try_fold(
+                (hard, soft),
+                |(hard, soft), side| {
+                    if side.configuration.is_soft() {
+                        Some((hard, soft.checked_add(1)?))
+                    } else {
+                        Some((hard.checked_add(1)?, soft))
+                    }
+                },
+            )
+        },
+    )?;
     Some(ScalarRelationCounts {
         hard: observation_hard
             .checked_add(group_hard)?
-            .checked_add(snapshot.inner.additive_field_gauges.len())?,
-        soft: observation_soft.checked_add(covariance_group_soft)?,
+            .checked_add(snapshot.inner.additive_field_gauges.len())?
+            .checked_add(bound_hard)?,
+        soft: observation_soft
+            .checked_add(covariance_group_soft)?
+            .checked_add(bound_soft)?,
     })
 }
 
@@ -1099,7 +1316,37 @@ fn quadratic_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
             ObservationInput::TangentDirection(tangent) => tangent.configuration().is_soft(),
         })
         .count();
-    independent.checked_add(snapshot.inner.covariance_groups.len())
+    let bound_terms = snapshot
+        .inner
+        .field_value_bounds
+        .iter()
+        .flat_map(|bound| bound.lower().into_iter().chain(bound.upper()))
+        .filter(|side| {
+            matches!(
+                side.configuration,
+                FieldValueBoundConfiguration::QuadraticPenalty(_)
+            )
+        })
+        .count();
+    independent
+        .checked_add(snapshot.inner.covariance_groups.len())?
+        .checked_add(bound_terms)
+}
+
+fn linear_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
+    snapshot
+        .inner
+        .field_value_bounds
+        .iter()
+        .flat_map(|bound| bound.lower().into_iter().chain(bound.upper()))
+        .filter(|side| {
+            matches!(
+                side.configuration,
+                FieldValueBoundConfiguration::LinearViolationPenalty(_)
+            )
+        })
+        .count()
+        .checked_add(0)
 }
 
 fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
@@ -1163,10 +1410,26 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
                     .checked_add(gauge.source_id().as_str().len())
                     .and_then(|bytes| bytes.checked_add(group_bytes))
             })?;
+    let bound_bytes =
+        snapshot
+            .inner
+            .field_value_bounds
+            .iter()
+            .try_fold(0_usize, |bytes, bound| {
+                let multiplicity = usize::from(bound.lower().is_some())
+                    .checked_add(usize::from(bound.upper().is_some()))?;
+                bound
+                    .source_id()
+                    .as_str()
+                    .len()
+                    .checked_mul(multiplicity)
+                    .and_then(|source_bytes| bytes.checked_add(source_bytes))
+            })?;
     observation_bytes
         .checked_add(shared_level_bytes)?
         .checked_add(covariance_group_bytes)?
-        .checked_add(gauge_bytes)
+        .checked_add(gauge_bytes)?
+        .checked_add(bound_bytes)
 }
 
 fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> bool {
@@ -1183,6 +1446,8 @@ fn conservative_problem_size(
     scalar_relations: ScalarRelationCounts,
     semantic_latents: usize,
     quadratic_objective_terms: usize,
+    linear_objective_terms: usize,
+    affine_inequality_constraints: usize,
 ) -> ProblemSize {
     ProblemSize {
         input_observations,
@@ -1194,6 +1459,8 @@ fn conservative_problem_size(
         semantic_latents,
         auxiliary_variables: 0,
         quadratic_objective_terms,
+        linear_objective_terms,
+        affine_inequality_constraints,
         cone_blocks: 0,
         primal_variables: None,
         equality_constraints: None,
@@ -1286,6 +1553,9 @@ fn fit_snapshot_after_preflight(
     problem_size: ProblemSize,
     base_report: impl Fn() -> FitReport,
 ) -> Result<FitSuccess, FitFailure> {
+    if !lowering.canonical_affine_inequalities.is_empty() {
+        return fit_snapshot_after_preflight_qp(snapshot, lowering, problem_size, base_report());
+    }
     let solution = match CubicExecutionCore::solve_equality_production(
         CubicCanonicalProblem {
             equalities: lowering.canonical_equalities.clone(),
@@ -1324,6 +1594,61 @@ fn fit_snapshot_after_preflight(
         problem_size,
         &solution,
         &lowering.source_relations,
+        &shared_level_values,
+    );
+    let model = SolvedModel::new(
+        snapshot.clone(),
+        solution.field,
+        shared_level_values
+            .iter()
+            .map(|level| (level.group_id.clone(), level.value))
+            .collect(),
+    );
+    Ok(FitSuccess { model, report })
+}
+
+fn fit_snapshot_after_preflight_qp(
+    snapshot: &ProblemSnapshot,
+    lowering: EqualityLowering,
+    problem_size: ProblemSize,
+    base_report: FitReport,
+) -> Result<FitSuccess, FitFailure> {
+    let solution = match CubicExecutionCore::solve(
+        CubicCanonicalProblem {
+            equalities: lowering.canonical_equalities.clone(),
+            affine_inequalities: lowering.canonical_affine_inequalities.clone(),
+            soft_equalities: lowering.canonical_soft_equalities.clone(),
+            soft_objectives: lowering.canonical_soft_objectives.clone(),
+            semantic_latents: lowering.semantic_latents.clone(),
+            field_energy_normalization: snapshot.inner.field_energy_normalization,
+        },
+        snapshot.inner.global_anisotropy_metric.as_cubic_metric(),
+    ) {
+        Ok(solution) => solution,
+        Err(failure) => {
+            let diagnosis = diagnose_qp(&failure);
+            return Err(FitFailure {
+                diagnosis,
+                report: Box::new(qp_failure_report(base_report, &failure)),
+            });
+        }
+    };
+    let shared_level_values = solution
+        .semantic_latents
+        .iter()
+        .map(|latent| SharedLevelValue {
+            group_id: latent.group_id.clone(),
+            value: latent.value,
+            field_unit: latent.field_unit.clone(),
+            member_source_ids: latent.member_source_ids.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let report = success_report_qp(
+        snapshot,
+        problem_size,
+        &solution,
+        &lowering.source_relations,
+        &lowering.source_bound_relations,
         &shared_level_values,
     );
     let model = SolvedModel::new(
@@ -1549,12 +1874,21 @@ struct SourceHardRelation {
 }
 
 #[derive(Debug, Clone)]
+struct SourceBoundRelation {
+    inequality: CanonicalAffineInequality,
+    canonical_index: usize,
+}
+
+#[derive(Debug, Clone)]
 struct EqualityLowering {
     source_relations: Vec<SourceHardRelation>,
+    source_bound_relations: Vec<SourceBoundRelation>,
     canonical_equalities: Vec<CanonicalHardEquality>,
+    canonical_affine_inequalities: Vec<CanonicalAffineInequality>,
     canonical_soft_equalities: Vec<CanonicalSoftEquality>,
     canonical_soft_objectives: Vec<CanonicalSoftObjective>,
     canonical_index_by_key: BTreeMap<CanonicalEqualityKey, (usize, f64)>,
+    canonical_bound_index_by_key: BTreeMap<CanonicalBoundKey, usize>,
     direct_input_conflicts: Vec<DirectInputConflictEvidence>,
     relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
     semantic_latents: Vec<SemanticLatentDefinition>,
@@ -1564,10 +1898,13 @@ impl EqualityLowering {
     fn new() -> Self {
         Self {
             source_relations: Vec::new(),
+            source_bound_relations: Vec::new(),
             canonical_equalities: Vec::new(),
+            canonical_affine_inequalities: Vec::new(),
             canonical_soft_equalities: Vec::new(),
             canonical_soft_objectives: Vec::new(),
             canonical_index_by_key: BTreeMap::new(),
+            canonical_bound_index_by_key: BTreeMap::new(),
             direct_input_conflicts: Vec::new(),
             relation_graph_conflicts: Vec::new(),
             semantic_latents: Vec::new(),
@@ -1632,6 +1969,35 @@ impl EqualityLowering {
         });
     }
 
+    fn push_bound(&mut self, inequality: CanonicalAffineInequality, support: [f64; 3]) {
+        let canonical_index = if inequality.violation_channel().is_some() {
+            let index = self.canonical_affine_inequalities.len();
+            self.canonical_affine_inequalities.push(inequality.clone());
+            index
+        } else {
+            let key = CanonicalBoundKey {
+                support: canonical_support_bits(support),
+                side: match inequality.sense() {
+                    CanonicalInequalitySense::Lower => 0,
+                    CanonicalInequalitySense::Upper => 1,
+                },
+                bound: canonical_scalar_bits(inequality.bound()),
+            };
+            if let Some(index) = self.canonical_bound_index_by_key.get(&key) {
+                *index
+            } else {
+                let index = self.canonical_affine_inequalities.len();
+                self.canonical_affine_inequalities.push(inequality.clone());
+                self.canonical_bound_index_by_key.insert(key, index);
+                index
+            }
+        };
+        self.source_bound_relations.push(SourceBoundRelation {
+            inequality,
+            canonical_index,
+        });
+    }
+
     fn record_graph_conflict(
         &mut self,
         outcome: &CanonicalValueEdgeOutcome,
@@ -1681,6 +2047,13 @@ struct CanonicalEqualityKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonicalBoundKey {
+    support: [u64; 3],
+    side: u8,
+    bound: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum CanonicalValueNode {
     Group(GroupId),
     Support([u64; 3]),
@@ -1704,6 +2077,15 @@ struct CanonicalValueConstraintForest {
 }
 
 impl CanonicalValueConstraintForest {
+    fn absolute_target_for_support(
+        &mut self,
+        support: [u64; 3],
+    ) -> Option<ComponentAbsoluteTarget> {
+        let index = *self.node_index.get(&CanonicalValueNode::Support(support))?;
+        let root = self.root(index);
+        self.absolute_target[root].clone()
+    }
+
     fn add_member_equality(
         &mut self,
         group_id: &GroupId,
@@ -1945,13 +2327,15 @@ enum CanonicalValueEdgeOutcome {
 }
 
 fn canonical_support_bits(support: [f64; 3]) -> [u64; 3] {
-    support.map(|coordinate| {
-        if coordinate == 0.0 {
-            0.0_f64.to_bits()
-        } else {
-            coordinate.to_bits()
-        }
-    })
+    support.map(canonical_scalar_bits)
+}
+
+fn canonical_scalar_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0_f64.to_bits()
+    } else {
+        value.to_bits()
+    }
 }
 
 fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEqualityKey, f64) {
@@ -2011,6 +2395,7 @@ fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEquali
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
     let mut value_constraints = CanonicalValueConstraintForest::default();
+    let mut hard_bound_facts = Vec::new();
     for block in observation_residual_blocks(&snapshot.inner.observations) {
         let soft_loss = match &block.configuration {
             ResidualBlockConfiguration::Hard => None,
@@ -2077,6 +2462,76 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 members: covariance_group_member_kinds(group.members()),
             },
         );
+    }
+
+    for bound in &snapshot.inner.field_value_bounds {
+        for (sense, side, role) in [
+            (
+                CanonicalInequalitySense::Lower,
+                bound.lower(),
+                "field-value-bound/lower",
+            ),
+            (
+                CanonicalInequalitySense::Upper,
+                bound.upper(),
+                "field-value-bound/upper",
+            ),
+        ] {
+            let Some(side) = side else {
+                continue;
+            };
+            let semantic_role = SemanticRolePath::new(role);
+            let provenance = relation_provenance(bound.source_id().clone(), None, semantic_role);
+            let functional = CanonicalFunctional::new(
+                FunctionalDimension::FieldValue,
+                vec![FunctionalTerm::new(
+                    bound.location().components(),
+                    1.0,
+                    [0.0; 3],
+                )],
+            )
+            .expect("a checked Field Value Bound lowers to one finite value functional");
+            let violation_channel = match side.configuration {
+                FieldValueBoundConfiguration::Hard => {
+                    hard_bound_facts.push(HardBoundFact {
+                        source_id: bound.source_id().clone(),
+                        support: bound.location().components(),
+                        sense,
+                        bound: side.bound,
+                        semantic_role: provenance.semantic_role().clone(),
+                    });
+                    None
+                }
+                FieldValueBoundConfiguration::QuadraticPenalty(penalty) => {
+                    Some(CanonicalViolationChannel::new(
+                        provenance.residual().clone(),
+                        CanonicalViolationLoss::QuadraticPenalty {
+                            weight: penalty.weight(),
+                        },
+                    ))
+                }
+                FieldValueBoundConfiguration::LinearViolationPenalty(penalty) => {
+                    Some(CanonicalViolationChannel::new(
+                        provenance.residual().clone(),
+                        CanonicalViolationLoss::LinearViolationPenalty {
+                            weight: penalty.weight(),
+                        },
+                    ))
+                }
+            };
+            lowering.push_bound(
+                CanonicalAffineInequality::new(
+                    Some(FunctionalUse::new(functional, provenance.clone())),
+                    Vec::new(),
+                    provenance,
+                    FunctionalDimension::FieldValue,
+                    sense,
+                    side.bound,
+                    violation_channel,
+                ),
+                bound.location().components(),
+            );
+        }
     }
 
     let latent_index_by_group = snapshot
@@ -2148,7 +2603,8 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 .members()
                 .iter()
                 .any(|member| matches!(member, CovarianceGroupMember::FieldValue(_)))
-        });
+        })
+        || !snapshot.inner.field_value_bounds.is_empty();
     let primary_gauge = (!has_absolute_observation)
         .then(|| snapshot.inner.additive_field_gauges.first())
         .flatten()
@@ -2220,7 +2676,111 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             }
         }
     }
+    record_direct_bound_conflicts(&mut lowering, &mut value_constraints, &hard_bound_facts);
     lowering
+}
+
+#[derive(Debug, Clone)]
+struct HardBoundFact {
+    source_id: SourceId,
+    support: [f64; 3],
+    sense: CanonicalInequalitySense,
+    bound: f64,
+    semantic_role: SemanticRolePath,
+}
+
+fn record_direct_bound_conflicts(
+    lowering: &mut EqualityLowering,
+    value_constraints: &mut CanonicalValueConstraintForest,
+    facts: &[HardBoundFact],
+) {
+    let mut by_support = BTreeMap::<[u64; 3], Vec<&HardBoundFact>>::new();
+    for fact in facts {
+        by_support
+            .entry(canonical_support_bits(fact.support))
+            .or_default()
+            .push(fact);
+    }
+    for (support, support_facts) in by_support {
+        for (index, left) in support_facts.iter().enumerate() {
+            for right in &support_facts[index + 1..] {
+                let incompatible = match (left.sense, right.sense) {
+                    (CanonicalInequalitySense::Lower, CanonicalInequalitySense::Upper) => {
+                        left.bound > right.bound
+                    }
+                    (CanonicalInequalitySense::Upper, CanonicalInequalitySense::Lower) => {
+                        right.bound > left.bound
+                    }
+                    _ => false,
+                };
+                if incompatible {
+                    push_direct_bound_conflict(lowering, left, right);
+                }
+            }
+        }
+        if let Some(absolute) = value_constraints.absolute_target_for_support(support) {
+            for fact in support_facts {
+                let incompatible = match fact.sense {
+                    CanonicalInequalitySense::Lower => absolute.target < fact.bound,
+                    CanonicalInequalitySense::Upper => absolute.target > fact.bound,
+                };
+                if incompatible {
+                    let (first_source, first_target, second_source, second_target) =
+                        if absolute.source_id <= fact.source_id {
+                            (
+                                absolute.source_id.clone(),
+                                absolute.target,
+                                fact.source_id.clone(),
+                                fact.bound,
+                            )
+                        } else {
+                            (
+                                fact.source_id.clone(),
+                                fact.bound,
+                                absolute.source_id.clone(),
+                                absolute.target,
+                            )
+                        };
+                    lowering
+                        .direct_input_conflicts
+                        .push(DirectInputConflictEvidence::new(
+                            first_source,
+                            second_source,
+                            fact.semantic_role.clone(),
+                            first_target,
+                            second_target,
+                        ));
+                }
+            }
+        }
+    }
+    lowering.direct_input_conflicts.sort_by(|left, right| {
+        left.semantic_role()
+            .cmp(right.semantic_role())
+            .then_with(|| left.first_source().cmp(right.first_source()))
+            .then_with(|| left.second_source().cmp(right.second_source()))
+    });
+}
+
+fn push_direct_bound_conflict(
+    lowering: &mut EqualityLowering,
+    left: &HardBoundFact,
+    right: &HardBoundFact,
+) {
+    let (first, second) = if left.source_id <= right.source_id {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    lowering
+        .direct_input_conflicts
+        .push(DirectInputConflictEvidence::new(
+            first.source_id.clone(),
+            second.source_id.clone(),
+            second.semantic_role.clone(),
+            first.bound,
+            second.bound,
+        ));
 }
 
 fn field_equality(
@@ -2291,6 +2851,182 @@ fn signed_coefficient_bits(sign: f64, coefficient: f64) -> u64 {
     }
 }
 
+fn success_report_qp(
+    snapshot: &ProblemSnapshot,
+    problem_size: ProblemSize,
+    solution: &CubicExecutionSolution,
+    source_relations: &[SourceHardRelation],
+    source_bound_relations: &[SourceBoundRelation],
+    shared_level_values: &[SharedLevelValue],
+) -> FitReport {
+    let qp = solution
+        .qp
+        .as_ref()
+        .expect("an affine-inequality execution retains QP evidence");
+    let mut hard_relations = source_relations
+        .iter()
+        .map(|source_relation| {
+            hard_relation_assessment(
+                source_relation,
+                solution.hard_equalities[source_relation.canonical_index].value,
+                qp.hard_relation_tolerances[source_relation.canonical_index],
+            )
+        })
+        .collect::<Vec<_>>();
+    hard_relations.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
+    let mut field_value_bounds = source_bound_relations
+        .iter()
+        .map(|source_relation| {
+            field_value_bound_assessment(
+                source_relation,
+                &solution.affine_inequalities[source_relation.canonical_index],
+            )
+        })
+        .collect::<Vec<_>>();
+    field_value_bounds.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
+    let mut soft_field_values = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| soft_field_value_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    soft_field_values.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut soft_gradients = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| soft_gradient_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    soft_gradients.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut soft_tangents = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| soft_tangent_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    soft_tangents.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    let mut covariance_groups = solution
+        .soft_objectives
+        .iter()
+        .filter_map(|objective| covariance_group_assessment(objective, &solution.soft_equalities))
+        .collect::<Vec<_>>();
+    covariance_groups.sort_by(|left, right| left.group_id.cmp(&right.group_id));
+    let accepted_backend = &qp.attempts[qp.accepted_attempt].backend;
+    FitReport {
+        problem_size,
+        resolved_kernel: snapshot.inner.resolved_kernel.clone(),
+        field_energy_normalization: snapshot.inner.field_energy_normalization,
+        numerical_policy: snapshot.inner.fit_configuration.numerical_policy(),
+        requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
+        hard_relations,
+        field_value_bounds,
+        soft_field_values,
+        soft_gradients,
+        soft_tangents,
+        covariance_groups,
+        shared_level_values: shared_level_values.to_vec(),
+        field_energy: Some(solution.field_energy),
+        total_objective: Some(solution.total_objective),
+        backend_fingerprint: Some(public_qp_backend_fingerprint(accepted_backend)),
+        attempts: public_qp_attempts(&qp.attempts),
+        recovery_verification: None,
+        direct_input_conflicts: Vec::new(),
+        relation_graph_conflicts: Vec::new(),
+        execution_failure: None,
+        cubic_analysis: Some(public_cubic_analysis(&solution.representation)),
+        backend_rank: None,
+        interpretable_rank_deficiency: None,
+        inertia: None,
+        canonical_acceptance: Some(public_qp_success_acceptance(solution)),
+        capacity: None,
+        analysis_failure: None,
+        infeasibility_certificate: None,
+        unidentified_additive_gauge: None,
+        uninformative_shared_level_sets: Vec::new(),
+    }
+}
+
+fn field_value_bound_assessment(
+    source_relation: &SourceBoundRelation,
+    recovered: &RecoveredAffineInequality,
+) -> FieldValueBoundAssessment {
+    let (quadratic_penalty, linear_violation_penalty) = source_relation
+        .inequality
+        .violation_channel()
+        .map(|channel| match channel.loss() {
+            CanonicalViolationLoss::QuadraticPenalty { weight } => (
+                Some(QuadraticPenalty::try_new(weight).expect("canonical penalty stays checked")),
+                None,
+            ),
+            CanonicalViolationLoss::LinearViolationPenalty { weight } => (
+                None,
+                Some(
+                    LinearViolationPenalty::try_new(weight)
+                        .expect("canonical violation penalty stays checked"),
+                ),
+            ),
+        })
+        .unwrap_or((None, None));
+    FieldValueBoundAssessment {
+        source_id: source_relation.inequality.provenance().source().clone(),
+        semantic_role: source_relation
+            .inequality
+            .provenance()
+            .semantic_role()
+            .clone(),
+        side: match source_relation.inequality.sense() {
+            CanonicalInequalitySense::Lower => BoundSide::Lower,
+            CanonicalInequalitySense::Upper => BoundSide::Upper,
+        },
+        bound: source_relation.inequality.bound(),
+        recovered_value: recovered.value,
+        slack: recovered.slack,
+        violation: recovered.violation,
+        tolerance: recovered.tolerance,
+        active_state: if recovered.slack <= recovered.tolerance {
+            BoundActiveState::Active
+        } else {
+            BoundActiveState::Inactive
+        },
+        quadratic_penalty,
+        linear_violation_penalty,
+        loss: recovered.objective_contribution,
+    }
+}
+
+fn public_qp_success_acceptance(solution: &CubicExecutionSolution) -> CanonicalAcceptanceEvidence {
+    let qp = solution.qp.as_ref().expect("QP success retains evidence");
+    CanonicalAcceptanceEvidence::new(CanonicalAcceptanceEvidenceParts {
+        accepted: solution.canonical_acceptance_verified,
+        recovery_finite: true,
+        provenance_verified: qp.provenance_verified,
+        side_condition: Some(public_side_condition(solution.side_condition)),
+        hard_residual_maxima: Some((
+            solution.hard_equality_violations.field_value,
+            solution.hard_equality_violations.field_value_per_length,
+        )),
+        polynomial_round_trip_error: Some(qp.polynomial_round_trip_error),
+        field_coefficient_round_trip_error: Some(qp.field_coefficient_round_trip_error),
+        field_energy_round_trip_error: Some(qp.field_energy_round_trip_error),
+        whitening_round_trip_error: Some(qp.whitening_round_trip_error),
+        objective_round_trip_error: Some(qp.objective_round_trip_error),
+        objective_verified: qp.objective_round_trip_error
+            <= crate::numerical::EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit,
+        tolerance_round_trip_error: Some(
+            qp.hard_relation_tolerances
+                .iter()
+                .chain(&qp.affine_relation_tolerances)
+                .map(|tolerance| tolerance.round_trip_error)
+                .fold(0.0_f64, f64::max),
+        ),
+    })
+}
+
 fn success_report(
     snapshot: &ProblemSnapshot,
     planned_problem_size: ProblemSize,
@@ -2308,6 +3044,8 @@ fn success_report(
         semantic_latents: solution.assembly.semantic_latents,
         auxiliary_variables: 0,
         quadratic_objective_terms: solution.soft_objectives.len(),
+        linear_objective_terms: planned_problem_size.linear_objective_terms,
+        affine_inequality_constraints: planned_problem_size.affine_inequality_constraints,
         cone_blocks: 0,
         primal_variables: Some(solution.assembly.primal_variables),
         equality_constraints: Some(
@@ -2365,6 +3103,7 @@ fn success_report(
         numerical_policy: solution.backend.numerical_policy,
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
+        field_value_bounds: Vec::new(),
         soft_field_values,
         soft_gradients,
         soft_tangents,
@@ -2393,6 +3132,7 @@ fn success_report(
         canonical_acceptance: Some(public_success_acceptance(solution)),
         capacity: None,
         analysis_failure: None,
+        infeasibility_certificate: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
     }
@@ -3236,12 +3976,120 @@ fn public_attempts(attempts: &[KktAttemptRecord]) -> Vec<SolveAttemptRecord> {
                         residual.normalized_backward_error,
                     ])
                 }),
+                convex_residual: None,
                 certificate_present: attempt.certificate_present,
                 failure_reason: attempt.failure_reason.map(public_attempt_failure),
                 backend_fingerprint: public_backend_fingerprint(&attempt.backend),
             })
         })
         .collect()
+}
+
+fn public_qp_attempts(attempts: &[QpAttemptRecord]) -> Vec<SolveAttemptRecord> {
+    attempts
+        .iter()
+        .map(|attempt| {
+            let kind = match attempt.backend.profile {
+                ClarabelAttemptProfile::Standard => SolveAttemptKind::ClarabelStandard,
+                ClarabelAttemptProfile::Robust => SolveAttemptKind::ClarabelRobust,
+            };
+            SolveAttemptRecord::new(SolveAttemptRecordParts {
+                sequence: attempt.backend.sequence,
+                kind,
+                termination: match attempt.backend.termination {
+                    ClarabelTermination::Solved => SolveAttemptTermination::CandidateProduced,
+                    ClarabelTermination::AlmostSolved => {
+                        SolveAttemptTermination::ReducedAccuracyCandidateProduced
+                    }
+                    ClarabelTermination::PrimalInfeasible
+                    | ClarabelTermination::AlmostPrimalInfeasible => {
+                        SolveAttemptTermination::PrimalInfeasibilityCandidate
+                    }
+                    ClarabelTermination::DualInfeasible
+                    | ClarabelTermination::AlmostDualInfeasible => {
+                        SolveAttemptTermination::DualInfeasibilityCandidate
+                    }
+                    ClarabelTermination::IterationLimit | ClarabelTermination::TimeLimit => {
+                        SolveAttemptTermination::LimitReached
+                    }
+                    ClarabelTermination::InsufficientProgress => {
+                        SolveAttemptTermination::InsufficientProgress
+                    }
+                    ClarabelTermination::CallbackTerminated => {
+                        SolveAttemptTermination::CallbackTermination
+                    }
+                    ClarabelTermination::NumericalError | ClarabelTermination::Unsolved => {
+                        SolveAttemptTermination::NumericalError
+                    }
+                },
+                settings: BackendAttemptSettings::clarabel(
+                    kind,
+                    attempt.backend.settings.all_settings.clone(),
+                ),
+                scaling: ScalingSummary::new(
+                    "georbf-v1-block-aware-ruiz-power-of-two",
+                    attempt.georbf_scaling.rounds.len(),
+                    attempt.georbf_scaling.saturated_outside_target,
+                ),
+                refinement_steps: 0,
+                residual: None,
+                convex_residual: attempt.residuals.map(|residual| {
+                    PublicConvexResidualEvidence::new([
+                        residual.primal,
+                        residual.dual,
+                        residual.stationarity,
+                        residual.complementarity,
+                        residual.relative_gap,
+                    ])
+                }),
+                certificate_present: matches!(
+                    attempt.backend.termination,
+                    ClarabelTermination::PrimalInfeasible
+                        | ClarabelTermination::AlmostPrimalInfeasible
+                        | ClarabelTermination::DualInfeasible
+                        | ClarabelTermination::AlmostDualInfeasible
+                ),
+                failure_reason: attempt.failure_reason.map(public_qp_attempt_failure),
+                backend_fingerprint: public_qp_backend_fingerprint(&attempt.backend),
+            })
+        })
+        .collect()
+}
+
+fn public_qp_attempt_failure(reason: QpAttemptFailureReason) -> AttemptFailureEvidence {
+    let category = match reason {
+        QpAttemptFailureReason::NonFiniteCandidate => AttemptFailureCategory::NonFiniteCandidate,
+        QpAttemptFailureReason::BackendResidualExceeded => {
+            AttemptFailureCategory::ConvexResidualExceeded
+        }
+        QpAttemptFailureReason::ThreadContractViolation => {
+            AttemptFailureCategory::ThreadContractViolation
+        }
+        QpAttemptFailureReason::BackendFingerprintMismatch => {
+            AttemptFailureCategory::BackendFingerprintMismatch
+        }
+        QpAttemptFailureReason::UnverifiedTermination => {
+            AttemptFailureCategory::UnverifiedTermination
+        }
+        QpAttemptFailureReason::InvalidInfeasibilityCertificate => {
+            AttemptFailureCategory::InvalidInfeasibilityCertificate
+        }
+    };
+    AttemptFailureEvidence::new(category, None, None)
+}
+
+fn public_qp_backend_fingerprint(backend: &ClarabelAttemptEvidence) -> BackendFingerprint {
+    BackendFingerprint::new(BackendFingerprintParts {
+        schema_version: 1,
+        crate_name: backend.backend.crate_name,
+        crate_version: backend.backend.crate_version,
+        features: ["serde", "default-features-disabled"],
+        algorithm: "Clarabel-QP/qdldl",
+        target_arch: std::env::consts::ARCH,
+        target_os: std::env::consts::OS,
+        requested_threads: backend.requested_threads,
+        actual_threads: backend.actual_threads,
+    })
 }
 
 fn public_backend_fingerprint(backend: &InternalBackendFingerprint) -> BackendFingerprint {
@@ -3435,6 +4283,170 @@ fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
     }
 }
 
+fn diagnose_qp(failure: &CubicExecutionFailure) -> ProblemDiagnosis {
+    match failure {
+        CubicExecutionFailure::Equality(failure) => diagnose(failure),
+        CubicExecutionFailure::Capacity(_) => ProblemDiagnosis::CapacityExceeded,
+        CubicExecutionFailure::Representation(failure) => diagnose_representation(failure),
+        CubicExecutionFailure::BackendContract { .. } => ProblemDiagnosis::BackendContractViolation,
+        CubicExecutionFailure::RecoveryVerification { .. } => {
+            ProblemDiagnosis::RecoveryVerificationFailure
+        }
+        CubicExecutionFailure::ValidatedInfeasible { .. } => ProblemDiagnosis::InfeasibleProblem,
+        CubicExecutionFailure::Assembly(_)
+        | CubicExecutionFailure::BackendAdapter(_)
+        | CubicExecutionFailure::AttemptsExhausted { .. } => ProblemDiagnosis::NumericalFailure,
+    }
+}
+
+fn qp_failure_report(mut report: FitReport, failure: &CubicExecutionFailure) -> FitReport {
+    match failure {
+        CubicExecutionFailure::Equality(failure) => {
+            report = failure_report(report, failure, &[]);
+        }
+        CubicExecutionFailure::Capacity(evidence) => {
+            report.capacity = Some(public_capacity(evidence));
+        }
+        CubicExecutionFailure::Representation(_) | CubicExecutionFailure::Assembly(_) => {}
+        CubicExecutionFailure::BackendAdapter(_) => {
+            report.execution_failure = Some(AttemptFailureEvidence::new(
+                AttemptFailureCategory::BackendDecompositionFailure,
+                None,
+                None,
+            ));
+        }
+        CubicExecutionFailure::BackendContract {
+            attempts,
+            observed,
+            limit,
+        } => {
+            report.attempts = public_qp_attempts(attempts);
+            report.execution_failure = Some(
+                attempts
+                    .last()
+                    .and_then(|attempt| attempt.failure_reason)
+                    .map(|reason| match reason {
+                        QpAttemptFailureReason::BackendResidualExceeded => {
+                            AttemptFailureEvidence::new(
+                                AttemptFailureCategory::ConvexResidualExceeded,
+                                Some(*observed),
+                                Some(*limit),
+                            )
+                        }
+                        other => public_qp_attempt_failure(other),
+                    })
+                    .unwrap_or_else(|| {
+                        AttemptFailureEvidence::new(
+                            AttemptFailureCategory::ConvexResidualExceeded,
+                            Some(*observed),
+                            Some(*limit),
+                        )
+                    }),
+            );
+            if let Some(last) = attempts.last() {
+                report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
+            }
+        }
+        CubicExecutionFailure::AttemptsExhausted { attempts } => {
+            report.attempts = public_qp_attempts(attempts);
+            report.execution_failure = attempts
+                .last()
+                .and_then(|attempt| attempt.failure_reason)
+                .map(public_qp_attempt_failure);
+            if let Some(last) = attempts.last() {
+                report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
+            }
+        }
+        CubicExecutionFailure::RecoveryVerification { evidence, attempts } => {
+            report.recovery_verification = Some(public_qp_recovery_evidence(evidence));
+            report.attempts = public_qp_attempts(attempts);
+            if let Some(last) = attempts.last() {
+                report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
+            }
+        }
+        CubicExecutionFailure::ValidatedInfeasible { evidence, attempts } => {
+            report.infeasibility_certificate = Some(public_infeasibility_certificate(*evidence));
+            report.attempts = public_qp_attempts(attempts);
+            if let Some(last) = attempts.last() {
+                report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
+            }
+        }
+    }
+    report
+}
+
+fn public_qp_recovery_evidence(
+    evidence: &crate::cubic_execution::QpRecoveryFailureEvidence,
+) -> RecoveryVerificationEvidence {
+    use crate::cubic_equality::RecoveryVerificationFailureReason as PublicReason;
+    use crate::cubic_execution::QpRecoveryFailureReason as InternalReason;
+
+    let reasons = evidence
+        .reasons
+        .iter()
+        .map(|reason| match reason {
+            InternalReason::InvalidRecoveryMap => PublicReason::InvalidRecoveryMap,
+            InternalReason::ProvenanceMismatch => PublicReason::ProvenanceMismatch,
+            InternalReason::NonFiniteRecoveredQuantity => PublicReason::NonFiniteRecoveredQuantity,
+            InternalReason::SideConditionViolation => PublicReason::SideConditionViolation,
+            InternalReason::SideConditionRoundTripViolation => {
+                PublicReason::SideConditionRoundTripViolation
+            }
+            InternalReason::HardEqualityViolation => PublicReason::HardEqualityViolation,
+            InternalReason::AffineInequalityViolation => PublicReason::AffineInequalityViolation,
+            InternalReason::BackendSlackMismatch => PublicReason::BackendSlackMismatch,
+            InternalReason::ReductionRoundTripViolation => {
+                PublicReason::ReductionRoundTripViolation
+            }
+            InternalReason::ScalingRoundTripViolation => PublicReason::ScalingRoundTripViolation,
+            InternalReason::PolynomialRoundTripViolation => {
+                PublicReason::PolynomialRoundTripViolation
+            }
+            InternalReason::FieldCoefficientRoundTripViolation => {
+                PublicReason::FieldCoefficientRoundTripViolation
+            }
+            InternalReason::FieldEnergyRoundTripViolation => {
+                PublicReason::FieldEnergyRoundTripViolation
+            }
+            InternalReason::WhiteningRoundTripViolation => {
+                PublicReason::WhiteningRoundTripViolation
+            }
+            InternalReason::ObjectiveRoundTripViolation => {
+                PublicReason::ObjectiveRoundTripViolation
+            }
+        })
+        .collect();
+    RecoveryVerificationEvidence::new(RecoveryVerificationEvidenceParts {
+        reasons,
+        side_condition: None,
+        hard_residual_maxima: None,
+        polynomial_round_trip_error: None,
+        field_coefficient_round_trip_error: None,
+        field_energy_round_trip_error: None,
+        whitening_round_trip_error: None,
+        objective_round_trip_error: None,
+        tolerance_round_trip_error: None,
+        no_model_produced: evidence.no_model_produced,
+    })
+}
+
+fn public_infeasibility_certificate(
+    evidence: ValidatedInfeasibilityEvidence,
+) -> InfeasibilityCertificateEvidence {
+    InfeasibilityCertificateEvidence::new(
+        [
+            evidence.normalized_ray_norm,
+            evidence.stationarity_residual,
+            evidence.dual_cone_violation,
+            evidence.separation_margin,
+            evidence.residual_limit,
+            evidence.separation_limit,
+        ],
+        evidence.finite,
+        true,
+    )
+}
+
 fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis {
     match failure {
         RepresentationFailure::Capacity(_) => ProblemDiagnosis::CapacityExceeded,
@@ -3467,9 +4479,11 @@ fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
 mod tests {
     use super::*;
     use crate::cubic_equality::{RecoveryVerificationFailureReason, inject_kkt_failure_once};
+    use crate::cubic_execution::{QpFaultInjection, inject_qp_fault_once};
     use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel};
     use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
     use crate::observation::FieldValueObservation;
+    use crate::relation::{FieldValueBound, SharedLevelSetBuilder};
     use crate::{Point3, ProblemBuilder};
 
     fn injectable_snapshot() -> ProblemSnapshot {
@@ -3502,6 +4516,81 @@ mod tests {
         builder.build().unwrap()
     }
 
+    fn injectable_bounded_snapshot() -> ProblemSnapshot {
+        let snapshot = injectable_snapshot();
+        let mut builder = ProblemBuilder::new(
+            snapshot.input_coordinate_frame().clone(),
+            snapshot.field_unit().clone(),
+        );
+        for observation in &snapshot.inner.observations {
+            match observation {
+                ObservationInput::FieldValue(observation) => {
+                    builder.add(observation.clone()).unwrap();
+                }
+                _ => unreachable!("the injectable fixture contains only field values"),
+            }
+        }
+        builder
+            .add(
+                FieldValueBound::try_upper(
+                    SourceId::new("bound"),
+                    Point3::try_new(0.5, 0.5, 0.5).unwrap(),
+                    10.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    fn injectable_infeasible_bounded_snapshot() -> ProblemSnapshot {
+        let mut builder = ProblemBuilder::new(
+            InputCoordinateFrame::try_new(
+                ["x", "y", "z"],
+                Handedness::Right,
+                LengthUnitLabel::new("m"),
+            )
+            .unwrap(),
+            FieldUnitLabel::new("field"),
+        );
+        let mut level = SharedLevelSetBuilder::new(GroupId::new("one-level"));
+        for (source, support) in [
+            ("member/origin", [0.0, 0.0, 0.0]),
+            ("member/east", [1.0, 0.0, 0.0]),
+            ("member/north", [0.0, 1.0, 0.0]),
+            ("member/up", [0.0, 0.0, 1.0]),
+        ] {
+            level
+                .add_member(
+                    SourceId::new(source),
+                    Point3::try_new(support[0], support[1], support[2]).unwrap(),
+                )
+                .unwrap();
+        }
+        builder.add(level.build().unwrap()).unwrap();
+        builder
+            .add(
+                FieldValueBound::try_lower(
+                    SourceId::new("lower"),
+                    Point3::try_new(0.0, 0.0, 0.0).unwrap(),
+                    2.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                FieldValueBound::try_upper(
+                    SourceId::new("upper"),
+                    Point3::try_new(1.0, 0.0, 0.0).unwrap(),
+                    1.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder.build().unwrap()
+    }
+
     #[test]
     fn snapshot_capacity_counts_source_relations_as_linear_report_storage() {
         let lowering = EqualityLowering::new();
@@ -3528,9 +4617,12 @@ mod tests {
                 canonical_hard_equalities: 0,
                 canonical_soft_equalities: 0,
                 quadratic_objective_terms: 0,
+                linear_objective_terms: 0,
+                affine_inequality_constraints: 0,
                 center_coefficients: usize::MAX,
                 semantic_latents: 1,
                 solver_hard_equalities: 0,
+                auxiliary_variables: 0,
             })
             .is_none()
         );
@@ -3578,6 +4670,48 @@ mod tests {
         assert_eq!(side.components(), [1.0, 2.0, 3.0, 4.0]);
         assert_eq!(side.tolerances(), [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(side.round_trip_error(), 9.0e-12);
+    }
+
+    #[test]
+    fn public_bound_fit_rejects_recovery_corruption_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::RecoveryMap);
+        let failure = injectable_bounded_snapshot()
+            .fit()
+            .expect_err("a damaged QP recovery map must not publish a model");
+
+        assert_eq!(
+            failure.diagnosis(),
+            ProblemDiagnosis::RecoveryVerificationFailure
+        );
+        assert!(failure.report().canonical_acceptance().is_none());
+        let recovery = failure
+            .report()
+            .recovery_verification()
+            .expect("the public report retains QP recovery evidence");
+        assert_eq!(
+            recovery.reasons(),
+            &[RecoveryVerificationFailureReason::ReductionRoundTripViolation]
+        );
+        assert!(recovery.no_model_produced());
+        assert!(!failure.report().attempts().is_empty());
+    }
+
+    #[test]
+    fn invalid_farkas_candidates_remain_a_numerical_failure_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::InfeasibilityCertificate);
+        let failure = injectable_infeasible_bounded_snapshot()
+            .fit()
+            .expect_err("unvalidated backend rays must not prove infeasibility");
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+        assert!(failure.report().infeasibility_certificate().is_none());
+        assert_eq!(failure.report().attempts().len(), 2);
+        assert!(failure.report().attempts().iter().all(|attempt| {
+            attempt.certificate_present()
+                && attempt.failure_reason().is_some_and(|evidence| {
+                    evidence.category() == AttemptFailureCategory::InvalidInfeasibilityCertificate
+                })
+        }));
     }
 
     #[test]

@@ -1229,7 +1229,76 @@ pub(crate) struct CanonicalAffineInequality {
     latent_coefficients: Vec<SemanticLatentCoefficient>,
     provenance: UsageProvenance,
     dimension: FunctionalDimension,
-    upper_bound: f64,
+    sense: CanonicalInequalitySense,
+    bound: f64,
+    violation_channel: Option<CanonicalViolationChannel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalInequalitySense {
+    Lower,
+    Upper,
+}
+
+impl CanonicalInequalitySense {
+    pub(crate) fn upper_form_multiplier(self) -> f64 {
+        match self {
+            Self::Lower => -1.0,
+            Self::Upper => 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CanonicalViolationLoss {
+    QuadraticPenalty { weight: f64 },
+    LinearViolationPenalty { weight: f64 },
+}
+
+impl CanonicalViolationLoss {
+    pub(crate) fn weight(self) -> f64 {
+        match self {
+            Self::QuadraticPenalty { weight } | Self::LinearViolationPenalty { weight } => weight,
+        }
+    }
+
+    pub(crate) fn is_valid(self) -> bool {
+        self.weight().is_finite() && self.weight() > 0.0
+    }
+
+    pub(crate) fn objective_contribution(self, violation: f64) -> f64 {
+        match self {
+            Self::QuadraticPenalty { weight } => 0.5 * weight * violation.powi(2),
+            Self::LinearViolationPenalty { weight } => weight * violation,
+        }
+    }
+
+    pub(crate) fn residual_reference_scale(self) -> f64 {
+        match self {
+            Self::QuadraticPenalty { weight } => 1.0 / weight.sqrt(),
+            Self::LinearViolationPenalty { weight } => 1.0 / weight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalViolationChannel {
+    residual: ResidualId,
+    loss: CanonicalViolationLoss,
+}
+
+impl CanonicalViolationChannel {
+    pub(crate) fn new(residual: ResidualId, loss: CanonicalViolationLoss) -> Self {
+        Self { residual, loss }
+    }
+
+    pub(crate) fn residual(&self) -> &ResidualId {
+        &self.residual
+    }
+
+    pub(crate) fn loss(&self) -> CanonicalViolationLoss {
+        self.loss
+    }
 }
 
 impl CanonicalAffineInequality {
@@ -1240,12 +1309,35 @@ impl CanonicalAffineInequality {
         dimension: FunctionalDimension,
         upper_bound: f64,
     ) -> Self {
+        Self::new(
+            field,
+            latent_coefficients,
+            provenance,
+            dimension,
+            CanonicalInequalitySense::Upper,
+            upper_bound,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        field: Option<FunctionalUse>,
+        latent_coefficients: Vec<SemanticLatentCoefficient>,
+        provenance: UsageProvenance,
+        dimension: FunctionalDimension,
+        sense: CanonicalInequalitySense,
+        bound: f64,
+        violation_channel: Option<CanonicalViolationChannel>,
+    ) -> Self {
         Self {
             field,
             latent_coefficients,
             provenance,
             dimension,
-            upper_bound,
+            sense,
+            bound,
+            violation_channel,
         }
     }
 
@@ -1266,7 +1358,19 @@ impl CanonicalAffineInequality {
     }
 
     pub(crate) fn bound(&self) -> f64 {
-        self.upper_bound
+        self.bound
+    }
+
+    pub(crate) fn sense(&self) -> CanonicalInequalitySense {
+        self.sense
+    }
+
+    pub(crate) fn violation_channel(&self) -> Option<&CanonicalViolationChannel> {
+        self.violation_channel.as_ref()
+    }
+
+    pub(crate) fn upper_form_bound(&self) -> f64 {
+        self.sense.upper_form_multiplier() * self.bound
     }
 
     pub(crate) fn constant_shift_response(&self) -> f64 {
@@ -1298,6 +1402,13 @@ impl CanonicalAffineInequality {
                 .iter()
                 .map(|term| term.coefficient * latents[term.latent])
                 .sum::<f64>()
+    }
+
+    pub(crate) fn physical_margin(&self, value: f64) -> f64 {
+        match self.sense {
+            CanonicalInequalitySense::Lower => value - self.bound,
+            CanonicalInequalitySense::Upper => self.bound - value,
+        }
     }
 }
 
@@ -1950,6 +2061,14 @@ pub enum RecoveryVerificationFailureReason {
     SideConditionRoundTripViolation,
     /// At least one recovered hard equality exceeded physical tolerance.
     HardEqualityViolation,
+    /// At least one recovered affine inequality exceeded physical tolerance.
+    AffineInequalityViolation,
+    /// A recovered inequality slack disagreed with the backend equation.
+    BackendSlackMismatch,
+    /// The reduced/full field map exceeded its round-trip limit.
+    ReductionRoundTripViolation,
+    /// The QP scaling map exceeded its round-trip limit.
+    ScalingRoundTripViolation,
     /// Polynomial recovery exceeded its round-trip limit.
     PolynomialRoundTripViolation,
     /// Field-coefficient recovery exceeded its round-trip limit.
@@ -3010,7 +3129,7 @@ pub(crate) fn canonical_gauge_offset(
                 .affine_inequalities
                 .iter()
                 .filter(|inequality| inequality.dimension == dimension)
-                .map(|inequality| (inequality.constant_shift_response(), inequality.upper_bound)),
+                .map(|inequality| (inequality.constant_shift_response(), inequality.bound)),
         )
         .collect::<Vec<_>>();
     let response_scale = response_targets
@@ -3087,6 +3206,11 @@ pub(crate) fn canonical_characteristic_field_scale(
                 reference_scale
             }
         })
+        .chain(problem.affine_inequalities.iter().filter_map(|relation| {
+            relation
+                .violation_channel()
+                .map(|channel| channel.loss().residual_reference_scale())
+        }))
         .fold(0.0_f64, f64::max);
     energy_scale.max(relation_scale).max(soft_loss_scale)
 }

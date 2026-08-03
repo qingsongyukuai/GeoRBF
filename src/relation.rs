@@ -6,7 +6,388 @@ use std::fmt;
 
 use crate::functional::{GroupId, SourceId};
 use crate::geometry::Point3;
+use crate::observation::QuadraticPenalty;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
+
+/// A finite positive weight for one nonnegative scalar violation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearViolationPenalty {
+    weight: f64,
+}
+
+impl LinearViolationPenalty {
+    /// Creates a finite, strictly positive linear violation penalty.
+    pub fn try_new(weight: f64) -> Result<Self, LinearViolationPenaltyError> {
+        if !weight.is_finite() {
+            return Err(LinearViolationPenaltyError::NotFinite);
+        }
+        if weight <= 0.0 {
+            return Err(LinearViolationPenaltyError::NotPositive);
+        }
+        Ok(Self { weight })
+    }
+
+    /// Returns the weight in inverse violation units.
+    pub fn weight(self) -> f64 {
+        self.weight
+    }
+}
+
+/// A rejected linear violation penalty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinearViolationPenaltyError {
+    /// The weight was NaN or infinite.
+    NotFinite,
+    /// The weight was zero or negative.
+    NotPositive,
+}
+
+impl fmt::Display for LinearViolationPenaltyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => formatter.write_str("linear violation penalty is not finite"),
+            Self::NotPositive => formatter.write_str("linear violation penalty is not positive"),
+        }
+    }
+}
+
+impl Error for LinearViolationPenaltyError {}
+
+/// One legal positive loss applied to a nonnegative field-value violation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum FieldValueViolationPenalty {
+    /// A half-weighted squared loss, `1/2 * weight * violation^2`.
+    Quadratic(QuadraticPenalty),
+    /// A weighted absolute one-sided loss, `weight * violation`.
+    Linear(LinearViolationPenalty),
+}
+
+impl From<QuadraticPenalty> for FieldValueViolationPenalty {
+    fn from(penalty: QuadraticPenalty) -> Self {
+        Self::Quadratic(penalty)
+    }
+}
+
+impl From<LinearViolationPenalty> for FieldValueViolationPenalty {
+    fn from(penalty: LinearViolationPenalty) -> Self {
+        Self::Linear(penalty)
+    }
+}
+
+/// A checked lower, upper, or interval bound on the field at one finite location.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldValueBound {
+    source_id: SourceId,
+    location: Point3,
+    lower: Option<FieldValueBoundSide>,
+    upper: Option<FieldValueBoundSide>,
+}
+
+impl FieldValueBound {
+    /// Creates one hard finite lower bound.
+    pub fn try_lower(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            Some((lower, FieldValueBoundConfiguration::Hard)),
+            None,
+        )
+    }
+
+    /// Creates one hard finite upper bound.
+    pub fn try_upper(
+        source_id: SourceId,
+        location: Point3,
+        upper: f64,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            None,
+            Some((upper, FieldValueBoundConfiguration::Hard)),
+        )
+    }
+
+    /// Creates one hard closed finite interval.
+    pub fn try_interval(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+        upper: f64,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            Some((lower, FieldValueBoundConfiguration::Hard)),
+            Some((upper, FieldValueBoundConfiguration::Hard)),
+        )
+    }
+
+    /// Creates one soft lower bound with a quadratic violation penalty.
+    pub fn try_lower_with_quadratic_penalty(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+        penalty: QuadraticPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            Some((
+                lower,
+                FieldValueBoundConfiguration::QuadraticPenalty(penalty),
+            )),
+            None,
+        )
+    }
+
+    /// Creates one soft upper bound with a quadratic violation penalty.
+    pub fn try_upper_with_quadratic_penalty(
+        source_id: SourceId,
+        location: Point3,
+        upper: f64,
+        penalty: QuadraticPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            None,
+            Some((
+                upper,
+                FieldValueBoundConfiguration::QuadraticPenalty(penalty),
+            )),
+        )
+    }
+
+    /// Creates a soft interval with independent lower and upper quadratic penalties.
+    pub fn try_interval_with_quadratic_penalties(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+        lower_penalty: QuadraticPenalty,
+        upper: f64,
+        upper_penalty: QuadraticPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            Some((
+                lower,
+                FieldValueBoundConfiguration::QuadraticPenalty(lower_penalty),
+            )),
+            Some((
+                upper,
+                FieldValueBoundConfiguration::QuadraticPenalty(upper_penalty),
+            )),
+        )
+    }
+
+    /// Creates one soft lower bound with a linear violation penalty.
+    pub fn try_lower_with_linear_violation_penalty(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+        penalty: LinearViolationPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            Some((
+                lower,
+                FieldValueBoundConfiguration::LinearViolationPenalty(penalty),
+            )),
+            None,
+        )
+    }
+
+    /// Creates one soft upper bound with a linear violation penalty.
+    pub fn try_upper_with_linear_violation_penalty(
+        source_id: SourceId,
+        location: Point3,
+        upper: f64,
+        penalty: LinearViolationPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            None,
+            Some((
+                upper,
+                FieldValueBoundConfiguration::LinearViolationPenalty(penalty),
+            )),
+        )
+    }
+
+    /// Creates a soft interval with independent lower and upper linear penalties.
+    pub fn try_interval_with_linear_violation_penalties(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+        lower_penalty: LinearViolationPenalty,
+        upper: f64,
+        upper_penalty: LinearViolationPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        Self::new(
+            source_id,
+            location,
+            Some((
+                lower,
+                FieldValueBoundConfiguration::LinearViolationPenalty(lower_penalty),
+            )),
+            Some((
+                upper,
+                FieldValueBoundConfiguration::LinearViolationPenalty(upper_penalty),
+            )),
+        )
+    }
+
+    /// Creates a soft interval whose two sides independently select a legal loss.
+    pub fn try_interval_with_violation_penalties(
+        source_id: SourceId,
+        location: Point3,
+        lower: f64,
+        lower_penalty: FieldValueViolationPenalty,
+        upper: f64,
+        upper_penalty: FieldValueViolationPenalty,
+    ) -> Result<Self, FieldValueBoundError> {
+        let configuration = |penalty| match penalty {
+            FieldValueViolationPenalty::Quadratic(penalty) => {
+                FieldValueBoundConfiguration::QuadraticPenalty(penalty)
+            }
+            FieldValueViolationPenalty::Linear(penalty) => {
+                FieldValueBoundConfiguration::LinearViolationPenalty(penalty)
+            }
+        };
+        Self::new(
+            source_id,
+            location,
+            Some((lower, configuration(lower_penalty))),
+            Some((upper, configuration(upper_penalty))),
+        )
+    }
+
+    fn new(
+        source_id: SourceId,
+        location: Point3,
+        lower: Option<(f64, FieldValueBoundConfiguration)>,
+        upper: Option<(f64, FieldValueBoundConfiguration)>,
+    ) -> Result<Self, FieldValueBoundError> {
+        if lower
+            .iter()
+            .chain(&upper)
+            .any(|(bound, _)| !bound.is_finite())
+        {
+            return Err(FieldValueBoundError::NonFiniteBound);
+        }
+        if let (Some((lower, _)), Some((upper, _))) = (lower, upper) {
+            if lower > upper {
+                return Err(FieldValueBoundError::EmptyInterval { lower, upper });
+            }
+        }
+        let side =
+            |(bound, configuration): (f64, FieldValueBoundConfiguration)| FieldValueBoundSide {
+                bound: canonical_zero(bound),
+                configuration,
+            };
+        Ok(Self {
+            source_id,
+            location,
+            lower: lower.map(side),
+            upper: upper.map(side),
+        })
+    }
+
+    /// Returns the stable caller-owned identity of this relation.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the finite support location in the declared input frame.
+    pub fn location(&self) -> Point3 {
+        self.location
+    }
+
+    /// Returns the lower field-value bound when present.
+    pub fn lower_bound(&self) -> Option<f64> {
+        self.lower.as_ref().map(|side| side.bound)
+    }
+
+    /// Returns the upper field-value bound when present.
+    pub fn upper_bound(&self) -> Option<f64> {
+        self.upper.as_ref().map(|side| side.bound)
+    }
+
+    /// Reports whether this relation owns explicit violation channels.
+    pub fn is_soft(&self) -> bool {
+        self.lower
+            .iter()
+            .chain(&self.upper)
+            .any(|side| side.configuration.is_soft())
+    }
+
+    pub(crate) fn lower(&self) -> Option<&FieldValueBoundSide> {
+        self.lower.as_ref()
+    }
+
+    pub(crate) fn upper(&self) -> Option<&FieldValueBoundSide> {
+        self.upper.as_ref()
+    }
+}
+
+fn canonical_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
+/// A rejected Field Value Bound.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum FieldValueBoundError {
+    /// A lower or upper bound was NaN or infinite.
+    NonFiniteBound,
+    /// A closed interval had its lower endpoint above its upper endpoint.
+    EmptyInterval { lower: f64, upper: f64 },
+}
+
+impl fmt::Display for FieldValueBoundError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFiniteBound => formatter.write_str("field-value bound is not finite"),
+            Self::EmptyInterval { lower, upper } => {
+                write!(
+                    formatter,
+                    "field-value interval [{lower}, {upper}] is empty"
+                )
+            }
+        }
+    }
+}
+
+impl Error for FieldValueBoundError {}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FieldValueBoundSide {
+    pub(crate) bound: f64,
+    pub(crate) configuration: FieldValueBoundConfiguration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FieldValueBoundConfiguration {
+    Hard,
+    QuadraticPenalty(QuadraticPenalty),
+    LinearViolationPenalty(LinearViolationPenalty),
+}
+
+impl FieldValueBoundConfiguration {
+    pub(crate) fn is_soft(self) -> bool {
+        !matches!(self, Self::Hard)
+    }
+}
 
 /// One immutable member of a shared field-value group.
 #[derive(Debug, Clone, PartialEq)]
@@ -334,5 +715,13 @@ impl private::Sealed for AdditiveFieldGauge {}
 impl ProblemInput for AdditiveFieldGauge {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
         builder.add_additive_field_gauge(self)
+    }
+}
+
+impl private::Sealed for FieldValueBound {}
+
+impl ProblemInput for FieldValueBound {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_field_value_bound(self)
     }
 }

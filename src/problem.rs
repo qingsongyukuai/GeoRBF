@@ -12,7 +12,9 @@ use crate::geometry::{FieldUnitLabel, GlobalAnisotropyMetric, InputCoordinateFra
 use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::numerical::NumericalPolicyId;
 use crate::observation::{CovarianceGroup, ObservationInput};
-use crate::relation::{AdditiveFieldGauge, AdditiveFieldGaugeReference, SharedLevelSetInput};
+use crate::relation::{
+    AdditiveFieldGauge, AdditiveFieldGaugeReference, FieldValueBound, SharedLevelSetInput,
+};
 
 /// Resource request for a synchronous fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,7 @@ pub struct ProblemBuilder {
     covariance_groups: Vec<CovarianceGroup>,
     shared_level_sets: Vec<SharedLevelSetInput>,
     additive_field_gauges: Vec<AdditiveFieldGauge>,
+    field_value_bounds: Vec<FieldValueBound>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
     shared_level_group_ids: BTreeSet<GroupId>,
@@ -105,6 +108,7 @@ impl ProblemBuilder {
             covariance_groups: Vec::new(),
             shared_level_sets: Vec::new(),
             additive_field_gauges: Vec::new(),
+            field_value_bounds: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
             shared_level_group_ids: BTreeSet::new(),
@@ -155,6 +159,7 @@ impl ProblemBuilder {
             errors.push(BuildError::NoObservations);
         }
         let has_soft_relation = !self.covariance_groups.is_empty()
+            || self.field_value_bounds.iter().any(FieldValueBound::is_soft)
             || self
                 .observations
                 .iter()
@@ -211,6 +216,8 @@ impl ProblemBuilder {
             .sort_by(|left, right| left.group_id().cmp(right.group_id()));
         self.additive_field_gauges
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.field_value_bounds
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
             input_coordinate_frame: self.input_coordinate_frame,
             field_unit: self.field_unit,
@@ -218,6 +225,7 @@ impl ProblemBuilder {
             covariance_groups: self.covariance_groups,
             shared_level_sets: self.shared_level_sets,
             additive_field_gauges: self.additive_field_gauges,
+            field_value_bounds: self.field_value_bounds,
             source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
             field_energy_normalization: self
@@ -312,6 +320,16 @@ impl ProblemBuilder {
         self.additive_field_gauges.push(gauge);
         Ok(())
     }
+
+    pub(crate) fn add_field_value_bound(&mut self, bound: FieldValueBound) -> Result<(), AddError> {
+        let source_id = bound.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.field_value_bounds.push(bound);
+        Ok(())
+    }
 }
 
 /// An owning, immutable problem snapshot.
@@ -384,6 +402,11 @@ impl ProblemSnapshot {
         self.inner.covariance_groups.len()
     }
 
+    /// Returns the number of caller-owned Field Value Bound relations.
+    pub fn field_value_bound_count(&self) -> usize {
+        self.inner.field_value_bounds.len()
+    }
+
     /// Returns the number of independently identified caller sources.
     pub fn source_count(&self) -> usize {
         self.inner.source_count
@@ -398,6 +421,7 @@ pub(crate) struct ProblemData {
     pub(crate) covariance_groups: Vec<CovarianceGroup>,
     pub(crate) shared_level_sets: Vec<SharedLevelSetInput>,
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
+    pub(crate) field_value_bounds: Vec<FieldValueBound>,
     pub(crate) source_count: usize,
     pub(crate) resolved_kernel: KernelConfig,
     pub(crate) field_energy_normalization: FieldEnergyNormalization,
