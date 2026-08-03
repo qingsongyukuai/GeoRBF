@@ -10,8 +10,9 @@ use crate::cubic_equality::{
     CubicEqualityFailure, CubicEqualitySolution, CubicRepresentation, FunctionalViolationEnvelope,
     POLYNOMIAL_DIMENSION, PhysicalSideConditionEvidence, RecoveredCubicField,
     RecoveredHardEquality, RecoveredSemanticLatent, RecoveredSoftEquality, RecoveredSoftObjective,
-    RepresentationFailure, SemanticLatentCoefficient, canonical_fitting_uses,
-    canonical_gauge_offset, dense_matrix_vector_product, dot_product, relative_slice_error,
+    RepresentationFailure, SemanticLatentCoefficient, canonical_characteristic_field_scale,
+    canonical_fitting_uses, canonical_gauge_offset, dense_matrix_vector_product, dot_product,
+    relative_slice_error,
 };
 use crate::functional::{
     DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, GroupId, ResidualId,
@@ -1850,58 +1851,7 @@ fn canonical_field_scale(
     field_energy: f64,
 ) -> f64 {
     let length = representation.solve_coordinate_transform().length();
-    let native_energy = field_energy / problem.field_energy_normalization.factor();
-    let energy_scale = (native_energy.abs() * length.powi(3)).sqrt();
-    let relation_scale = problem
-        .equalities
-        .iter()
-        .map(|relation| {
-            let gauge = canonical_gauge_offset(problem, relation.dimension());
-            let scale = (relation.target() - relation.constant_shift_response() * gauge).abs();
-            if relation.dimension() == FunctionalDimension::FieldValuePerLength {
-                length * scale
-            } else {
-                scale
-            }
-        })
-        .chain(problem.soft_equalities.iter().map(|relation| {
-            let gauge = canonical_gauge_offset(problem, relation.dimension());
-            let scale = (relation.target() - relation.constant_shift_response() * gauge).abs();
-            if relation.dimension() == FunctionalDimension::FieldValuePerLength {
-                length * scale
-            } else {
-                scale
-            }
-        }))
-        .chain(problem.affine_inequalities.iter().map(|relation| {
-            let gauge = canonical_gauge_offset(problem, relation.dimension());
-            let scale = (relation.bound() - relation.constant_shift_response() * gauge).abs();
-            if relation.dimension() == FunctionalDimension::FieldValuePerLength {
-                length * scale
-            } else {
-                scale
-            }
-        }))
-        .fold(0.0_f64, f64::max);
-    let soft_loss_scale = problem
-        .soft_objectives
-        .iter()
-        .map(|objective| {
-            let reference_scale = objective.loss().residual_reference_scale();
-            let is_derivative = objective.residuals().first().is_some_and(|residual| {
-                problem.soft_equalities.iter().any(|relation| {
-                    relation.provenance().residual() == residual
-                        && relation.dimension() == FunctionalDimension::FieldValuePerLength
-                })
-            });
-            if is_derivative {
-                length * reference_scale
-            } else {
-                reference_scale
-            }
-        })
-        .fold(0.0_f64, f64::max);
-    energy_scale.max(relation_scale).max(soft_loss_scale)
+    canonical_characteristic_field_scale(problem, length, field_energy)
 }
 
 fn relation_tolerance(

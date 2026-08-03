@@ -2899,62 +2899,11 @@ fn canonical_relation_tolerances(
     let field_value_gauge_offset = canonical_gauge_offset(problem, FunctionalDimension::FieldValue);
     let derivative_gauge_offset =
         canonical_gauge_offset(problem, FunctionalDimension::FieldValuePerLength);
-    let value_implied_field_scale = problem
-        .equalities
-        .iter()
-        .filter(|equality| equality.dimension == FunctionalDimension::FieldValue)
-        .map(|equality| {
-            (equality.target - equality.constant_shift_response() * field_value_gauge_offset).abs()
-        })
-        .chain(
-            problem
-                .soft_equalities
-                .iter()
-                .filter(|equality| equality.dimension == FunctionalDimension::FieldValue)
-                .map(|equality| {
-                    (equality.target
-                        - equality.constant_shift_response() * field_value_gauge_offset)
-                        .abs()
-                }),
-        )
-        .fold(0.0_f64, f64::max);
-    let derivative_implied_field_scale = representation.coordinates.length()
-        * problem
-            .equalities
-            .iter()
-            .filter(|equality| equality.dimension == FunctionalDimension::FieldValuePerLength)
-            .map(|equality| equality.target.abs())
-            .chain(
-                problem
-                    .soft_equalities
-                    .iter()
-                    .filter(|equality| {
-                        equality.dimension == FunctionalDimension::FieldValuePerLength
-                    })
-                    .map(|equality| equality.target.abs()),
-            )
-            .fold(0.0_f64, f64::max);
-    let mut soft_offset = 0;
-    let soft_loss_implied_field_scale = problem
-        .soft_objectives
-        .iter()
-        .map(|objective| {
-            let relation = &problem.soft_equalities[soft_offset];
-            soft_offset += objective.residuals.len();
-            match relation.dimension {
-                FunctionalDimension::FieldValue => objective.loss.residual_reference_scale(),
-                FunctionalDimension::FieldValuePerLength => {
-                    representation.coordinates.length() * objective.loss.residual_reference_scale()
-                }
-            }
-        })
-        .fold(0.0_f64, f64::max);
-    let native_field_energy = field_energy / problem.field_energy_normalization.factor();
-    let field_scale = (native_field_energy.abs() * representation.coordinates.length().powi(3))
-        .sqrt()
-        .max(value_implied_field_scale)
-        .max(derivative_implied_field_scale)
-        .max(soft_loss_implied_field_scale);
+    let field_scale = canonical_characteristic_field_scale(
+        problem,
+        representation.coordinates.length(),
+        field_energy,
+    );
     let mut standard_by_kkt_row = vec![0.0; backend.scaling.cumulative_exponents.len()];
     let mut tolerance_plans = problem
         .equalities
@@ -3084,6 +3033,62 @@ pub(crate) fn canonical_gauge_offset(
         .map(|(response, _)| (response / response_scale).powi(2))
         .sum::<f64>();
     target_scale / response_scale * numerator / denominator
+}
+
+pub(crate) fn canonical_characteristic_field_scale(
+    problem: &CubicCanonicalProblem,
+    length: f64,
+    field_energy: f64,
+) -> f64 {
+    let native_energy = field_energy / problem.field_energy_normalization.factor();
+    let energy_scale = (native_energy.abs() * length.powi(3)).sqrt();
+    let relation_scale = problem
+        .equalities
+        .iter()
+        .map(|relation| {
+            let gauge = canonical_gauge_offset(problem, relation.dimension());
+            let scale = (relation.target() - relation.constant_shift_response() * gauge).abs();
+            match relation.dimension() {
+                FunctionalDimension::FieldValue => scale,
+                FunctionalDimension::FieldValuePerLength => length * scale,
+            }
+        })
+        .chain(problem.soft_equalities.iter().map(|relation| {
+            let gauge = canonical_gauge_offset(problem, relation.dimension());
+            let scale = (relation.target() - relation.constant_shift_response() * gauge).abs();
+            match relation.dimension() {
+                FunctionalDimension::FieldValue => scale,
+                FunctionalDimension::FieldValuePerLength => length * scale,
+            }
+        }))
+        .chain(problem.affine_inequalities.iter().map(|relation| {
+            let gauge = canonical_gauge_offset(problem, relation.dimension());
+            let scale = (relation.bound() - relation.constant_shift_response() * gauge).abs();
+            match relation.dimension() {
+                FunctionalDimension::FieldValue => scale,
+                FunctionalDimension::FieldValuePerLength => length * scale,
+            }
+        }))
+        .fold(0.0_f64, f64::max);
+    let soft_loss_scale = problem
+        .soft_objectives
+        .iter()
+        .map(|objective| {
+            let reference_scale = objective.loss().residual_reference_scale();
+            let is_derivative = objective.residuals().first().is_some_and(|residual| {
+                problem.soft_equalities.iter().any(|relation| {
+                    relation.provenance().residual() == residual
+                        && relation.dimension() == FunctionalDimension::FieldValuePerLength
+                })
+            });
+            if is_derivative {
+                length * reference_scale
+            } else {
+                reference_scale
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    energy_scale.max(relation_scale).max(soft_loss_scale)
 }
 
 pub(crate) fn relative_slice_error(actual: &[f64], expected: &[f64]) -> f64 {
