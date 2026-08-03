@@ -44,6 +44,31 @@ impl Vector3 {
     }
 }
 
+pub(crate) fn normalize_direction(direction: Vector3) -> Option<Vector3> {
+    let components = direction.components();
+    let scale = components
+        .iter()
+        .map(|component| component.abs())
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return None;
+    }
+    let scaled = components.map(|component| component / scale);
+    let norm = scaled
+        .into_iter()
+        .map(|component| component * component)
+        .sum::<f64>()
+        .sqrt();
+    let unit = scaled.map(|component| {
+        let component = component / norm;
+        if component == 0.0 { 0.0 } else { component }
+    });
+    Some(
+        Vector3::try_new(unit[0], unit[1], unit[2])
+            .expect("normalizing a finite nonzero vector produces finite components"),
+    )
+}
+
 /// Handedness of the declared ordered orthogonal basis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Handedness {

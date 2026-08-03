@@ -1,11 +1,11 @@
-//! Shared level sets, geological horizons, and explicit additive field gauges.
+//! Shared levels, gauges, and checked scalar affine field relations.
 
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
 use crate::functional::{GroupId, SourceId};
-use crate::geometry::Point3;
+use crate::geometry::{Point3, Vector3, normalize_direction};
 use crate::observation::QuadraticPenalty;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
 
@@ -64,6 +64,28 @@ pub enum FieldValueViolationPenalty {
     Linear(LinearViolationPenalty),
 }
 
+/// One legal positive loss applied to a nonnegative derivative violation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum DirectionalDerivativeViolationPenalty {
+    /// A half-weighted squared loss, `1/2 * weight * violation^2`.
+    Quadratic(QuadraticPenalty),
+    /// A weighted absolute one-sided loss, `weight * violation`.
+    Linear(LinearViolationPenalty),
+}
+
+impl From<QuadraticPenalty> for DirectionalDerivativeViolationPenalty {
+    fn from(penalty: QuadraticPenalty) -> Self {
+        Self::Quadratic(penalty)
+    }
+}
+
+impl From<LinearViolationPenalty> for DirectionalDerivativeViolationPenalty {
+    fn from(penalty: LinearViolationPenalty) -> Self {
+        Self::Linear(penalty)
+    }
+}
+
 impl From<QuadraticPenalty> for FieldValueViolationPenalty {
     fn from(penalty: QuadraticPenalty) -> Self {
         Self::Quadratic(penalty)
@@ -81,8 +103,8 @@ impl From<LinearViolationPenalty> for FieldValueViolationPenalty {
 pub struct FieldValueBound {
     source_id: SourceId,
     location: Point3,
-    lower: Option<FieldValueBoundSide>,
-    upper: Option<FieldValueBoundSide>,
+    lower: Option<AffineBoundSide>,
+    upper: Option<AffineBoundSide>,
 }
 
 impl FieldValueBound {
@@ -95,7 +117,7 @@ impl FieldValueBound {
         Self::new(
             source_id,
             location,
-            Some((lower, FieldValueBoundConfiguration::Hard)),
+            Some((lower, AffineBoundConfiguration::Hard)),
             None,
         )
     }
@@ -110,7 +132,7 @@ impl FieldValueBound {
             source_id,
             location,
             None,
-            Some((upper, FieldValueBoundConfiguration::Hard)),
+            Some((upper, AffineBoundConfiguration::Hard)),
         )
     }
 
@@ -124,8 +146,8 @@ impl FieldValueBound {
         Self::new(
             source_id,
             location,
-            Some((lower, FieldValueBoundConfiguration::Hard)),
-            Some((upper, FieldValueBoundConfiguration::Hard)),
+            Some((lower, AffineBoundConfiguration::Hard)),
+            Some((upper, AffineBoundConfiguration::Hard)),
         )
     }
 
@@ -139,10 +161,7 @@ impl FieldValueBound {
         Self::new(
             source_id,
             location,
-            Some((
-                lower,
-                FieldValueBoundConfiguration::QuadraticPenalty(penalty),
-            )),
+            Some((lower, AffineBoundConfiguration::QuadraticPenalty(penalty))),
             None,
         )
     }
@@ -158,10 +177,7 @@ impl FieldValueBound {
             source_id,
             location,
             None,
-            Some((
-                upper,
-                FieldValueBoundConfiguration::QuadraticPenalty(penalty),
-            )),
+            Some((upper, AffineBoundConfiguration::QuadraticPenalty(penalty))),
         )
     }
 
@@ -179,11 +195,11 @@ impl FieldValueBound {
             location,
             Some((
                 lower,
-                FieldValueBoundConfiguration::QuadraticPenalty(lower_penalty),
+                AffineBoundConfiguration::QuadraticPenalty(lower_penalty),
             )),
             Some((
                 upper,
-                FieldValueBoundConfiguration::QuadraticPenalty(upper_penalty),
+                AffineBoundConfiguration::QuadraticPenalty(upper_penalty),
             )),
         )
     }
@@ -200,7 +216,7 @@ impl FieldValueBound {
             location,
             Some((
                 lower,
-                FieldValueBoundConfiguration::LinearViolationPenalty(penalty),
+                AffineBoundConfiguration::LinearViolationPenalty(penalty),
             )),
             None,
         )
@@ -219,7 +235,7 @@ impl FieldValueBound {
             None,
             Some((
                 upper,
-                FieldValueBoundConfiguration::LinearViolationPenalty(penalty),
+                AffineBoundConfiguration::LinearViolationPenalty(penalty),
             )),
         )
     }
@@ -238,11 +254,11 @@ impl FieldValueBound {
             location,
             Some((
                 lower,
-                FieldValueBoundConfiguration::LinearViolationPenalty(lower_penalty),
+                AffineBoundConfiguration::LinearViolationPenalty(lower_penalty),
             )),
             Some((
                 upper,
-                FieldValueBoundConfiguration::LinearViolationPenalty(upper_penalty),
+                AffineBoundConfiguration::LinearViolationPenalty(upper_penalty),
             )),
         )
     }
@@ -258,10 +274,10 @@ impl FieldValueBound {
     ) -> Result<Self, FieldValueBoundError> {
         let configuration = |penalty| match penalty {
             FieldValueViolationPenalty::Quadratic(penalty) => {
-                FieldValueBoundConfiguration::QuadraticPenalty(penalty)
+                AffineBoundConfiguration::QuadraticPenalty(penalty)
             }
             FieldValueViolationPenalty::Linear(penalty) => {
-                FieldValueBoundConfiguration::LinearViolationPenalty(penalty)
+                AffineBoundConfiguration::LinearViolationPenalty(penalty)
             }
         };
         Self::new(
@@ -275,8 +291,8 @@ impl FieldValueBound {
     fn new(
         source_id: SourceId,
         location: Point3,
-        lower: Option<(f64, FieldValueBoundConfiguration)>,
-        upper: Option<(f64, FieldValueBoundConfiguration)>,
+        lower: Option<(f64, AffineBoundConfiguration)>,
+        upper: Option<(f64, AffineBoundConfiguration)>,
     ) -> Result<Self, FieldValueBoundError> {
         if lower
             .iter()
@@ -290,11 +306,10 @@ impl FieldValueBound {
                 return Err(FieldValueBoundError::EmptyInterval { lower, upper });
             }
         }
-        let side =
-            |(bound, configuration): (f64, FieldValueBoundConfiguration)| FieldValueBoundSide {
-                bound: canonical_zero(bound),
-                configuration,
-            };
+        let side = |(bound, configuration): (f64, AffineBoundConfiguration)| AffineBoundSide {
+            bound: canonical_zero(bound),
+            configuration,
+        };
         Ok(Self {
             source_id,
             location,
@@ -331,11 +346,11 @@ impl FieldValueBound {
             .any(|side| side.configuration.is_soft())
     }
 
-    pub(crate) fn lower(&self) -> Option<&FieldValueBoundSide> {
+    pub(crate) fn lower(&self) -> Option<&AffineBoundSide> {
         self.lower.as_ref()
     }
 
-    pub(crate) fn upper(&self) -> Option<&FieldValueBoundSide> {
+    pub(crate) fn upper(&self) -> Option<&AffineBoundSide> {
         self.upper.as_ref()
     }
 }
@@ -370,20 +385,344 @@ impl fmt::Display for FieldValueBoundError {
 
 impl Error for FieldValueBoundError {}
 
+/// A checked lower, upper, or interval bound on one directional derivative.
+///
+/// The derivative is taken along the stored oriented unit direction in the
+/// problem's physical input coordinates. Bounds therefore use field-value per
+/// length units; they are not angular or numerical tolerances and do not imply
+/// a complete gradient magnitude.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectionalDerivativeInterval {
+    source_id: SourceId,
+    location: Point3,
+    direction: Vector3,
+    lower: Option<AffineBoundSide>,
+    upper: Option<AffineBoundSide>,
+}
+
+impl DirectionalDerivativeInterval {
+    /// Creates one hard finite lower directional-derivative bound.
+    pub fn try_lower(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((lower, AffineBoundConfiguration::Hard)),
+            None,
+        )
+    }
+
+    /// Creates one hard finite upper directional-derivative bound.
+    pub fn try_upper(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        upper: f64,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            None,
+            Some((upper, AffineBoundConfiguration::Hard)),
+        )
+    }
+
+    /// Creates one hard closed finite directional-derivative interval.
+    pub fn try_interval(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+        upper: f64,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((lower, AffineBoundConfiguration::Hard)),
+            Some((upper, AffineBoundConfiguration::Hard)),
+        )
+    }
+
+    /// Creates one soft lower bound with a quadratic violation penalty.
+    pub fn try_lower_with_quadratic_penalty(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+        penalty: QuadraticPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((lower, AffineBoundConfiguration::QuadraticPenalty(penalty))),
+            None,
+        )
+    }
+
+    /// Creates one soft upper bound with a quadratic violation penalty.
+    pub fn try_upper_with_quadratic_penalty(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        upper: f64,
+        penalty: QuadraticPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            None,
+            Some((upper, AffineBoundConfiguration::QuadraticPenalty(penalty))),
+        )
+    }
+
+    /// Creates a soft interval with independent quadratic penalties per side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_interval_with_quadratic_penalties(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+        lower_penalty: QuadraticPenalty,
+        upper: f64,
+        upper_penalty: QuadraticPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((
+                lower,
+                AffineBoundConfiguration::QuadraticPenalty(lower_penalty),
+            )),
+            Some((
+                upper,
+                AffineBoundConfiguration::QuadraticPenalty(upper_penalty),
+            )),
+        )
+    }
+
+    /// Creates one soft lower bound with a linear violation penalty.
+    pub fn try_lower_with_linear_violation_penalty(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+        penalty: LinearViolationPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((
+                lower,
+                AffineBoundConfiguration::LinearViolationPenalty(penalty),
+            )),
+            None,
+        )
+    }
+
+    /// Creates one soft upper bound with a linear violation penalty.
+    pub fn try_upper_with_linear_violation_penalty(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        upper: f64,
+        penalty: LinearViolationPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            None,
+            Some((
+                upper,
+                AffineBoundConfiguration::LinearViolationPenalty(penalty),
+            )),
+        )
+    }
+
+    /// Creates a soft interval with independent linear penalties per side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_interval_with_linear_violation_penalties(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+        lower_penalty: LinearViolationPenalty,
+        upper: f64,
+        upper_penalty: LinearViolationPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((
+                lower,
+                AffineBoundConfiguration::LinearViolationPenalty(lower_penalty),
+            )),
+            Some((
+                upper,
+                AffineBoundConfiguration::LinearViolationPenalty(upper_penalty),
+            )),
+        )
+    }
+
+    /// Creates a soft interval whose sides independently select a legal loss.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_interval_with_violation_penalties(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: f64,
+        lower_penalty: DirectionalDerivativeViolationPenalty,
+        upper: f64,
+        upper_penalty: DirectionalDerivativeViolationPenalty,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        let configuration = |penalty| match penalty {
+            DirectionalDerivativeViolationPenalty::Quadratic(penalty) => {
+                AffineBoundConfiguration::QuadraticPenalty(penalty)
+            }
+            DirectionalDerivativeViolationPenalty::Linear(penalty) => {
+                AffineBoundConfiguration::LinearViolationPenalty(penalty)
+            }
+        };
+        Self::new(
+            source_id,
+            location,
+            direction,
+            Some((lower, configuration(lower_penalty))),
+            Some((upper, configuration(upper_penalty))),
+        )
+    }
+
+    fn new(
+        source_id: SourceId,
+        location: Point3,
+        direction: Vector3,
+        lower: Option<(f64, AffineBoundConfiguration)>,
+        upper: Option<(f64, AffineBoundConfiguration)>,
+    ) -> Result<Self, DirectionalDerivativeIntervalError> {
+        if lower
+            .iter()
+            .chain(&upper)
+            .any(|(bound, _)| !bound.is_finite())
+        {
+            return Err(DirectionalDerivativeIntervalError::NonFiniteBound);
+        }
+        if let (Some((lower, _)), Some((upper, _))) = (lower, upper) {
+            if lower > upper {
+                return Err(DirectionalDerivativeIntervalError::EmptyInterval { lower, upper });
+            }
+        }
+        let direction = normalize_direction(direction)
+            .ok_or(DirectionalDerivativeIntervalError::ZeroDirection)?;
+        let side = |(bound, configuration)| AffineBoundSide {
+            bound: canonical_zero(bound),
+            configuration,
+        };
+        Ok(Self {
+            source_id,
+            location,
+            direction,
+            lower: lower.map(side),
+            upper: upper.map(side),
+        })
+    }
+
+    /// Returns the stable caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the finite support location in the declared input frame.
+    pub fn location(&self) -> Point3 {
+        self.location
+    }
+
+    /// Returns the oriented unit direction in physical input coordinates.
+    pub fn direction(&self) -> Vector3 {
+        self.direction
+    }
+
+    /// Returns the lower directional-derivative bound when present.
+    pub fn lower_bound(&self) -> Option<f64> {
+        self.lower.as_ref().map(|side| side.bound)
+    }
+
+    /// Returns the upper directional-derivative bound when present.
+    pub fn upper_bound(&self) -> Option<f64> {
+        self.upper.as_ref().map(|side| side.bound)
+    }
+
+    /// Reports whether this relation owns explicit violation channels.
+    pub fn is_soft(&self) -> bool {
+        self.lower
+            .iter()
+            .chain(&self.upper)
+            .any(|side| side.configuration.is_soft())
+    }
+
+    pub(crate) fn lower(&self) -> Option<&AffineBoundSide> {
+        self.lower.as_ref()
+    }
+
+    pub(crate) fn upper(&self) -> Option<&AffineBoundSide> {
+        self.upper.as_ref()
+    }
+}
+
+/// A rejected Directional Derivative Interval.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct FieldValueBoundSide {
+#[non_exhaustive]
+pub enum DirectionalDerivativeIntervalError {
+    /// The physical direction was the zero vector.
+    ZeroDirection,
+    /// A lower or upper derivative bound was NaN or infinite.
+    NonFiniteBound,
+    /// A closed interval had its lower endpoint above its upper endpoint.
+    EmptyInterval { lower: f64, upper: f64 },
+}
+
+impl fmt::Display for DirectionalDerivativeIntervalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroDirection => formatter.write_str("directional-derivative direction is zero"),
+            Self::NonFiniteBound => {
+                formatter.write_str("directional-derivative bound is not finite")
+            }
+            Self::EmptyInterval { lower, upper } => write!(
+                formatter,
+                "directional-derivative interval [{lower}, {upper}] is empty"
+            ),
+        }
+    }
+}
+
+impl Error for DirectionalDerivativeIntervalError {}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AffineBoundSide {
     pub(crate) bound: f64,
-    pub(crate) configuration: FieldValueBoundConfiguration,
+    pub(crate) configuration: AffineBoundConfiguration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum FieldValueBoundConfiguration {
+pub(crate) enum AffineBoundConfiguration {
     Hard,
     QuadraticPenalty(QuadraticPenalty),
     LinearViolationPenalty(LinearViolationPenalty),
 }
 
-impl FieldValueBoundConfiguration {
+impl AffineBoundConfiguration {
     pub(crate) fn is_soft(self) -> bool {
         !matches!(self, Self::Hard)
     }
@@ -723,5 +1062,13 @@ impl private::Sealed for FieldValueBound {}
 impl ProblemInput for FieldValueBound {
     fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
         builder.add_field_value_bound(self)
+    }
+}
+
+impl private::Sealed for DirectionalDerivativeInterval {}
+
+impl ProblemInput for DirectionalDerivativeInterval {
+    fn add_to(self, builder: &mut ProblemBuilder) -> Result<(), AddError> {
+        builder.add_directional_derivative_interval(self)
     }
 }

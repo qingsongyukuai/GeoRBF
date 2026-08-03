@@ -3220,9 +3220,13 @@ pub(crate) fn canonical_characteristic_field_scale(
             }
         })
         .chain(problem.affine_inequalities.iter().filter_map(|relation| {
-            relation
-                .violation_channel()
-                .map(|channel| channel.loss().residual_reference_scale())
+            relation.violation_channel().map(|channel| {
+                let reference_scale = channel.loss().residual_reference_scale();
+                match relation.dimension() {
+                    FunctionalDimension::FieldValue => reference_scale,
+                    FunctionalDimension::FieldValuePerLength => length * reference_scale,
+                }
+            })
         }))
         .fold(0.0_f64, f64::max);
     energy_scale.max(relation_scale).max(soft_loss_scale)

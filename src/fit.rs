@@ -69,7 +69,7 @@ use crate::observation::{
 };
 use crate::problem::{ProblemSnapshot, ThreadBudget};
 use crate::relation::{
-    AdditiveFieldGaugeReference, FieldValueBoundConfiguration, LinearViolationPenalty,
+    AdditiveFieldGaugeReference, AffineBoundConfiguration, AffineBoundSide, LinearViolationPenalty,
 };
 
 /// Successful fit output: one accepted model and its complete report.
@@ -344,6 +344,91 @@ pub struct FieldValueBoundAssessment {
     quadratic_penalty: Option<QuadraticPenalty>,
     linear_violation_penalty: Option<LinearViolationPenalty>,
     loss: Option<f64>,
+}
+
+/// Physical recovery assessment for one Directional Derivative Interval side.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectionalDerivativeIntervalAssessment {
+    source_id: SourceId,
+    semantic_role: SemanticRolePath,
+    direction: Vector3,
+    side: BoundSide,
+    bound: f64,
+    recovered_directional_derivative: f64,
+    slack: f64,
+    violation: f64,
+    tolerance: f64,
+    active_state: BoundActiveState,
+    quadratic_penalty: Option<QuadraticPenalty>,
+    linear_violation_penalty: Option<LinearViolationPenalty>,
+    loss: Option<f64>,
+}
+
+impl DirectionalDerivativeIntervalAssessment {
+    /// Returns the caller-owned relation identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the stable lower- or upper-side semantic role.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+
+    /// Returns the oriented unit direction used by this derivative relation.
+    pub fn direction(&self) -> Vector3 {
+        self.direction
+    }
+
+    /// Returns which side of the derivative interval this assessment describes.
+    pub fn side(&self) -> BoundSide {
+        self.side
+    }
+
+    /// Returns the finite bound in field-value-per-length units.
+    pub fn bound(&self) -> f64 {
+        self.bound
+    }
+
+    /// Returns the independently recovered directional derivative.
+    pub fn recovered_directional_derivative(&self) -> f64 {
+        self.recovered_directional_derivative
+    }
+
+    /// Returns nonnegative physical satisfaction slack.
+    pub fn slack(&self) -> f64 {
+        self.slack
+    }
+
+    /// Returns nonnegative physical violation.
+    pub fn violation(&self) -> f64 {
+        self.violation
+    }
+
+    /// Returns the physical acceptance tolerance for this side.
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
+    /// Returns the stable active/inactive state derived in physical units.
+    pub fn active_state(&self) -> BoundActiveState {
+        self.active_state
+    }
+
+    /// Returns the configured quadratic violation penalty when present.
+    pub fn quadratic_penalty(&self) -> Option<QuadraticPenalty> {
+        self.quadratic_penalty
+    }
+
+    /// Returns the configured linear violation penalty when present.
+    pub fn linear_violation_penalty(&self) -> Option<LinearViolationPenalty> {
+        self.linear_violation_penalty
+    }
+
+    /// Returns this soft side's objective contribution; hard sides return `None`.
+    pub fn loss(&self) -> Option<f64> {
+        self.loss
+    }
 }
 
 impl FieldValueBoundAssessment {
@@ -795,6 +880,7 @@ pub struct FitReport {
     requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
     field_value_bounds: Vec<FieldValueBoundAssessment>,
+    directional_derivative_intervals: Vec<DirectionalDerivativeIntervalAssessment>,
     soft_field_values: Vec<SoftFieldValueAssessment>,
     soft_gradients: Vec<SoftGradientAssessment>,
     soft_tangents: Vec<SoftTangentAssessment>,
@@ -854,6 +940,11 @@ impl FitReport {
     /// Returns lower/upper Field Value Bound assessments in SourceId/role order.
     pub fn field_value_bounds(&self) -> &[FieldValueBoundAssessment] {
         &self.field_value_bounds
+    }
+
+    /// Returns Directional Derivative Interval sides in SourceId/role order.
+    pub fn directional_derivative_intervals(&self) -> &[DirectionalDerivativeIntervalAssessment] {
+        &self.directional_derivative_intervals
     }
 
     /// Returns soft Field Value assessments in stable SourceId order.
@@ -1007,6 +1098,7 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         .observations
         .len()
         .checked_add(snapshot.inner.field_value_bounds.len())
+        .and_then(|count| count.checked_add(snapshot.inner.directional_derivative_intervals.len()))
         .unwrap_or(usize::MAX);
     let source_identifier_bytes = source_identifier_bytes(snapshot).unwrap_or(usize::MAX);
     let conservative_problem_size = conservative_problem_size(
@@ -1022,6 +1114,16 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
             .map(|bound| {
                 usize::from(bound.lower().is_some()) + usize::from(bound.upper().is_some())
             })
+            .chain(
+                snapshot
+                    .inner
+                    .directional_derivative_intervals
+                    .iter()
+                    .map(|interval| {
+                        usize::from(interval.lower().is_some())
+                            + usize::from(interval.upper().is_some())
+                    }),
+            )
             .sum(),
     );
     let mut preflight_report = empty_report(snapshot, conservative_problem_size);
@@ -1209,6 +1311,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
         field_value_bounds: Vec::new(),
+        directional_derivative_intervals: Vec::new(),
         soft_field_values: Vec::new(),
         soft_gradients: Vec::new(),
         soft_tangents: Vec::new(),
@@ -1280,21 +1383,14 @@ fn scalar_relation_counts(snapshot: &ProblemSnapshot) -> Option<ScalarRelationCo
         .try_fold(0_usize, |count, group| {
             count.checked_add(group.scalar_residual_count())
         })?;
-    let (bound_hard, bound_soft) = snapshot.inner.field_value_bounds.iter().try_fold(
-        (0_usize, 0_usize),
-        |(hard, soft), bound| {
-            bound.lower().into_iter().chain(bound.upper()).try_fold(
-                (hard, soft),
-                |(hard, soft), side| {
-                    if side.configuration.is_soft() {
-                        Some((hard, soft.checked_add(1)?))
-                    } else {
-                        Some((hard.checked_add(1)?, soft))
-                    }
-                },
-            )
-        },
-    )?;
+    let (bound_hard, bound_soft) =
+        affine_bound_sides(snapshot).try_fold((0_usize, 0_usize), |(hard, soft), side| {
+            if side.configuration.is_soft() {
+                Some((hard, soft.checked_add(1)?))
+            } else {
+                Some((hard.checked_add(1)?, soft))
+            }
+        })?;
     Some(ScalarRelationCounts {
         hard: observation_hard
             .checked_add(group_hard)?
@@ -1317,15 +1413,11 @@ fn quadratic_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
             ObservationInput::TangentDirection(tangent) => tangent.configuration().is_soft(),
         })
         .count();
-    let bound_terms = snapshot
-        .inner
-        .field_value_bounds
-        .iter()
-        .flat_map(|bound| bound.lower().into_iter().chain(bound.upper()))
+    let bound_terms = affine_bound_sides(snapshot)
         .filter(|side| {
             matches!(
                 side.configuration,
-                FieldValueBoundConfiguration::QuadraticPenalty(_)
+                AffineBoundConfiguration::QuadraticPenalty(_)
             )
         })
         .count();
@@ -1335,19 +1427,31 @@ fn quadratic_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
 }
 
 fn linear_objective_term_count(snapshot: &ProblemSnapshot) -> Option<usize> {
+    Some(
+        affine_bound_sides(snapshot)
+            .filter(|side| {
+                matches!(
+                    side.configuration,
+                    AffineBoundConfiguration::LinearViolationPenalty(_)
+                )
+            })
+            .count(),
+    )
+}
+
+fn affine_bound_sides(snapshot: &ProblemSnapshot) -> impl Iterator<Item = &AffineBoundSide> {
     snapshot
         .inner
         .field_value_bounds
         .iter()
         .flat_map(|bound| bound.lower().into_iter().chain(bound.upper()))
-        .filter(|side| {
-            matches!(
-                side.configuration,
-                FieldValueBoundConfiguration::LinearViolationPenalty(_)
-            )
-        })
-        .count()
-        .checked_add(0)
+        .chain(
+            snapshot
+                .inner
+                .directional_derivative_intervals
+                .iter()
+                .flat_map(|interval| interval.lower().into_iter().chain(interval.upper())),
+        )
 }
 
 fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
@@ -1426,11 +1530,26 @@ fn source_identifier_bytes(snapshot: &ProblemSnapshot) -> Option<usize> {
                     .checked_mul(multiplicity)
                     .and_then(|source_bytes| bytes.checked_add(source_bytes))
             })?;
+    let derivative_interval_bytes = snapshot
+        .inner
+        .directional_derivative_intervals
+        .iter()
+        .try_fold(0_usize, |bytes, interval| {
+            let multiplicity = usize::from(interval.lower().is_some())
+                .checked_add(usize::from(interval.upper().is_some()))?;
+            interval
+                .source_id()
+                .as_str()
+                .len()
+                .checked_mul(multiplicity)
+                .and_then(|source_bytes| bytes.checked_add(source_bytes))
+        })?;
     observation_bytes
         .checked_add(shared_level_bytes)?
         .checked_add(covariance_group_bytes)?
         .checked_add(gauge_bytes)?
-        .checked_add(bound_bytes)
+        .checked_add(bound_bytes)?
+        .checked_add(derivative_interval_bytes)
 }
 
 fn snapshot_references_group(snapshot: &ProblemSnapshot, group_id: &GroupId) -> bool {
@@ -1878,6 +1997,13 @@ struct SourceHardRelation {
 struct SourceBoundRelation {
     inequality: CanonicalAffineInequality,
     canonical_index: usize,
+    kind: SourceBoundKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SourceBoundKind {
+    FieldValue,
+    DirectionalDerivative { direction: Vector3 },
 }
 
 #[derive(Debug, Clone)]
@@ -1970,14 +2096,34 @@ impl EqualityLowering {
         });
     }
 
-    fn push_bound(&mut self, inequality: CanonicalAffineInequality, support: [f64; 3]) {
+    fn push_bound(&mut self, inequality: CanonicalAffineInequality, kind: SourceBoundKind) {
         let canonical_index = if inequality.violation_channel().is_some() {
             let index = self.canonical_affine_inequalities.len();
             self.canonical_affine_inequalities.push(inequality.clone());
             index
         } else {
             let key = CanonicalBoundKey {
-                support: canonical_support_bits(support),
+                dimension: match inequality.dimension() {
+                    FunctionalDimension::FieldValue => 0,
+                    FunctionalDimension::FieldValuePerLength => 1,
+                },
+                field_terms: inequality
+                    .field()
+                    .into_iter()
+                    .flat_map(|field| field.functional().terms())
+                    .map(|term| {
+                        (
+                            canonical_support_bits(term.support()),
+                            canonical_scalar_bits(term.value_coefficient()),
+                            term.gradient_coefficient().map(canonical_scalar_bits),
+                        )
+                    })
+                    .collect(),
+                latent_coefficients: inequality
+                    .latent_coefficients()
+                    .iter()
+                    .map(|term| (term.latent, canonical_scalar_bits(term.coefficient)))
+                    .collect(),
                 side: match inequality.sense() {
                     CanonicalInequalitySense::Lower => 0,
                     CanonicalInequalitySense::Upper => 1,
@@ -1998,6 +2144,7 @@ impl EqualityLowering {
         self.source_bound_relations.push(SourceBoundRelation {
             inequality,
             canonical_index,
+            kind,
         });
     }
 
@@ -2051,7 +2198,9 @@ struct CanonicalEqualityKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CanonicalBoundKey {
-    support: [u64; 3],
+    dimension: u8,
+    field_terms: Vec<([u64; 3], u64, [u64; 3])>,
+    latent_coefficients: Vec<(usize, u64)>,
     side: u8,
     bound: u64,
 }
@@ -2342,26 +2491,7 @@ fn canonical_scalar_bits(value: f64) -> u64 {
 }
 
 fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEqualityKey, f64) {
-    let first_coefficient = equality
-        .field()
-        .into_iter()
-        .flat_map(|field| field.functional().terms())
-        .flat_map(|term| {
-            std::iter::once(term.value_coefficient()).chain(term.gradient_coefficient())
-        })
-        .chain(
-            equality
-                .latent_coefficients()
-                .iter()
-                .map(|term| term.coefficient),
-        )
-        .find(|coefficient| *coefficient != 0.0)
-        .expect("a canonical equality has a field or semantic-latent coefficient");
-    let sign = if first_coefficient.is_sign_negative() {
-        -1.0
-    } else {
-        1.0
-    };
+    let sign = canonical_normalization_sign(equality.field(), equality.latent_coefficients());
     let dimension = match equality.dimension() {
         FunctionalDimension::FieldValue => 0,
         FunctionalDimension::FieldValuePerLength => 1,
@@ -2395,10 +2525,31 @@ fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEquali
     )
 }
 
+fn canonical_normalization_sign(
+    field: Option<&FunctionalUse>,
+    latent_coefficients: &[SemanticLatentCoefficient],
+) -> f64 {
+    let first_coefficient = field
+        .into_iter()
+        .flat_map(|field| field.functional().terms())
+        .flat_map(|term| {
+            std::iter::once(term.value_coefficient()).chain(term.gradient_coefficient())
+        })
+        .chain(latent_coefficients.iter().map(|term| term.coefficient))
+        .find(|coefficient| *coefficient != 0.0)
+        .expect("a canonical affine functional has a field or semantic-latent coefficient");
+    if first_coefficient.is_sign_negative() {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
     let mut lowering = EqualityLowering::new();
     let mut value_constraints = CanonicalValueConstraintForest::default();
     let mut hard_bound_facts = Vec::new();
+    let mut hard_derivative_bound_facts = Vec::new();
     for block in observation_residual_blocks(&snapshot.inner.observations) {
         let soft_loss = match &block.configuration {
             ResidualBlockConfiguration::Hard => None,
@@ -2495,7 +2646,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             )
             .expect("a checked Field Value Bound lowers to one finite value functional");
             let violation_channel = match side.configuration {
-                FieldValueBoundConfiguration::Hard => {
+                AffineBoundConfiguration::Hard => {
                     hard_bound_facts.push(HardBoundFact {
                         source_id: bound.source_id().clone(),
                         support: bound.location().components(),
@@ -2505,7 +2656,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     });
                     None
                 }
-                FieldValueBoundConfiguration::QuadraticPenalty(penalty) => {
+                AffineBoundConfiguration::QuadraticPenalty(penalty) => {
                     Some(CanonicalViolationChannel::new(
                         provenance.residual().clone(),
                         CanonicalViolationLoss::QuadraticPenalty {
@@ -2513,7 +2664,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                         },
                     ))
                 }
-                FieldValueBoundConfiguration::LinearViolationPenalty(penalty) => {
+                AffineBoundConfiguration::LinearViolationPenalty(penalty) => {
                     Some(CanonicalViolationChannel::new(
                         provenance.residual().clone(),
                         CanonicalViolationLoss::LinearViolationPenalty {
@@ -2532,7 +2683,88 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     side.bound,
                     violation_channel,
                 ),
-                bound.location().components(),
+                SourceBoundKind::FieldValue,
+            );
+        }
+    }
+
+    for interval in &snapshot.inner.directional_derivative_intervals {
+        for (sense, side, role) in [
+            (
+                CanonicalInequalitySense::Lower,
+                interval.lower(),
+                "directional-derivative-interval/lower",
+            ),
+            (
+                CanonicalInequalitySense::Upper,
+                interval.upper(),
+                "directional-derivative-interval/upper",
+            ),
+        ] {
+            let Some(side) = side else {
+                continue;
+            };
+            let semantic_role = SemanticRolePath::new(role);
+            let provenance = relation_provenance(interval.source_id().clone(), None, semantic_role);
+            let functional = CanonicalFunctional::new(
+                FunctionalDimension::FieldValuePerLength,
+                vec![FunctionalTerm::new(
+                    interval.location().components(),
+                    0.0,
+                    interval.direction().components(),
+                )],
+            )
+            .expect("a checked Directional Derivative Interval lowers to one finite functional");
+            let violation_channel = match side.configuration {
+                AffineBoundConfiguration::Hard => None,
+                AffineBoundConfiguration::QuadraticPenalty(penalty) => {
+                    Some(CanonicalViolationChannel::new(
+                        provenance.residual().clone(),
+                        CanonicalViolationLoss::QuadraticPenalty {
+                            weight: penalty.weight(),
+                        },
+                    ))
+                }
+                AffineBoundConfiguration::LinearViolationPenalty(penalty) => {
+                    Some(CanonicalViolationChannel::new(
+                        provenance.residual().clone(),
+                        CanonicalViolationLoss::LinearViolationPenalty {
+                            weight: penalty.weight(),
+                        },
+                    ))
+                }
+            };
+            let inequality = CanonicalAffineInequality::new(
+                Some(FunctionalUse::new(functional, provenance.clone())),
+                Vec::new(),
+                provenance,
+                FunctionalDimension::FieldValuePerLength,
+                sense,
+                side.bound,
+                violation_channel,
+            );
+            if matches!(side.configuration, AffineBoundConfiguration::Hard) {
+                let (functional_key, sign) = canonical_inequality_functional_key(&inequality);
+                hard_derivative_bound_facts.push(HardDerivativeBoundFact {
+                    source_id: interval.source_id().clone(),
+                    functional_key,
+                    sense: if sign < 0.0 {
+                        match sense {
+                            CanonicalInequalitySense::Lower => CanonicalInequalitySense::Upper,
+                            CanonicalInequalitySense::Upper => CanonicalInequalitySense::Lower,
+                        }
+                    } else {
+                        sense
+                    },
+                    bound: sign * side.bound,
+                    semantic_role: inequality.provenance().semantic_role().clone(),
+                });
+            }
+            lowering.push_bound(
+                inequality,
+                SourceBoundKind::DirectionalDerivative {
+                    direction: interval.direction(),
+                },
             );
         }
     }
@@ -2680,6 +2912,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         }
     }
     record_direct_bound_conflicts(&mut lowering, &mut value_constraints, &hard_bound_facts);
+    record_direct_derivative_bound_conflicts(&mut lowering, &hard_derivative_bound_facts);
     lowering
 }
 
@@ -2690,6 +2923,121 @@ struct HardBoundFact {
     sense: CanonicalInequalitySense,
     bound: f64,
     semantic_role: SemanticRolePath,
+}
+
+#[derive(Debug, Clone)]
+struct HardDerivativeBoundFact {
+    source_id: SourceId,
+    functional_key: CanonicalEqualityKey,
+    sense: CanonicalInequalitySense,
+    bound: f64,
+    semantic_role: SemanticRolePath,
+}
+
+fn record_direct_derivative_bound_conflicts(
+    lowering: &mut EqualityLowering,
+    facts: &[HardDerivativeBoundFact],
+) {
+    let mut by_functional = BTreeMap::<CanonicalEqualityKey, Vec<&HardDerivativeBoundFact>>::new();
+    for fact in facts {
+        by_functional
+            .entry(fact.functional_key.clone())
+            .or_default()
+            .push(fact);
+    }
+    for (functional_key, functional_facts) in by_functional {
+        for (index, left) in functional_facts.iter().enumerate() {
+            for right in &functional_facts[index + 1..] {
+                let incompatible = match (left.sense, right.sense) {
+                    (CanonicalInequalitySense::Lower, CanonicalInequalitySense::Upper) => {
+                        left.bound > right.bound
+                    }
+                    (CanonicalInequalitySense::Upper, CanonicalInequalitySense::Lower) => {
+                        right.bound > left.bound
+                    }
+                    _ => false,
+                };
+                if incompatible {
+                    let (first, second) = if left.source_id <= right.source_id {
+                        (left, right)
+                    } else {
+                        (right, left)
+                    };
+                    lowering
+                        .direct_input_conflicts
+                        .push(DirectInputConflictEvidence::new(
+                            first.source_id.clone(),
+                            second.source_id.clone(),
+                            second.semantic_role.clone(),
+                            first.bound,
+                            second.bound,
+                        ));
+                }
+            }
+        }
+        for source_relation in &lowering.source_relations {
+            let (equality_key, equality_target) =
+                normalized_equality_key(&source_relation.equality);
+            if equality_key != functional_key {
+                continue;
+            }
+            for fact in &functional_facts {
+                let incompatible = match fact.sense {
+                    CanonicalInequalitySense::Lower => equality_target < fact.bound,
+                    CanonicalInequalitySense::Upper => equality_target > fact.bound,
+                };
+                if incompatible {
+                    let equality_source = source_relation.equality.provenance().source();
+                    let (first_source, first_target, second_source, second_target) =
+                        if equality_source <= &fact.source_id {
+                            (
+                                equality_source.clone(),
+                                equality_target,
+                                fact.source_id.clone(),
+                                fact.bound,
+                            )
+                        } else {
+                            (
+                                fact.source_id.clone(),
+                                fact.bound,
+                                equality_source.clone(),
+                                equality_target,
+                            )
+                        };
+                    lowering
+                        .direct_input_conflicts
+                        .push(DirectInputConflictEvidence::new(
+                            first_source,
+                            second_source,
+                            fact.semantic_role.clone(),
+                            first_target,
+                            second_target,
+                        ));
+                }
+            }
+        }
+    }
+    lowering.direct_input_conflicts.sort_by(|left, right| {
+        left.semantic_role()
+            .cmp(right.semantic_role())
+            .then_with(|| left.first_source().cmp(right.first_source()))
+            .then_with(|| left.second_source().cmp(right.second_source()))
+    });
+}
+
+fn canonical_inequality_functional_key(
+    inequality: &CanonicalAffineInequality,
+) -> (CanonicalEqualityKey, f64) {
+    let sign = canonical_normalization_sign(inequality.field(), inequality.latent_coefficients());
+    let equality = CanonicalHardEquality::new(
+        inequality.field().cloned(),
+        inequality.latent_coefficients().to_vec(),
+        inequality.provenance().clone(),
+        inequality.dimension(),
+        inequality.bound(),
+        CanonicalEqualityParticipation::VerificationOnly,
+    );
+    (normalized_equality_key(&equality).0, sign)
 }
 
 fn record_direct_bound_conflicts(
@@ -2883,14 +3231,34 @@ fn success_report_qp(
     });
     let mut field_value_bounds = source_bound_relations
         .iter()
-        .map(|source_relation| {
-            field_value_bound_assessment(
-                source_relation,
-                &solution.affine_inequalities[source_relation.canonical_index],
-            )
+        .filter_map(|source_relation| {
+            matches!(source_relation.kind, SourceBoundKind::FieldValue).then(|| {
+                field_value_bound_assessment(
+                    source_relation,
+                    &solution.affine_inequalities[source_relation.canonical_index],
+                )
+            })
         })
         .collect::<Vec<_>>();
     field_value_bounds.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
+    let mut directional_derivative_intervals = source_bound_relations
+        .iter()
+        .filter_map(|source_relation| {
+            let SourceBoundKind::DirectionalDerivative { direction } = source_relation.kind else {
+                return None;
+            };
+            Some(directional_derivative_interval_assessment(
+                source_relation,
+                &solution.affine_inequalities[source_relation.canonical_index],
+                direction,
+            ))
+        })
+        .collect::<Vec<_>>();
+    directional_derivative_intervals.sort_by(|left, right| {
         left.source_id
             .cmp(&right.source_id)
             .then_with(|| left.semantic_role.cmp(&right.semantic_role))
@@ -2928,6 +3296,7 @@ fn success_report_qp(
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
         field_value_bounds,
+        directional_derivative_intervals,
         soft_field_values,
         soft_gradients,
         soft_tangents,
@@ -2958,8 +3327,60 @@ fn field_value_bound_assessment(
     source_relation: &SourceBoundRelation,
     recovered: &RecoveredAffineInequality,
 ) -> FieldValueBoundAssessment {
-    let (quadratic_penalty, linear_violation_penalty) = source_relation
-        .inequality
+    let (quadratic_penalty, linear_violation_penalty) =
+        public_bound_penalties(&source_relation.inequality);
+    FieldValueBoundAssessment {
+        source_id: source_relation.inequality.provenance().source().clone(),
+        semantic_role: source_relation
+            .inequality
+            .provenance()
+            .semantic_role()
+            .clone(),
+        side: public_bound_side(source_relation.inequality.sense()),
+        bound: source_relation.inequality.bound(),
+        recovered_value: recovered.value,
+        slack: recovered.slack,
+        violation: recovered.violation,
+        tolerance: recovered.tolerance,
+        active_state: public_bound_active_state(recovered),
+        quadratic_penalty,
+        linear_violation_penalty,
+        loss: recovered.objective_contribution,
+    }
+}
+
+fn directional_derivative_interval_assessment(
+    source_relation: &SourceBoundRelation,
+    recovered: &RecoveredAffineInequality,
+    direction: Vector3,
+) -> DirectionalDerivativeIntervalAssessment {
+    let (quadratic_penalty, linear_violation_penalty) =
+        public_bound_penalties(&source_relation.inequality);
+    DirectionalDerivativeIntervalAssessment {
+        source_id: source_relation.inequality.provenance().source().clone(),
+        semantic_role: source_relation
+            .inequality
+            .provenance()
+            .semantic_role()
+            .clone(),
+        direction,
+        side: public_bound_side(source_relation.inequality.sense()),
+        bound: source_relation.inequality.bound(),
+        recovered_directional_derivative: recovered.value,
+        slack: recovered.slack,
+        violation: recovered.violation,
+        tolerance: recovered.tolerance,
+        active_state: public_bound_active_state(recovered),
+        quadratic_penalty,
+        linear_violation_penalty,
+        loss: recovered.objective_contribution,
+    }
+}
+
+fn public_bound_penalties(
+    inequality: &CanonicalAffineInequality,
+) -> (Option<QuadraticPenalty>, Option<LinearViolationPenalty>) {
+    inequality
         .violation_channel()
         .map(|channel| match channel.loss() {
             CanonicalViolationLoss::QuadraticPenalty { weight } => (
@@ -2974,31 +3395,21 @@ fn field_value_bound_assessment(
                 ),
             ),
         })
-        .unwrap_or((None, None));
-    FieldValueBoundAssessment {
-        source_id: source_relation.inequality.provenance().source().clone(),
-        semantic_role: source_relation
-            .inequality
-            .provenance()
-            .semantic_role()
-            .clone(),
-        side: match source_relation.inequality.sense() {
-            CanonicalInequalitySense::Lower => BoundSide::Lower,
-            CanonicalInequalitySense::Upper => BoundSide::Upper,
-        },
-        bound: source_relation.inequality.bound(),
-        recovered_value: recovered.value,
-        slack: recovered.slack,
-        violation: recovered.violation,
-        tolerance: recovered.tolerance,
-        active_state: if recovered.slack <= recovered.tolerance {
-            BoundActiveState::Active
-        } else {
-            BoundActiveState::Inactive
-        },
-        quadratic_penalty,
-        linear_violation_penalty,
-        loss: recovered.objective_contribution,
+        .unwrap_or((None, None))
+}
+
+fn public_bound_side(sense: CanonicalInequalitySense) -> BoundSide {
+    match sense {
+        CanonicalInequalitySense::Lower => BoundSide::Lower,
+        CanonicalInequalitySense::Upper => BoundSide::Upper,
+    }
+}
+
+fn public_bound_active_state(recovered: &RecoveredAffineInequality) -> BoundActiveState {
+    if recovered.slack <= recovered.tolerance {
+        BoundActiveState::Active
+    } else {
+        BoundActiveState::Inactive
     }
 }
 
@@ -3107,6 +3518,7 @@ fn success_report(
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
         field_value_bounds: Vec::new(),
+        directional_derivative_intervals: Vec::new(),
         soft_field_values,
         soft_gradients,
         soft_tangents,
@@ -4481,10 +4893,10 @@ mod tests {
     use super::*;
     use crate::cubic_equality::{RecoveryVerificationFailureReason, inject_kkt_failure_once};
     use crate::cubic_execution::{QpFaultInjection, inject_qp_fault_once};
-    use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel};
+    use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel, Vector3};
     use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
     use crate::observation::FieldValueObservation;
-    use crate::relation::{FieldValueBound, SharedLevelSetBuilder};
+    use crate::relation::{DirectionalDerivativeInterval, FieldValueBound, SharedLevelSetBuilder};
     use crate::{Point3, ProblemBuilder};
 
     fn injectable_snapshot() -> ProblemSnapshot {
@@ -4536,6 +4948,34 @@ mod tests {
                 FieldValueBound::try_upper(
                     SourceId::new("bound"),
                     Point3::try_new(0.5, 0.5, 0.5).unwrap(),
+                    10.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder.build().unwrap()
+    }
+
+    fn injectable_derivative_interval_snapshot() -> ProblemSnapshot {
+        let snapshot = injectable_snapshot();
+        let mut builder = ProblemBuilder::new(
+            snapshot.input_coordinate_frame().clone(),
+            snapshot.field_unit().clone(),
+        );
+        for observation in &snapshot.inner.observations {
+            match observation {
+                ObservationInput::FieldValue(observation) => {
+                    builder.add(observation.clone()).unwrap();
+                }
+                _ => unreachable!("the injectable fixture contains only field values"),
+            }
+        }
+        builder
+            .add(
+                DirectionalDerivativeInterval::try_upper(
+                    SourceId::new("derivative-interval"),
+                    Point3::try_new(0.5, 0.5, 0.5).unwrap(),
+                    Vector3::try_new(1.0, 2.0, 2.0).unwrap(),
                     10.0,
                 )
                 .unwrap(),
@@ -4689,6 +5129,30 @@ mod tests {
             .report()
             .recovery_verification()
             .expect("the public report retains QP recovery evidence");
+        assert_eq!(
+            recovery.reasons(),
+            &[RecoveryVerificationFailureReason::ReductionRoundTripViolation]
+        );
+        assert!(recovery.no_model_produced());
+        assert!(!failure.report().attempts().is_empty());
+    }
+
+    #[test]
+    fn public_derivative_interval_fit_rejects_recovery_corruption_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::RecoveryMap);
+        let failure = injectable_derivative_interval_snapshot()
+            .fit()
+            .expect_err("a damaged derivative QP recovery map must not publish a model");
+
+        assert_eq!(
+            failure.diagnosis(),
+            ProblemDiagnosis::RecoveryVerificationFailure
+        );
+        assert!(failure.report().canonical_acceptance().is_none());
+        let recovery = failure
+            .report()
+            .recovery_verification()
+            .expect("the report retains derivative-interval recovery evidence");
         assert_eq!(
             recovery.reasons(),
             &[RecoveryVerificationFailureReason::ReductionRoundTripViolation]

@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::functional::{GroupId, SourceId};
-use crate::geometry::{Point3, Vector3};
+use crate::geometry::{Point3, Vector3, normalize_direction};
 use crate::math::canonical_zero;
 use crate::problem::{AddError, ProblemBuilder, ProblemInput, private};
 
@@ -842,21 +842,9 @@ impl TangentDirectionObservation {
         direction: Vector3,
         configuration: TangentConfiguration,
     ) -> Result<Self, ObservationError> {
-        let components = direction.components();
-        let scale = components
-            .iter()
-            .map(|component| component.abs())
-            .fold(0.0_f64, f64::max);
-        if scale == 0.0 {
-            return Err(ObservationError::ZeroTangentDirection);
-        }
-        let scaled = components.map(|component| component / scale);
-        let norm = scaled
-            .into_iter()
-            .map(|component| component * component)
-            .sum::<f64>()
-            .sqrt();
-        let mut unit = scaled.map(|component| canonical_zero(component / norm));
+        let mut unit = normalize_direction(direction)
+            .ok_or(ObservationError::ZeroTangentDirection)?
+            .components();
         if unit
             .iter()
             .find(|component| **component != 0.0)

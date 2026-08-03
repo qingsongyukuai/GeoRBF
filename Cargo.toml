@@ -29,6 +29,8 @@ include = [
     "/docs/implementation/27-soft-field-value-objective.md",
     "/docs/implementation/28-soft-first-order-residual-blocks.md",
     "/docs/implementation/29-cubic-convex-qp-execution.md",
+    "/docs/implementation/30-field-value-bounds.md",
+    "/docs/implementation/31-directional-derivative-intervals.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/v0.1.0/**",
 ]

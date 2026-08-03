@@ -3050,6 +3050,53 @@ mod tests {
     }
 
     #[test]
+    fn derivative_violation_loss_scale_is_converted_to_field_value_units() {
+        let mut problem = manufactured_problem();
+        let derivative_use = FunctionalUse::new(
+            CanonicalFunctional::new(
+                FunctionalDimension::FieldValuePerLength,
+                vec![FunctionalTerm::new(
+                    [0.125, -0.25, 0.5],
+                    0.0,
+                    [1.0, 0.0, 0.0],
+                )],
+            )
+            .expect("the derivative functional is nonzero"),
+            UsageProvenance::new(
+                SourceId::new("derivative-violation-scale"),
+                None,
+                RelationId::new("derivative-violation-scale-relation"),
+                ResidualId::new("derivative-violation-scale-residual"),
+                SemanticRolePath::new("derivative-violation/scale"),
+            ),
+        );
+        problem
+            .affine_inequalities
+            .push(CanonicalAffineInequality::new(
+                Some(derivative_use.clone()),
+                Vec::new(),
+                derivative_use.provenance().clone(),
+                FunctionalDimension::FieldValuePerLength,
+                CanonicalInequalitySense::Upper,
+                0.0,
+                Some(CanonicalViolationChannel::new(
+                    ResidualId::new("derivative-violation-scale-residual"),
+                    CanonicalViolationLoss::QuadraticPenalty { weight: 1.0e-12 },
+                )),
+            ));
+        problem.field_energy_normalization = FieldEnergyNormalization::try_new(1.0)
+            .expect("a soft violation requires positive field-energy normalization");
+
+        let length = 3.0;
+        let expected = length * 1.0e6;
+        let actual = canonical_characteristic_field_scale(&problem, length, 0.0);
+        assert!(
+            relative_error(actual, expected) <= 1.0e-12,
+            "actual={actual:e}, expected={expected:e}"
+        );
+    }
+
+    #[test]
     fn damaged_qp_objective_round_trip_is_rejected_without_a_model() {
         inject_qp_fault_once(QpFaultInjection::Objective);
         let failure = CubicExecutionCore::solve(
@@ -3096,11 +3143,11 @@ mod tests {
         assert_eq!(qp.attempts[1].failure_reason, None);
         assert_eq!(
             qp.attempts[0].backend.settings.feasibility_tolerance,
-            1.0e-8
+            1.0e-9
         );
         assert_eq!(
             qp.attempts[1].backend.settings.feasibility_tolerance,
-            1.0e-9
+            1.0e-10
         );
         assert!(solution.canonical_acceptance_verified);
     }

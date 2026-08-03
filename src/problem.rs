@@ -13,7 +13,8 @@ use crate::kernel::{FieldEnergyNormalization, KernelConfig};
 use crate::numerical::NumericalPolicyId;
 use crate::observation::{CovarianceGroup, ObservationInput};
 use crate::relation::{
-    AdditiveFieldGauge, AdditiveFieldGaugeReference, FieldValueBound, SharedLevelSetInput,
+    AdditiveFieldGauge, AdditiveFieldGaugeReference, DirectionalDerivativeInterval,
+    FieldValueBound, SharedLevelSetInput,
 };
 
 /// Resource request for a synchronous fit.
@@ -90,6 +91,7 @@ pub struct ProblemBuilder {
     shared_level_sets: Vec<SharedLevelSetInput>,
     additive_field_gauges: Vec<AdditiveFieldGauge>,
     field_value_bounds: Vec<FieldValueBound>,
+    directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
     source_ids: BTreeSet<SourceId>,
     group_ids: BTreeSet<GroupId>,
     shared_level_group_ids: BTreeSet<GroupId>,
@@ -109,6 +111,7 @@ impl ProblemBuilder {
             shared_level_sets: Vec::new(),
             additive_field_gauges: Vec::new(),
             field_value_bounds: Vec::new(),
+            directional_derivative_intervals: Vec::new(),
             source_ids: BTreeSet::new(),
             group_ids: BTreeSet::new(),
             shared_level_group_ids: BTreeSet::new(),
@@ -160,6 +163,10 @@ impl ProblemBuilder {
         }
         let has_soft_relation = !self.covariance_groups.is_empty()
             || self.field_value_bounds.iter().any(FieldValueBound::is_soft)
+            || self
+                .directional_derivative_intervals
+                .iter()
+                .any(DirectionalDerivativeInterval::is_soft)
             || self
                 .observations
                 .iter()
@@ -218,6 +225,8 @@ impl ProblemBuilder {
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         self.field_value_bounds
             .sort_by(|left, right| left.source_id().cmp(right.source_id()));
+        self.directional_derivative_intervals
+            .sort_by(|left, right| left.source_id().cmp(right.source_id()));
         let data = ProblemData {
             input_coordinate_frame: self.input_coordinate_frame,
             field_unit: self.field_unit,
@@ -226,6 +235,7 @@ impl ProblemBuilder {
             shared_level_sets: self.shared_level_sets,
             additive_field_gauges: self.additive_field_gauges,
             field_value_bounds: self.field_value_bounds,
+            directional_derivative_intervals: self.directional_derivative_intervals,
             source_count: self.source_ids.len(),
             resolved_kernel: KernelConfig::default(),
             field_energy_normalization: self
@@ -330,6 +340,19 @@ impl ProblemBuilder {
         self.field_value_bounds.push(bound);
         Ok(())
     }
+
+    pub(crate) fn add_directional_derivative_interval(
+        &mut self,
+        interval: DirectionalDerivativeInterval,
+    ) -> Result<(), AddError> {
+        let source_id = interval.source_id().clone();
+        if self.source_ids.contains(&source_id) {
+            return Err(AddError::DuplicateSourceId { source_id });
+        }
+        self.source_ids.insert(source_id);
+        self.directional_derivative_intervals.push(interval);
+        Ok(())
+    }
 }
 
 /// An owning, immutable problem snapshot.
@@ -407,6 +430,11 @@ impl ProblemSnapshot {
         self.inner.field_value_bounds.len()
     }
 
+    /// Returns the caller-owned Directional Derivative Interval count.
+    pub fn directional_derivative_interval_count(&self) -> usize {
+        self.inner.directional_derivative_intervals.len()
+    }
+
     /// Returns the number of independently identified caller sources.
     pub fn source_count(&self) -> usize {
         self.inner.source_count
@@ -422,6 +450,7 @@ pub(crate) struct ProblemData {
     pub(crate) shared_level_sets: Vec<SharedLevelSetInput>,
     pub(crate) additive_field_gauges: Vec<AdditiveFieldGauge>,
     pub(crate) field_value_bounds: Vec<FieldValueBound>,
+    pub(crate) directional_derivative_intervals: Vec<DirectionalDerivativeInterval>,
     pub(crate) source_count: usize,
     pub(crate) resolved_kernel: KernelConfig,
     pub(crate) field_energy_normalization: FieldEnergyNormalization,
