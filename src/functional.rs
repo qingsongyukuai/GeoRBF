@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::math::canonical_zero;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FunctionalDimension {
     FieldValue,
     FieldValuePerLength,

@@ -1235,7 +1235,7 @@ pub(crate) struct CanonicalAffineInequality {
     violation_channel: Option<CanonicalViolationChannel>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CanonicalInequalitySense {
     Lower,
     Upper,

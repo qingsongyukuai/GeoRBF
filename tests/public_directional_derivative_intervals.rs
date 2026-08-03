@@ -8,9 +8,10 @@ use georbf::observation::{
 };
 use georbf::relation::{
     DirectionalDerivativeInterval, DirectionalDerivativeIntervalError,
-    DirectionalDerivativeViolationPenalty, LinearViolationPenalty,
+    DirectionalDerivativeViolationPenalty, FieldValueBound, LinearViolationPenalty,
+    SharedLevelSetBuilder,
 };
-use georbf::{Point3, ProblemBuilder, SourceId, Vector3};
+use georbf::{GroupId, Point3, ProblemBuilder, SourceId, Vector3};
 
 fn point(x: f64, y: f64, z: f64) -> Point3 {
     Point3::try_new(x, y, z).unwrap()
@@ -29,6 +30,17 @@ fn builder() -> ProblemBuilder {
         )
         .unwrap(),
         FieldUnitLabel::new("field"),
+    )
+}
+
+fn quadratic_truth([x, y, z]: [f64; 3]) -> (f64, [f64; 3]) {
+    (
+        2.0 + 0.5 * x - 1.25 * y + 0.75 * z + 0.2 * x * x - 0.15 * x * y + 0.1 * y * z,
+        [
+            0.5 + 0.4 * x - 0.15 * y,
+            -1.25 - 0.15 * x + 0.1 * z,
+            0.75 + 0.1 * y,
+        ],
     )
 }
 
@@ -217,6 +229,41 @@ fn typed_soft_sides_and_builder_insertion_remain_independent_and_atomic() {
 }
 
 #[test]
+fn derivative_only_gauge_failure_retains_the_interval_source() {
+    let mut builder = builder();
+    builder
+        .add(
+            DirectionalDerivativeInterval::try_lower(
+                SourceId::new("derivative-only"),
+                point(0.0, 0.0, 0.0),
+                vector(1.0, 0.0, 0.0),
+                1.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let failure = builder.build().unwrap().fit().unwrap_err();
+    assert_eq!(
+        failure.diagnosis(),
+        ProblemDiagnosis::UnidentifiedAdditiveGauge
+    );
+    let evidence = failure
+        .report()
+        .unidentified_additive_gauge()
+        .expect("shift-invariant derivative inputs retain their provenance");
+    assert_eq!(
+        evidence
+            .source_ids()
+            .iter()
+            .map(SourceId::as_str)
+            .collect::<Vec<_>>(),
+        ["derivative-only"]
+    );
+    assert!(!evidence.backend_invoked());
+}
+
+#[test]
 fn hard_lower_upper_and_interval_fit_through_the_public_qp_path() {
     let mut builder = builder();
     for (source, location, value) in [
@@ -307,6 +354,87 @@ fn hard_lower_upper_and_interval_fit_through_the_public_qp_path() {
             BoundActiveState::Inactive
         }
     );
+}
+
+#[test]
+fn manufactured_quadratic_data_fit_a_checked_directional_derivative_interval() {
+    let mut builder = builder();
+    for (index, support) in [
+        [-1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [1.0, 1.0, 0.5],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (value, _) = quadratic_truth(support);
+        builder
+            .add(
+                FieldValueObservation::try_new(
+                    SourceId::new(format!("quadratic-value-{index}")),
+                    point(support[0], support[1], support[2]),
+                    value,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    for (index, support) in [[0.25, -0.5, 0.75], [-0.75, 0.25, 0.5], [0.5, 0.75, -0.25]]
+        .into_iter()
+        .enumerate()
+    {
+        let (_, gradient) = quadratic_truth(support);
+        builder
+            .add(GradientObservation::new(
+                SourceId::new(format!("quadratic-gradient-{index}")),
+                point(support[0], support[1], support[2]),
+                vector(gradient[0], gradient[1], gradient[2]),
+            ))
+            .unwrap();
+    }
+    let support = [0.2, -0.3, 0.4];
+    let direction = [2.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0];
+    let (_, gradient) = quadratic_truth(support);
+    let derivative = gradient
+        .into_iter()
+        .zip(direction)
+        .map(|(component, direction)| component * direction)
+        .sum::<f64>();
+    builder
+        .add(
+            DirectionalDerivativeInterval::try_interval(
+                SourceId::new("quadratic-derivative"),
+                point(support[0], support[1], support[2]),
+                vector(direction[0], direction[1], direction[2]),
+                derivative - 1.0e-3,
+                derivative + 1.0e-3,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let success = builder.build().unwrap().fit().unwrap();
+    let assessments = success.report().directional_derivative_intervals();
+    assert_eq!(assessments.len(), 2);
+    assert!(
+        assessments
+            .iter()
+            .all(|assessment| assessment.violation() == 0.0)
+    );
+    let sample = success
+        .model()
+        .evaluate(point(support[0], support[1], support[2]))
+        .unwrap();
+    let recovered = sample
+        .gradient()
+        .components()
+        .into_iter()
+        .zip(direction)
+        .map(|(component, direction)| component * direction)
+        .sum::<f64>();
+    assert!((recovered - derivative).abs() <= 1.0e-3);
 }
 
 #[test]
@@ -499,6 +627,67 @@ fn exact_derivative_conflicts_are_preflighted_before_the_backend() {
     let failure = local_interval_conflict.build().unwrap().fit().unwrap_err();
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
     assert!(failure.report().attempts().is_empty());
+}
+
+#[test]
+fn infeasible_problem_with_a_derivative_interval_requires_a_validated_farkas_certificate() {
+    let mut level = SharedLevelSetBuilder::new(GroupId::new("one-level"));
+    for (source, location) in [
+        ("level/origin", point(0.0, 0.0, 0.0)),
+        ("level/east", point(1.0, 0.0, 0.0)),
+        ("level/north", point(0.0, 1.0, 0.0)),
+        ("level/up", point(0.0, 0.0, 1.0)),
+    ] {
+        level.add_member(SourceId::new(source), location).unwrap();
+    }
+    let mut builder = builder();
+    builder.add(level.build().unwrap()).unwrap();
+    builder
+        .add(FieldValueBound::try_lower(SourceId::new("lower"), point(0.0, 0.0, 0.0), 2.0).unwrap())
+        .unwrap();
+    builder
+        .add(FieldValueBound::try_upper(SourceId::new("upper"), point(1.0, 0.0, 0.0), 1.0).unwrap())
+        .unwrap();
+    builder
+        .add(
+            DirectionalDerivativeInterval::try_interval(
+                SourceId::new("derivative"),
+                point(0.0, 0.0, 0.0),
+                vector(1.0, 0.0, 0.0),
+                0.0,
+                0.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let failure = builder.build().unwrap().fit().unwrap_err();
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::InfeasibleProblem);
+    assert_eq!(
+        failure
+            .report()
+            .problem_size()
+            .affine_inequality_constraints(),
+        4
+    );
+    assert!(!failure.report().attempts().is_empty());
+    let certificate = failure
+        .report()
+        .infeasibility_certificate()
+        .expect("general derivative infeasibility requires independently validated evidence");
+    assert!(certificate.backend_invoked());
+    assert!(certificate.finite());
+    assert!((certificate.normalized_ray_norm() - 1.0).abs() <= 1.0e-12);
+    assert!(certificate.stationarity_residual() <= certificate.residual_limit());
+    assert!(certificate.dual_cone_violation() <= certificate.residual_limit());
+    assert!(certificate.separation_margin() >= certificate.separation_limit());
+    assert!(
+        failure
+            .report()
+            .attempts()
+            .iter()
+            .any(|attempt| attempt.certificate_present())
+    );
 }
 
 fn exact_zero_derivative_fit(use_interval: bool) -> georbf::fit::FitSuccess {

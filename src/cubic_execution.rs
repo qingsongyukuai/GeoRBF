@@ -274,6 +274,7 @@ pub(crate) struct CubicExecutionCore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QpFaultInjection {
+    Capacity,
     Provenance,
     ScalingMap,
     RecoveryMap,
@@ -503,8 +504,12 @@ fn solve_convex_qp(
         .and_then(|count| count.checked_add(problem.affine_inequalities.len()))
         .ok_or(QpAssemblyFailureReason::InvalidShape)
         .map_err(CubicExecutionFailure::Assembly)?;
-    let capacity = plan_convex_qp_capacity(variables, constraints, canonical_relations)
-        .map_err(|failure| CubicExecutionFailure::Capacity(Box::new(failure)))?;
+    let capacity = if matches!(fault, Some(QpFaultInjection::Capacity)) {
+        plan_convex_qp_capacity(usize::MAX, constraints, canonical_relations)
+    } else {
+        plan_convex_qp_capacity(variables, constraints, canonical_relations)
+    }
+    .map_err(|failure| CubicExecutionFailure::Capacity(Box::new(failure)))?;
     let mut representation = CubicRepresentation::new(fitting_uses, metric)
         .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
     representation.set_field_energy_normalization(problem.field_energy_normalization);
@@ -1311,7 +1316,26 @@ fn execute_qp_attempts(
                 internal_scaling_error,
             ));
         }
-        if matches!(candidate.attempt.termination, ClarabelTermination::Solved)
+        // Two active derivative-interval sides can consume the Standard
+        // backend's complete complementarity budget. A bounded near miss uses
+        // the existing Robust slot without changing either profile's policy.
+        let derivative_interval_problem = form.affine_inequality_rows.iter().any(|row| {
+            row.provenance
+                .semantic_role()
+                .as_str()
+                .starts_with("directional-derivative-interval/")
+        });
+        let retryable_standard_residual = derivative_interval_problem
+            && sequence == 0
+            && matches!(
+                failure_reason,
+                Some(QpAttemptFailureReason::BackendResidualExceeded)
+            )
+            && residuals.is_some_and(|residuals| {
+                residuals.maximum() <= 10.0 * EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit
+            });
+        if (matches!(candidate.attempt.termination, ClarabelTermination::Solved)
+            && !retryable_standard_residual)
             || matches!(
                 failure_reason,
                 Some(
@@ -3143,11 +3167,11 @@ mod tests {
         assert_eq!(qp.attempts[1].failure_reason, None);
         assert_eq!(
             qp.attempts[0].backend.settings.feasibility_tolerance,
-            1.0e-9
+            1.0e-8
         );
         assert_eq!(
             qp.attempts[1].backend.settings.feasibility_tolerance,
-            1.0e-10
+            1.0e-9
         );
         assert!(solution.canonical_acceptance_verified);
     }

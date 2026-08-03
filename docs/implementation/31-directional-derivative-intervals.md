@@ -51,9 +51,9 @@ The algebraic capability selects the issue 29 Clarabel QP path. Every soft side
 adds one explicit violation variable, one augmented affine row, and one
 nonnegativity row. Derivative quadratic and linear penalty reference scales are
 converted to field-value scale with the physical solve length before they enter
-the gauge-invariant characteristic scale. Backend stopping targets remain
-strictly inside the unchanged public convex residual acceptance envelope so a
-zero-width interval can recover both active sides reliably.
+the gauge-invariant characteristic scale. Backend stopping targets retain
+issue 30's established Standard/Robust policy; the unchanged public convex
+residual envelope verifies both sides before a zero-width interval is accepted.
 
 ## Recovery, reporting, and covariance
 
@@ -83,13 +83,15 @@ normalize the physical direction or residual.
 
 `tests/public_directional_derivative_intervals.rs` covers checked construction,
 typed soft configuration, atomic builder insertion, hard and soft public QP
-fits, independent side losses, Tangent equivalence, exact direct conflicts,
-positive direction scaling and input permutation, stable report ordering, and
-rotation/reflection/uniform-scale covariance with non-identity anisotropy.
+fits, manufactured affine and quadratic data, independent side losses,
+Tangent equivalence, exact direct conflicts, derivative-only gauge provenance,
+validated general infeasibility, positive direction scaling and input
+permutation, stable report ordering, and rotation/reflection/uniform-scale
+covariance with non-identity anisotropy.
 
-A narrow contract test injects QP recovery-map corruption through the public
-snapshot and verifies a structured `RecoveryVerificationFailure` with no
-model. Issue 30's cumulative valid/invalid certificate and capacity evidence,
-issue 29's backend/corruption corpus, and the complete pre-existing public,
+Narrow contract tests inject QP recovery-map corruption, a checked capacity
+rejection, and an invalid derivative-problem Farkas ray through public
+snapshots. They verify structured failures, retained evidence, and no model.
+Issue 29's backend/corruption corpus and the complete pre-existing public,
 canonical, audit, and package suites remain part of this capability's release
 boundary.

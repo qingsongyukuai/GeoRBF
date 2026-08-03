@@ -1188,6 +1188,13 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                     .flat_map(|group| group.members())
                     .map(|member| member.source_id().clone()),
             )
+            .chain(
+                snapshot
+                    .inner
+                    .directional_derivative_intervals
+                    .iter()
+                    .map(|interval| interval.source_id().clone()),
+            )
             .collect::<Vec<_>>();
         source_ids.sort();
         let group_ids = snapshot
@@ -2103,10 +2110,7 @@ impl EqualityLowering {
             index
         } else {
             let key = CanonicalBoundKey {
-                dimension: match inequality.dimension() {
-                    FunctionalDimension::FieldValue => 0,
-                    FunctionalDimension::FieldValuePerLength => 1,
-                },
+                dimension: inequality.dimension(),
                 field_terms: inequality
                     .field()
                     .into_iter()
@@ -2124,10 +2128,7 @@ impl EqualityLowering {
                     .iter()
                     .map(|term| (term.latent, canonical_scalar_bits(term.coefficient)))
                     .collect(),
-                side: match inequality.sense() {
-                    CanonicalInequalitySense::Lower => 0,
-                    CanonicalInequalitySense::Upper => 1,
-                },
+                side: inequality.sense(),
                 bound: canonical_scalar_bits(inequality.bound()),
             };
             if let Some(index) = self.canonical_bound_index_by_key.get(&key) {
@@ -2179,6 +2180,93 @@ impl EqualityLowering {
         });
     }
 
+    fn record_direct_derivative_bound_conflicts(&mut self, facts: &[HardDerivativeBoundFact]) {
+        let mut by_functional =
+            BTreeMap::<CanonicalEqualityKey, Vec<&HardDerivativeBoundFact>>::new();
+        for fact in facts {
+            by_functional
+                .entry(fact.functional_key.clone())
+                .or_default()
+                .push(fact);
+        }
+        for (functional_key, functional_facts) in by_functional {
+            for (index, left) in functional_facts.iter().enumerate() {
+                for right in &functional_facts[index + 1..] {
+                    let incompatible = match (left.sense, right.sense) {
+                        (CanonicalInequalitySense::Lower, CanonicalInequalitySense::Upper) => {
+                            left.bound > right.bound
+                        }
+                        (CanonicalInequalitySense::Upper, CanonicalInequalitySense::Lower) => {
+                            right.bound > left.bound
+                        }
+                        _ => false,
+                    };
+                    if incompatible {
+                        let (first, second) = if left.source_id <= right.source_id {
+                            (left, right)
+                        } else {
+                            (right, left)
+                        };
+                        self.direct_input_conflicts
+                            .push(DirectInputConflictEvidence::new(
+                                first.source_id.clone(),
+                                second.source_id.clone(),
+                                second.semantic_role.clone(),
+                                first.bound,
+                                second.bound,
+                            ));
+                    }
+                }
+            }
+            for source_relation in &self.source_relations {
+                let (equality_key, equality_target) =
+                    normalized_equality_key(&source_relation.equality);
+                if equality_key != functional_key {
+                    continue;
+                }
+                for fact in &functional_facts {
+                    let incompatible = match fact.sense {
+                        CanonicalInequalitySense::Lower => equality_target < fact.bound,
+                        CanonicalInequalitySense::Upper => equality_target > fact.bound,
+                    };
+                    if incompatible {
+                        let equality_source = source_relation.equality.provenance().source();
+                        let (first_source, first_target, second_source, second_target) =
+                            if equality_source <= &fact.source_id {
+                                (
+                                    equality_source.clone(),
+                                    equality_target,
+                                    fact.source_id.clone(),
+                                    fact.bound,
+                                )
+                            } else {
+                                (
+                                    fact.source_id.clone(),
+                                    fact.bound,
+                                    equality_source.clone(),
+                                    equality_target,
+                                )
+                            };
+                        self.direct_input_conflicts
+                            .push(DirectInputConflictEvidence::new(
+                                first_source,
+                                second_source,
+                                fact.semantic_role.clone(),
+                                first_target,
+                                second_target,
+                            ));
+                    }
+                }
+            }
+        }
+        self.direct_input_conflicts.sort_by(|left, right| {
+            left.semantic_role()
+                .cmp(right.semantic_role())
+                .then_with(|| left.first_source().cmp(right.first_source()))
+                .then_with(|| left.second_source().cmp(right.second_source()))
+        });
+    }
+
     fn solver_equality_count(&self) -> usize {
         self.canonical_equalities
             .iter()
@@ -2191,17 +2279,17 @@ impl EqualityLowering {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CanonicalEqualityKey {
-    dimension: u8,
+    dimension: FunctionalDimension,
     field_terms: Vec<([u64; 3], u64, [u64; 3])>,
     latent_coefficients: Vec<(usize, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CanonicalBoundKey {
-    dimension: u8,
+    dimension: FunctionalDimension,
     field_terms: Vec<([u64; 3], u64, [u64; 3])>,
     latent_coefficients: Vec<(usize, u64)>,
-    side: u8,
+    side: CanonicalInequalitySense,
     bound: u64,
 }
 
@@ -2492,10 +2580,7 @@ fn canonical_scalar_bits(value: f64) -> u64 {
 
 fn normalized_equality_key(equality: &CanonicalHardEquality) -> (CanonicalEqualityKey, f64) {
     let sign = canonical_normalization_sign(equality.field(), equality.latent_coefficients());
-    let dimension = match equality.dimension() {
-        FunctionalDimension::FieldValue => 0,
-        FunctionalDimension::FieldValuePerLength => 1,
-    };
+    let dimension = equality.dimension();
     let field_terms = equality
         .field()
         .into_iter()
@@ -2543,6 +2628,49 @@ fn canonical_normalization_sign(
     } else {
         1.0
     }
+}
+
+fn affine_bound_inequality(
+    source_id: &SourceId,
+    semantic_role: &'static str,
+    functional: CanonicalFunctional,
+    dimension: FunctionalDimension,
+    sense: CanonicalInequalitySense,
+    side: AffineBoundSide,
+) -> CanonicalAffineInequality {
+    let provenance = relation_provenance(
+        source_id.clone(),
+        None,
+        SemanticRolePath::new(semantic_role),
+    );
+    let violation_channel = match side.configuration {
+        AffineBoundConfiguration::Hard => None,
+        AffineBoundConfiguration::QuadraticPenalty(penalty) => {
+            Some(CanonicalViolationChannel::new(
+                provenance.residual().clone(),
+                CanonicalViolationLoss::QuadraticPenalty {
+                    weight: penalty.weight(),
+                },
+            ))
+        }
+        AffineBoundConfiguration::LinearViolationPenalty(penalty) => {
+            Some(CanonicalViolationChannel::new(
+                provenance.residual().clone(),
+                CanonicalViolationLoss::LinearViolationPenalty {
+                    weight: penalty.weight(),
+                },
+            ))
+        }
+    };
+    CanonicalAffineInequality::new(
+        Some(FunctionalUse::new(functional, provenance.clone())),
+        Vec::new(),
+        provenance,
+        dimension,
+        sense,
+        side.bound,
+        violation_channel,
+    )
 }
 
 fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
@@ -2634,8 +2762,6 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             let Some(side) = side else {
                 continue;
             };
-            let semantic_role = SemanticRolePath::new(role);
-            let provenance = relation_provenance(bound.source_id().clone(), None, semantic_role);
             let functional = CanonicalFunctional::new(
                 FunctionalDimension::FieldValue,
                 vec![FunctionalTerm::new(
@@ -2645,46 +2771,24 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 )],
             )
             .expect("a checked Field Value Bound lowers to one finite value functional");
-            let violation_channel = match side.configuration {
-                AffineBoundConfiguration::Hard => {
-                    hard_bound_facts.push(HardBoundFact {
-                        source_id: bound.source_id().clone(),
-                        support: bound.location().components(),
-                        sense,
-                        bound: side.bound,
-                        semantic_role: provenance.semantic_role().clone(),
-                    });
-                    None
-                }
-                AffineBoundConfiguration::QuadraticPenalty(penalty) => {
-                    Some(CanonicalViolationChannel::new(
-                        provenance.residual().clone(),
-                        CanonicalViolationLoss::QuadraticPenalty {
-                            weight: penalty.weight(),
-                        },
-                    ))
-                }
-                AffineBoundConfiguration::LinearViolationPenalty(penalty) => {
-                    Some(CanonicalViolationChannel::new(
-                        provenance.residual().clone(),
-                        CanonicalViolationLoss::LinearViolationPenalty {
-                            weight: penalty.weight(),
-                        },
-                    ))
-                }
-            };
-            lowering.push_bound(
-                CanonicalAffineInequality::new(
-                    Some(FunctionalUse::new(functional, provenance.clone())),
-                    Vec::new(),
-                    provenance,
-                    FunctionalDimension::FieldValue,
-                    sense,
-                    side.bound,
-                    violation_channel,
-                ),
-                SourceBoundKind::FieldValue,
+            let inequality = affine_bound_inequality(
+                bound.source_id(),
+                role,
+                functional,
+                FunctionalDimension::FieldValue,
+                sense,
+                *side,
             );
+            if matches!(side.configuration, AffineBoundConfiguration::Hard) {
+                hard_bound_facts.push(HardBoundFact {
+                    source_id: bound.source_id().clone(),
+                    support: bound.location().components(),
+                    sense,
+                    bound: side.bound,
+                    semantic_role: inequality.provenance().semantic_role().clone(),
+                });
+            }
+            lowering.push_bound(inequality, SourceBoundKind::FieldValue);
         }
     }
 
@@ -2704,8 +2808,6 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             let Some(side) = side else {
                 continue;
             };
-            let semantic_role = SemanticRolePath::new(role);
-            let provenance = relation_provenance(interval.source_id().clone(), None, semantic_role);
             let functional = CanonicalFunctional::new(
                 FunctionalDimension::FieldValuePerLength,
                 vec![FunctionalTerm::new(
@@ -2715,33 +2817,13 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                 )],
             )
             .expect("a checked Directional Derivative Interval lowers to one finite functional");
-            let violation_channel = match side.configuration {
-                AffineBoundConfiguration::Hard => None,
-                AffineBoundConfiguration::QuadraticPenalty(penalty) => {
-                    Some(CanonicalViolationChannel::new(
-                        provenance.residual().clone(),
-                        CanonicalViolationLoss::QuadraticPenalty {
-                            weight: penalty.weight(),
-                        },
-                    ))
-                }
-                AffineBoundConfiguration::LinearViolationPenalty(penalty) => {
-                    Some(CanonicalViolationChannel::new(
-                        provenance.residual().clone(),
-                        CanonicalViolationLoss::LinearViolationPenalty {
-                            weight: penalty.weight(),
-                        },
-                    ))
-                }
-            };
-            let inequality = CanonicalAffineInequality::new(
-                Some(FunctionalUse::new(functional, provenance.clone())),
-                Vec::new(),
-                provenance,
+            let inequality = affine_bound_inequality(
+                interval.source_id(),
+                role,
+                functional,
                 FunctionalDimension::FieldValuePerLength,
                 sense,
-                side.bound,
-                violation_channel,
+                *side,
             );
             if matches!(side.configuration, AffineBoundConfiguration::Hard) {
                 let (functional_key, sign) = canonical_inequality_functional_key(&inequality);
@@ -2912,7 +2994,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
         }
     }
     record_direct_bound_conflicts(&mut lowering, &mut value_constraints, &hard_bound_facts);
-    record_direct_derivative_bound_conflicts(&mut lowering, &hard_derivative_bound_facts);
+    lowering.record_direct_derivative_bound_conflicts(&hard_derivative_bound_facts);
     lowering
 }
 
@@ -2932,97 +3014,6 @@ struct HardDerivativeBoundFact {
     sense: CanonicalInequalitySense,
     bound: f64,
     semantic_role: SemanticRolePath,
-}
-
-fn record_direct_derivative_bound_conflicts(
-    lowering: &mut EqualityLowering,
-    facts: &[HardDerivativeBoundFact],
-) {
-    let mut by_functional = BTreeMap::<CanonicalEqualityKey, Vec<&HardDerivativeBoundFact>>::new();
-    for fact in facts {
-        by_functional
-            .entry(fact.functional_key.clone())
-            .or_default()
-            .push(fact);
-    }
-    for (functional_key, functional_facts) in by_functional {
-        for (index, left) in functional_facts.iter().enumerate() {
-            for right in &functional_facts[index + 1..] {
-                let incompatible = match (left.sense, right.sense) {
-                    (CanonicalInequalitySense::Lower, CanonicalInequalitySense::Upper) => {
-                        left.bound > right.bound
-                    }
-                    (CanonicalInequalitySense::Upper, CanonicalInequalitySense::Lower) => {
-                        right.bound > left.bound
-                    }
-                    _ => false,
-                };
-                if incompatible {
-                    let (first, second) = if left.source_id <= right.source_id {
-                        (left, right)
-                    } else {
-                        (right, left)
-                    };
-                    lowering
-                        .direct_input_conflicts
-                        .push(DirectInputConflictEvidence::new(
-                            first.source_id.clone(),
-                            second.source_id.clone(),
-                            second.semantic_role.clone(),
-                            first.bound,
-                            second.bound,
-                        ));
-                }
-            }
-        }
-        for source_relation in &lowering.source_relations {
-            let (equality_key, equality_target) =
-                normalized_equality_key(&source_relation.equality);
-            if equality_key != functional_key {
-                continue;
-            }
-            for fact in &functional_facts {
-                let incompatible = match fact.sense {
-                    CanonicalInequalitySense::Lower => equality_target < fact.bound,
-                    CanonicalInequalitySense::Upper => equality_target > fact.bound,
-                };
-                if incompatible {
-                    let equality_source = source_relation.equality.provenance().source();
-                    let (first_source, first_target, second_source, second_target) =
-                        if equality_source <= &fact.source_id {
-                            (
-                                equality_source.clone(),
-                                equality_target,
-                                fact.source_id.clone(),
-                                fact.bound,
-                            )
-                        } else {
-                            (
-                                fact.source_id.clone(),
-                                fact.bound,
-                                equality_source.clone(),
-                                equality_target,
-                            )
-                        };
-                    lowering
-                        .direct_input_conflicts
-                        .push(DirectInputConflictEvidence::new(
-                            first_source,
-                            second_source,
-                            fact.semantic_role.clone(),
-                            first_target,
-                            second_target,
-                        ));
-                }
-            }
-        }
-    }
-    lowering.direct_input_conflicts.sort_by(|left, right| {
-        left.semantic_role()
-            .cmp(right.semantic_role())
-            .then_with(|| left.first_source().cmp(right.first_source()))
-            .then_with(|| left.second_source().cmp(right.second_source()))
-    });
 }
 
 fn canonical_inequality_functional_key(
@@ -4956,7 +4947,7 @@ mod tests {
         builder.build().unwrap()
     }
 
-    fn injectable_derivative_interval_snapshot() -> ProblemSnapshot {
+    fn derivative_interval_snapshot(upper_bound: f64) -> ProblemSnapshot {
         let snapshot = injectable_snapshot();
         let mut builder = ProblemBuilder::new(
             snapshot.input_coordinate_frame().clone(),
@@ -4976,7 +4967,7 @@ mod tests {
                     SourceId::new("derivative-interval"),
                     Point3::try_new(0.5, 0.5, 0.5).unwrap(),
                     Vector3::try_new(1.0, 2.0, 2.0).unwrap(),
-                    10.0,
+                    upper_bound,
                 )
                 .unwrap(),
             )
@@ -4984,7 +4975,19 @@ mod tests {
         builder.build().unwrap()
     }
 
+    fn injectable_derivative_interval_snapshot() -> ProblemSnapshot {
+        derivative_interval_snapshot(10.0)
+    }
+
+    fn injectable_infeasible_derivative_interval_snapshot() -> ProblemSnapshot {
+        injectable_infeasible_snapshot(true)
+    }
+
     fn injectable_infeasible_bounded_snapshot() -> ProblemSnapshot {
+        injectable_infeasible_snapshot(false)
+    }
+
+    fn injectable_infeasible_snapshot(include_derivative_interval: bool) -> ProblemSnapshot {
         let mut builder = ProblemBuilder::new(
             InputCoordinateFrame::try_new(
                 ["x", "y", "z"],
@@ -5029,6 +5032,20 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        if include_derivative_interval {
+            builder
+                .add(
+                    DirectionalDerivativeInterval::try_interval(
+                        SourceId::new("derivative-interval"),
+                        Point3::try_new(0.5, 0.5, 0.5).unwrap(),
+                        Vector3::try_new(1.0, 2.0, 2.0).unwrap(),
+                        0.0,
+                        0.0,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
         builder.build().unwrap()
     }
 
@@ -5162,11 +5179,46 @@ mod tests {
     }
 
     #[test]
+    fn derivative_interval_qp_capacity_failure_is_structured_before_allocation() {
+        inject_qp_fault_once(QpFaultInjection::Capacity);
+        let failure = injectable_derivative_interval_snapshot()
+            .fit()
+            .expect_err("an oversized derivative QP plan must not attempt allocation");
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::CapacityExceeded);
+        let capacity = failure
+            .report()
+            .capacity()
+            .expect("the derivative QP capacity failure retains checked evidence");
+        assert!(!capacity.large_allocation_attempted());
+        assert!(!capacity.backend_invocation_attempted());
+        assert!(failure.report().attempts().is_empty());
+    }
+
+    #[test]
     fn invalid_farkas_candidates_remain_a_numerical_failure_without_a_model() {
         inject_qp_fault_once(QpFaultInjection::InfeasibilityCertificate);
         let failure = injectable_infeasible_bounded_snapshot()
             .fit()
             .expect_err("unvalidated backend rays must not prove infeasibility");
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+        assert!(failure.report().infeasibility_certificate().is_none());
+        assert_eq!(failure.report().attempts().len(), 2);
+        assert!(failure.report().attempts().iter().all(|attempt| {
+            attempt.certificate_present()
+                && attempt.failure_reason().is_some_and(|evidence| {
+                    evidence.category() == AttemptFailureCategory::InvalidInfeasibilityCertificate
+                })
+        }));
+    }
+
+    #[test]
+    fn invalid_derivative_farkas_candidates_remain_unverified_without_a_model() {
+        inject_qp_fault_once(QpFaultInjection::InfeasibilityCertificate);
+        let failure = injectable_infeasible_derivative_interval_snapshot()
+            .fit()
+            .expect_err("unvalidated derivative-bound rays must not prove infeasibility");
 
         assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
         assert!(failure.report().infeasibility_certificate().is_none());

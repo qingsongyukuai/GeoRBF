@@ -268,11 +268,8 @@ fn dense_csc(rows: usize, columns: usize, row_major: &[f64]) -> CscMatrix<f64> {
 
 fn resolved_settings(profile: ClarabelAttemptProfile) -> DefaultSettings<f64> {
     let (max_iter, tolerance, refinement_iterations) = match profile {
-        // Backend stopping targets stay one decade inside GeoRBF's verified
-        // convex residual envelope so two active sides of a closed interval do
-        // not consume the complete public acceptance budget in backend noise.
-        ClarabelAttemptProfile::Standard => (200, 1.0e-9, 10),
-        ClarabelAttemptProfile::Robust => (400, 1.0e-10, 20),
+        ClarabelAttemptProfile::Standard => (200, 1.0e-8, 10),
+        ClarabelAttemptProfile::Robust => (400, 1.0e-9, 20),
     };
     DefaultSettings {
         max_iter,
