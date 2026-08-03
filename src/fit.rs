@@ -1655,6 +1655,23 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         });
     }
     let lowering = lower_snapshot(snapshot);
+    if let Some(conflict) = canonical_affine_value_cycle_conflict(snapshot, &lowering) {
+        preflight_report
+            .shared_level_set_relation_conflicts
+            .push(conflict);
+        preflight_report
+            .shared_level_set_relation_conflicts
+            .sort_by(|left, right| {
+                left.source_ids()
+                    .cmp(right.source_ids())
+                    .then_with(|| left.group_ids().cmp(right.group_ids()))
+            });
+        return Err(FitFailure {
+            diagnosis: primary_preflight_diagnosis(&preflight_report)
+                .expect("a canonical affine cycle conflict always supplies a diagnosis"),
+            report: Box::new(preflight_report),
+        });
+    }
     let fitting_uses = canonical_fitting_uses(
         &lowering.canonical_equalities,
         &lowering.canonical_soft_equalities,
@@ -3567,9 +3584,6 @@ fn preflight_shared_level_set_relation_conflicts(
         snapshot,
         &mut value_constraints,
     ));
-    if let Some(conflict) = positive_affine_value_cycle_conflict(snapshot) {
-        conflicts.push(conflict);
-    }
     conflicts.sort_by(|left, right| {
         left.source_ids()
             .cmp(right.source_ids())
@@ -3588,226 +3602,196 @@ enum AffineValueNode {
 
 #[derive(Debug, Clone)]
 struct HardAffineValueEdge {
-    source_id: SourceId,
-    group_ids: Vec<GroupId>,
-    semantic_role: SemanticRolePath,
+    provenance: UsageProvenance,
     from: AffineValueNode,
     to: AffineValueNode,
-    minimum_difference: f64,
+    minimum_difference: ExactDyadic,
 }
 
-fn push_hard_affine_edge(
-    edges: &mut Vec<HardAffineValueEdge>,
-    source_id: SourceId,
-    group_ids: Vec<GroupId>,
-    semantic_role: SemanticRolePath,
-    from: AffineValueNode,
-    to: AffineValueNode,
-    minimum_difference: f64,
-) {
-    edges.push(HardAffineValueEdge {
-        source_id,
-        group_ids,
-        semantic_role,
-        from,
-        to,
-        minimum_difference,
-    });
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// An exact signed integer multiple of `2^-1074`, the finest binary64 unit.
+struct ExactDyadic {
+    negative: bool,
+    magnitude: Vec<u64>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_exact_affine_value(
-    edges: &mut Vec<HardAffineValueEdge>,
-    anchor: &AffineValueNode,
-    source_id: SourceId,
-    group_ids: Vec<GroupId>,
-    semantic_role: SemanticRolePath,
-    node: AffineValueNode,
-    value: f64,
-) {
-    push_hard_affine_edge(
-        edges,
-        source_id.clone(),
-        group_ids.clone(),
-        semantic_role.clone(),
-        anchor.clone(),
-        node.clone(),
-        value,
-    );
-    push_hard_affine_edge(
-        edges,
-        source_id,
-        group_ids,
-        semantic_role,
-        node,
-        anchor.clone(),
-        -value,
-    );
+impl ExactDyadic {
+    fn zero() -> Self {
+        Self {
+            negative: false,
+            magnitude: Vec::new(),
+        }
+    }
+
+    fn from_f64(value: f64) -> Self {
+        debug_assert!(value.is_finite());
+        if value == 0.0 {
+            return Self::zero();
+        }
+        let bits = value.to_bits();
+        let negative = bits >> 63 != 0;
+        let raw_exponent = ((bits >> 52) & 0x7ff) as usize;
+        let fraction = bits & ((1_u64 << 52) - 1);
+        let (significand, shift) = if raw_exponent == 0 {
+            (fraction, 0)
+        } else {
+            ((1_u64 << 52) | fraction, raw_exponent - 1)
+        };
+        let limb = shift / 64;
+        let bit = shift % 64;
+        let mut magnitude = vec![0_u64; limb + 2];
+        magnitude[limb] = significand << bit;
+        if bit != 0 {
+            magnitude[limb + 1] = significand >> (64 - bit);
+        }
+        Self::normalized(negative, magnitude)
+    }
+
+    fn negated(&self) -> Self {
+        if self.magnitude.is_empty() {
+            return Self::zero();
+        }
+        Self {
+            negative: !self.negative,
+            magnitude: self.magnitude.clone(),
+        }
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        if self.negative == other.negative {
+            return Self::normalized(
+                self.negative,
+                add_magnitudes(&self.magnitude, &other.magnitude),
+            );
+        }
+        match compare_magnitudes(&self.magnitude, &other.magnitude) {
+            std::cmp::Ordering::Greater => Self::normalized(
+                self.negative,
+                subtract_magnitudes(&self.magnitude, &other.magnitude),
+            ),
+            std::cmp::Ordering::Less => Self::normalized(
+                other.negative,
+                subtract_magnitudes(&other.magnitude, &self.magnitude),
+            ),
+            std::cmp::Ordering::Equal => Self::zero(),
+        }
+    }
+
+    fn is_greater_than(&self, other: &Self) -> bool {
+        if self.negative != other.negative {
+            return other.negative;
+        }
+        match compare_magnitudes(&self.magnitude, &other.magnitude) {
+            std::cmp::Ordering::Greater => !self.negative,
+            std::cmp::Ordering::Less => self.negative,
+            std::cmp::Ordering::Equal => false,
+        }
+    }
+
+    fn is_positive(&self) -> bool {
+        !self.negative && !self.magnitude.is_empty()
+    }
+
+    fn normalized(negative: bool, mut magnitude: Vec<u64>) -> Self {
+        while magnitude.last() == Some(&0) {
+            magnitude.pop();
+        }
+        Self {
+            negative: negative && !magnitude.is_empty(),
+            magnitude,
+        }
+    }
 }
 
-fn positive_affine_value_cycle_conflict(
+fn compare_magnitudes(left: &[u64], right: &[u64]) -> std::cmp::Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.iter().rev().cmp(right.iter().rev()))
+}
+
+fn add_magnitudes(left: &[u64], right: &[u64]) -> Vec<u64> {
+    let mut sum = Vec::with_capacity(left.len().max(right.len()) + 1);
+    let mut carry = 0_u128;
+    for index in 0..left.len().max(right.len()) {
+        let total = u128::from(left.get(index).copied().unwrap_or(0))
+            + u128::from(right.get(index).copied().unwrap_or(0))
+            + carry;
+        sum.push(total as u64);
+        carry = total >> 64;
+    }
+    if carry != 0 {
+        sum.push(carry as u64);
+    }
+    sum
+}
+
+fn subtract_magnitudes(larger: &[u64], smaller: &[u64]) -> Vec<u64> {
+    debug_assert!(compare_magnitudes(larger, smaller) != std::cmp::Ordering::Less);
+    let mut difference = Vec::with_capacity(larger.len());
+    let mut borrow = false;
+    for (index, larger_limb) in larger.iter().copied().enumerate() {
+        let (without_smaller, first_borrow) =
+            larger_limb.overflowing_sub(smaller.get(index).copied().unwrap_or(0));
+        let (limb, second_borrow) = without_smaller.overflowing_sub(u64::from(borrow));
+        difference.push(limb);
+        borrow = first_borrow || second_borrow;
+    }
+    debug_assert!(!borrow);
+    difference
+}
+
+fn canonical_affine_value_cycle_conflict(
     snapshot: &ProblemSnapshot,
+    lowering: &EqualityLowering,
 ) -> Option<SharedLevelSetRelationConflictEvidence> {
     if snapshot.inner.field_separation_intervals.is_empty()
         && snapshot.inner.point_to_level_set_relations.is_empty()
     {
         return None;
     }
-    let anchor = AffineValueNode::Anchor;
-    let support =
-        |point: Point3| AffineValueNode::Support(canonical_support_bits(point.components()));
-    let group = |group_id: &GroupId| AffineValueNode::Group(group_id.clone());
-    let mut edges = Vec::<HardAffineValueEdge>::new();
-
-    for observation in &snapshot.inner.observations {
-        let ObservationInput::FieldValue(observation) = observation else {
-            continue;
-        };
-        if !matches!(observation.configuration(), FieldValueConfiguration::Hard) {
-            continue;
-        }
-        push_exact_affine_value(
-            &mut edges,
-            &anchor,
-            observation.source_id().clone(),
-            Vec::new(),
-            SemanticRolePath::new("field-value-observation/value"),
-            support(observation.location()),
-            observation.value(),
-        );
-    }
-    for level in &snapshot.inner.shared_level_sets {
-        for member in level.members() {
-            let level_node = group(level.group_id());
-            let support_node = support(member.location());
-            let role = SemanticRolePath::new("shared-level-set/member/value");
-            let groups = vec![level.group_id().clone()];
-            push_hard_affine_edge(
-                &mut edges,
-                member.source_id().clone(),
-                groups.clone(),
-                role.clone(),
-                level_node.clone(),
-                support_node.clone(),
-                0.0,
-            );
-            push_hard_affine_edge(
-                &mut edges,
-                member.source_id().clone(),
-                groups,
-                role,
-                support_node,
-                level_node,
-                0.0,
-            );
-        }
-    }
-    for gauge in &snapshot.inner.additive_field_gauges {
-        let (node, groups, role) = match gauge.reference() {
-            AdditiveFieldGaugeReference::Point(point) => (
-                support(*point),
-                Vec::new(),
-                SemanticRolePath::new("additive-field-gauge/point"),
-            ),
-            AdditiveFieldGaugeReference::LevelSet(group_id) => (
-                group(group_id),
-                vec![group_id.clone()],
-                SemanticRolePath::new("additive-field-gauge/level-set"),
-            ),
-        };
-        push_exact_affine_value(
-            &mut edges,
-            &anchor,
-            gauge.source_id().clone(),
-            groups,
-            role,
-            node,
-            gauge.value(),
-        );
-    }
-    for relation in &snapshot.inner.shared_level_set_relations {
-        let Some(edge) =
-            hard_shared_level_edge(relation, snapshot.inner.stratigraphic_field_direction)
-        else {
-            continue;
-        };
-        push_hard_affine_edge(
-            &mut edges,
-            edge.source_id,
-            vec![edge.from.clone(), edge.to.clone()],
-            edge.semantic_role,
-            group(&edge.from),
-            group(&edge.to),
-            edge.minimum_difference,
-        );
-    }
-    for interval in &snapshot.inner.field_separation_intervals {
-        let groups = vec![
-            interval.reference_group_id().clone(),
-            interval.target_group_id().clone(),
-        ];
-        if matches!(
-            interval.lower().configuration,
-            AffineBoundConfiguration::Hard
-        ) {
-            push_hard_affine_edge(
-                &mut edges,
-                interval.source_id().clone(),
-                groups.clone(),
-                SemanticRolePath::new("field-separation-interval/lower"),
-                group(interval.reference_group_id()),
-                group(interval.target_group_id()),
-                interval.lower_bound(),
-            );
-        }
-        if matches!(
-            interval.upper().configuration,
-            AffineBoundConfiguration::Hard
-        ) {
-            push_hard_affine_edge(
-                &mut edges,
-                interval.source_id().clone(),
-                groups,
-                SemanticRolePath::new("field-separation-interval/upper"),
-                group(interval.target_group_id()),
-                group(interval.reference_group_id()),
-                -interval.upper_bound(),
-            );
-        }
-    }
-    for relation in &snapshot.inner.point_to_level_set_relations {
-        if !matches!(relation.configuration(), AffineBoundConfiguration::Hard) {
-            continue;
-        }
-        let level_node = group(relation.group_id());
-        let point_node = support(relation.location());
-        let (from, to, role) = match relation.side() {
-            PointToLevelSetSide::Increasing => (
-                level_node,
-                point_node,
-                "point-to-level-set/increasing/minimum-field-offset",
-            ),
-            PointToLevelSetSide::Decreasing => (
-                point_node,
-                level_node,
-                "point-to-level-set/decreasing/minimum-field-offset",
-            ),
-        };
-        push_hard_affine_edge(
-            &mut edges,
-            relation.source_id().clone(),
-            vec![relation.group_id().clone()],
-            SemanticRolePath::new(role),
-            from,
-            to,
-            relation.minimum_offset().value(),
-        );
-    }
+    let issue_33_sources = snapshot
+        .inner
+        .field_separation_intervals
+        .iter()
+        .map(|relation| relation.source_id().clone())
+        .chain(
+            snapshot
+                .inner
+                .point_to_level_set_relations
+                .iter()
+                .map(|relation| relation.source_id().clone()),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut edges = lowering
+        .canonical_equalities
+        .iter()
+        .filter_map(|equality| canonical_exact_value_edge(equality, lowering))
+        .flat_map(|edge| {
+            let reverse = HardAffineValueEdge {
+                provenance: edge.provenance.clone(),
+                from: edge.to.clone(),
+                to: edge.from.clone(),
+                minimum_difference: edge.minimum_difference.negated(),
+            };
+            [edge, reverse]
+        })
+        .chain(
+            lowering
+                .source_bound_relations
+                .iter()
+                .filter_map(|relation| canonical_affine_value_edge(&relation.inequality, lowering)),
+        )
+        .collect::<Vec<_>>();
 
     edges.sort_by(|left, right| {
-        left.source_id
-            .cmp(&right.source_id)
-            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+        left.provenance
+            .source()
+            .cmp(right.provenance.source())
+            .then_with(|| {
+                left.provenance
+                    .semantic_role()
+                    .cmp(right.provenance.semantic_role())
+            })
             .then_with(|| left.from.cmp(&right.from))
             .then_with(|| left.to.cmp(&right.to))
     });
@@ -3817,26 +3801,161 @@ fn positive_affine_value_cycle_conflict(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let proof_edges = positive_canonical_affine_cycle(&edges, &nodes, &issue_33_sources)?;
+    let source_provenance = proof_edges
+        .into_iter()
+        .map(|edge_index| {
+            let edge = &edges[edge_index];
+            SharedLevelSetConflictSourceEvidence::new(
+                edge.provenance.source().clone(),
+                edge.provenance.groups().to_vec(),
+                edge.provenance.semantic_role().clone(),
+            )
+        })
+        .collect();
+    Some(SharedLevelSetRelationConflictEvidence::new(
+        source_provenance,
+    ))
+}
+
+fn canonical_exact_value_edge(
+    equality: &CanonicalHardEquality,
+    lowering: &EqualityLowering,
+) -> Option<HardAffineValueEdge> {
+    if equality.dimension() != FunctionalDimension::FieldValue {
+        return None;
+    }
+    let (from, to) = canonical_unit_difference_nodes(
+        equality.field(),
+        equality.latent_coefficients(),
+        1.0,
+        lowering,
+    )?;
+    Some(HardAffineValueEdge {
+        provenance: equality.provenance().clone(),
+        from,
+        to,
+        minimum_difference: ExactDyadic::from_f64(equality.target()),
+    })
+}
+
+fn canonical_affine_value_edge(
+    inequality: &CanonicalAffineInequality,
+    lowering: &EqualityLowering,
+) -> Option<HardAffineValueEdge> {
+    if inequality.dimension() != FunctionalDimension::FieldValue
+        || inequality.violation_channel().is_some()
+    {
+        return None;
+    }
+    let multiplier = match inequality.sense() {
+        CanonicalInequalitySense::Lower => 1.0,
+        CanonicalInequalitySense::Upper => -1.0,
+    };
+    let (from, to) = canonical_unit_difference_nodes(
+        inequality.field(),
+        inequality.latent_coefficients(),
+        multiplier,
+        lowering,
+    )?;
+    Some(HardAffineValueEdge {
+        provenance: inequality.provenance().clone(),
+        from,
+        to,
+        minimum_difference: ExactDyadic::from_f64(multiplier * inequality.bound()),
+    })
+}
+
+fn canonical_unit_difference_nodes(
+    field: Option<&FunctionalUse>,
+    latent_coefficients: &[SemanticLatentCoefficient],
+    multiplier: f64,
+    lowering: &EqualityLowering,
+) -> Option<(AffineValueNode, AffineValueNode)> {
+    let mut coefficients = Vec::new();
+    for term in field.into_iter().flat_map(|use_| use_.functional().terms()) {
+        if term.gradient_coefficient() != [0.0; 3] {
+            return None;
+        }
+        coefficients.push((
+            AffineValueNode::Support(canonical_support_bits(term.support())),
+            multiplier * term.value_coefficient(),
+        ));
+    }
+    for term in latent_coefficients {
+        coefficients.push((
+            AffineValueNode::Group(lowering.semantic_latents.get(term.latent)?.group_id.clone()),
+            multiplier * term.coefficient,
+        ));
+    }
+    coefficients.sort_by(|left, right| left.0.cmp(&right.0));
+    match coefficients.as_slice() {
+        [(node, 1.0)] => Some((AffineValueNode::Anchor, node.clone())),
+        [(node, -1.0)] => Some((node.clone(), AffineValueNode::Anchor)),
+        [(left, -1.0), (right, 1.0)] => Some((left.clone(), right.clone())),
+        [(left, 1.0), (right, -1.0)] => Some((right.clone(), left.clone())),
+        _ => None,
+    }
+}
+
+fn positive_canonical_affine_cycle(
+    edges: &[HardAffineValueEdge],
+    nodes: &[AffineValueNode],
+    issue_33_sources: &std::collections::BTreeSet<SourceId>,
+) -> Option<Vec<usize>> {
     let node_index = nodes
         .iter()
         .cloned()
         .enumerate()
         .map(|(index, node)| (node, index))
         .collect::<BTreeMap<_, _>>();
-    let mut distances = vec![0.0_f64; nodes.len()];
+    let mut adjacency = vec![Vec::new(); nodes.len()];
+    let mut reverse_adjacency = vec![Vec::new(); nodes.len()];
+    for edge in edges {
+        let from = node_index[&edge.from];
+        let to = node_index[&edge.to];
+        adjacency[from].push(to);
+        reverse_adjacency[to].push(from);
+    }
+    let components = strongly_connected_components(&adjacency, &reverse_adjacency);
+    let selected_components = edges
+        .iter()
+        .filter(|edge| issue_33_sources.contains(edge.provenance.source()))
+        .filter_map(|edge| {
+            let from_component = components[node_index[&edge.from]];
+            (from_component == components[node_index[&edge.to]]).then_some(from_component)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let proof_edge_indices = edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge_index, edge)| {
+            let from_component = components[node_index[&edge.from]];
+            (from_component == components[node_index[&edge.to]]
+                && selected_components.contains(&from_component))
+            .then_some(edge_index)
+        })
+        .collect::<Vec<_>>();
+    if proof_edge_indices.is_empty() {
+        return None;
+    }
+
+    let mut distances = vec![ExactDyadic::zero(); nodes.len()];
     let mut predecessor = vec![None::<usize>; nodes.len()];
     let mut updated = None;
     for _ in 0..nodes.len() {
         updated = None;
-        for (edge_index, edge) in edges.iter().enumerate() {
-            let from = node_index[&edge.from];
-            let to = node_index[&edge.to];
-            let candidate = distances[from] + edge.minimum_difference;
-            if candidate > distances[to] {
-                distances[to] = candidate;
-                predecessor[to] = Some(edge_index);
-                updated = Some(to);
+        for edge_index in &proof_edge_indices {
+            let edge = &edges[*edge_index];
+            let source = node_index[&edge.from];
+            let destination = node_index[&edge.to];
+            let candidate = distances[source].add(&edge.minimum_difference);
+            if !candidate.is_greater_than(&distances[destination]) {
+                continue;
             }
+            distances[destination] = candidate;
+            predecessor[destination] = Some(*edge_index);
+            updated = Some(destination);
         }
     }
     let mut cycle_node = updated?;
@@ -3845,32 +3964,68 @@ fn positive_affine_value_cycle_conflict(
         cycle_node = node_index[&edges[edge_index].from];
     }
     let start = cycle_node;
-    let mut proof_edges = Vec::new();
+    let mut cycle = Vec::new();
     loop {
         let edge_index = predecessor[cycle_node]?;
-        proof_edges.push(edge_index);
+        cycle.push(edge_index);
         cycle_node = node_index[&edges[edge_index].from];
         if cycle_node == start {
             break;
         }
-        if proof_edges.len() > nodes.len() {
+        if cycle.len() > nodes.len() {
             return None;
         }
     }
-    let source_provenance = proof_edges
-        .into_iter()
-        .map(|edge_index| {
-            let edge = &edges[edge_index];
-            SharedLevelSetConflictSourceEvidence::new(
-                edge.source_id.clone(),
-                edge.group_ids.clone(),
-                edge.semantic_role.clone(),
-            )
-        })
-        .collect();
-    Some(SharedLevelSetRelationConflictEvidence::new(
-        source_provenance,
-    ))
+    let cycle_weight = cycle
+        .iter()
+        .fold(ExactDyadic::zero(), |weight, edge_index| {
+            weight.add(&edges[*edge_index].minimum_difference)
+        });
+    cycle_weight.is_positive().then_some(cycle)
+}
+
+fn strongly_connected_components(adjacency: &[Vec<usize>], reverse: &[Vec<usize>]) -> Vec<usize> {
+    let mut visited = vec![false; adjacency.len()];
+    let mut finish_order = Vec::with_capacity(adjacency.len());
+    for start in 0..adjacency.len() {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![(start, 0_usize)];
+        while let Some((node, next_neighbor)) = stack.last_mut() {
+            if let Some(neighbor) = adjacency[*node].get(*next_neighbor).copied() {
+                *next_neighbor += 1;
+                if !visited[neighbor] {
+                    visited[neighbor] = true;
+                    stack.push((neighbor, 0));
+                }
+                continue;
+            }
+            let (finished, _) = stack.pop().expect("the DFS stack has one current node");
+            finish_order.push(finished);
+        }
+    }
+
+    let mut components = vec![usize::MAX; adjacency.len()];
+    let mut component = 0_usize;
+    for start in finish_order.into_iter().rev() {
+        if components[start] != usize::MAX {
+            continue;
+        }
+        components[start] = component;
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            for neighbor in &reverse[node] {
+                if components[*neighbor] == usize::MAX {
+                    components[*neighbor] = component;
+                    stack.push(*neighbor);
+                }
+            }
+        }
+        component += 1;
+    }
+    components
 }
 
 fn maximum_shared_level_paths(
@@ -4264,22 +4419,16 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
 
     for relation in &snapshot.inner.point_to_level_set_relations {
         let latent = latent_index_by_group[relation.group_id()];
-        let (sense, bound, role) = match relation.side() {
-            PointToLevelSetSide::Increasing => (
-                CanonicalInequalitySense::Lower,
-                relation.minimum_offset().value(),
-                "point-to-level-set/increasing/minimum-field-offset",
-            ),
-            PointToLevelSetSide::Decreasing => (
-                CanonicalInequalitySense::Upper,
-                -relation.minimum_offset().value(),
-                "point-to-level-set/decreasing/minimum-field-offset",
-            ),
+        let orientation = relation.orientation();
+        let sense = if orientation.is_lower_bounded() {
+            CanonicalInequalitySense::Lower
+        } else {
+            CanonicalInequalitySense::Upper
         };
         let provenance = relation_provenance_for_groups(
             relation.source_id().clone(),
             vec![relation.group_id().clone()],
-            SemanticRolePath::new(role),
+            orientation.semantic_role(),
         );
         let functional = CanonicalFunctional::new(
             FunctionalDimension::FieldValue,
@@ -4299,7 +4448,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
             provenance.clone(),
             FunctionalDimension::FieldValue,
             sense,
-            bound,
+            orientation.bound(relation.minimum_offset()),
             violation_channel(relation.configuration(), &provenance),
         );
         lowering.push_bound(
@@ -4948,10 +5097,9 @@ fn point_to_level_set_relation_assessment(
         .map(SharedLevelValue::value)
         .expect("every checked point-to-level relation recovers its semantic latent");
     let recovered_point_value = recovered.value + recovered_level_value;
-    let recovered_field_offset = match relation.side() {
-        PointToLevelSetSide::Increasing => recovered.value,
-        PointToLevelSetSide::Decreasing => -recovered.value,
-    };
+    let recovered_field_offset = relation
+        .orientation()
+        .recovered_field_offset(recovered.value);
     let (quadratic_penalty, linear_violation_penalty) =
         public_bound_penalties(&source_relation.inequality);
     Some(PointToLevelSetRelationAssessment {

@@ -548,15 +548,232 @@ fn provable_affine_level_set_graph_conflicts_stop_before_the_backend() {
             SourceId::new("level/member")
         ]
     );
+
+    let mut signed_problem = builder();
+    for (group, source, location) in [
+        ("a", "a/member", point(0.0, 0.0, 0.0)),
+        ("b", "b/member", point(1.0, 0.0, 0.0)),
+    ] {
+        signed_problem.add(level(group, source, location)).unwrap();
+    }
+    for (source, reference, target, lower) in
+        [("b-minus-a", "a", "b", 10.0), ("a-minus-b", "b", "a", -5.0)]
+    {
+        signed_problem
+            .add(
+                FieldSeparationInterval::try_hard(
+                    SourceId::new(source),
+                    GroupId::new(reference),
+                    GroupId::new(target),
+                    lower,
+                    f64::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let failure = signed_problem.build().unwrap().fit().unwrap_err();
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    assert!(failure.report().attempts().is_empty());
+    assert_eq!(
+        failure
+            .report()
+            .shared_level_set_relation_conflict()
+            .unwrap()
+            .source_ids(),
+        &[SourceId::new("a-minus-b"), SourceId::new("b-minus-a")]
+    );
+
+    let mut absolute_problem = builder();
+    for (source, location) in [
+        ("member-value", point(0.0, 0.0, 0.0)),
+        ("point-value", point(1.0, 0.0, 0.0)),
+    ] {
+        absolute_problem
+            .add(FieldValueObservation::try_new(SourceId::new(source), location, 2.0).unwrap())
+            .unwrap();
+    }
+    absolute_problem
+        .add(level(
+            "absolute-level",
+            "absolute-level/member",
+            point(0.0, 0.0, 0.0),
+        ))
+        .unwrap();
+    absolute_problem
+        .add(PointToLevelSetRelation::hard(
+            SourceId::new("absolute-point-side"),
+            point(1.0, 0.0, 0.0),
+            GroupId::new("absolute-level"),
+            PointToLevelSetSide::Increasing,
+            MinimumFieldOffset::try_new(1.0).unwrap(),
+        ))
+        .unwrap();
+    let failure = absolute_problem.build().unwrap().fit().unwrap_err();
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    assert!(failure.report().attempts().is_empty());
+    assert_eq!(
+        failure
+            .report()
+            .shared_level_set_relation_conflict()
+            .unwrap()
+            .source_ids(),
+        &[
+            SourceId::new("absolute-level/member"),
+            SourceId::new("absolute-point-side"),
+            SourceId::new("member-value"),
+            SourceId::new("point-value"),
+        ]
+    );
+
+    let mut exact_rounding_problem = builder();
+    for (group, source, location) in [
+        ("round-a", "round-a/member", point(0.0, 0.0, 0.0)),
+        ("round-b", "round-b/member", point(1.0, 0.0, 0.0)),
+        ("round-c", "round-c/member", point(0.0, 1.0, 0.0)),
+    ] {
+        exact_rounding_problem
+            .add(level(group, source, location))
+            .unwrap();
+    }
+    for (source, reference, target, lower) in [
+        ("round-a-to-b", "round-a", "round-b", 1.0),
+        ("round-b-to-c", "round-b", "round-c", f64::from_bits(1)),
+        ("round-c-to-a", "round-c", "round-a", -1.0),
+    ] {
+        exact_rounding_problem
+            .add(
+                FieldSeparationInterval::try_hard(
+                    SourceId::new(source),
+                    GroupId::new(reference),
+                    GroupId::new(target),
+                    lower,
+                    f64::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let failure = exact_rounding_problem.build().unwrap().fit().unwrap_err();
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    assert!(failure.report().attempts().is_empty());
 }
 
-fn covariant_affine_level_set_fit(length_scale: f64, field_scale: f64) -> georbf::fit::FitSuccess {
-    let scale_point =
-        |[x, y, z]: [f64; 3]| point(length_scale * x, length_scale * y, length_scale * z);
+#[test]
+fn unrelated_exact_value_conflicts_keep_their_existing_preflight_evidence() {
+    let mut problem = builder();
+    for (source, value) in [("value-a", 1.0), ("value-b", 2.0)] {
+        problem
+            .add(
+                FieldValueObservation::try_new(SourceId::new(source), point(0.0, 0.0, 0.0), value)
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    problem
+        .add(
+            FieldSeparationInterval::try_hard(
+                SourceId::new("separation"),
+                GroupId::new("a"),
+                GroupId::new("b"),
+                -1.0,
+                1.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    problem
+        .add(level("a", "a/member", point(1.0, 0.0, 0.0)))
+        .unwrap();
+    problem
+        .add(level("b", "b/member", point(0.0, 1.0, 0.0)))
+        .unwrap();
+
+    let failure = problem.build().unwrap().fit().unwrap_err();
+    assert_eq!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+    assert_eq!(failure.report().direct_input_conflicts().len(), 1);
+    assert!(
+        failure
+            .report()
+            .shared_level_set_relation_conflicts()
+            .is_empty()
+    );
+}
+
+#[test]
+fn finite_extreme_bounds_do_not_manufacture_a_direct_graph_conflict() {
+    let mut problem = builder();
+    for (group, source, location) in [
+        ("a", "a/member", point(0.0, 0.0, 0.0)),
+        ("b", "b/member", point(1.0, 0.0, 0.0)),
+        ("c", "c/member", point(0.0, 1.0, 0.0)),
+        ("d", "d/member", point(0.0, 0.0, 1.0)),
+    ] {
+        problem.add(level(group, source, location)).unwrap();
+    }
+    for (source, reference, target, separation) in [
+        ("a-to-b", "a", "b", f64::MAX),
+        ("b-to-c", "b", "c", f64::MAX),
+        ("c-to-d", "c", "d", -f64::MAX),
+        ("d-to-a", "d", "a", -f64::MAX),
+    ] {
+        problem
+            .add(
+                FieldSeparationInterval::try_hard(
+                    SourceId::new(source),
+                    GroupId::new(reference),
+                    GroupId::new(target),
+                    separation,
+                    separation,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    if let Err(failure) = problem.build().unwrap().fit() {
+        assert_ne!(failure.diagnosis(), ProblemDiagnosis::DirectInputConflict);
+        assert!(
+            failure
+                .report()
+                .shared_level_set_relation_conflicts()
+                .is_empty()
+        );
+    }
+}
+
+fn covariant_affine_level_set_fit(
+    transform_frame: bool,
+    length_scale: f64,
+    field_scale: f64,
+) -> georbf::fit::FitSuccess {
+    let transform = |[x, y, z]: [f64; 3]| {
+        if transform_frame {
+            [
+                -length_scale * y + 10.0,
+                length_scale * x - 3.0,
+                -length_scale * z + 4.0,
+            ]
+        } else {
+            [length_scale * x, length_scale * y, length_scale * z]
+        }
+    };
+    let transform_point = |coordinates| {
+        let [x, y, z] = transform(coordinates);
+        point(x, y, z)
+    };
     let mut problem = ProblemBuilder::new(
         InputCoordinateFrame::try_new(
-            ["x", "y", "z"],
-            Handedness::Right,
+            if transform_frame {
+                ["rotated-x", "rotated-y", "reflected-z"]
+            } else {
+                ["x", "y", "z"]
+            },
+            if transform_frame {
+                Handedness::Left
+            } else {
+                Handedness::Right
+            },
             LengthUnitLabel::new(if length_scale == 1.0 { "m" } else { "scaled-m" }),
         )
         .unwrap(),
@@ -577,7 +794,7 @@ fn covariant_affine_level_set_fit(length_scale: f64, field_scale: f64) -> georbf
             .add(
                 FieldValueObservation::try_new(
                     SourceId::new(source),
-                    scale_point(coordinates),
+                    transform_point(coordinates),
                     field_scale * value,
                 )
                 .unwrap(),
@@ -588,14 +805,14 @@ fn covariant_affine_level_set_fit(length_scale: f64, field_scale: f64) -> georbf
         .add(level(
             "reference",
             "reference/member",
-            scale_point([0.0, 0.0, 0.0]),
+            transform_point([0.0, 0.0, 0.0]),
         ))
         .unwrap();
     problem
         .add(level(
             "target",
             "target/member",
-            scale_point([1.0, 1.0, 0.0]),
+            transform_point([1.0, 1.0, 0.0]),
         ))
         .unwrap();
     problem
@@ -611,24 +828,82 @@ fn covariant_affine_level_set_fit(length_scale: f64, field_scale: f64) -> georbf
         )
         .unwrap();
     problem
+        .add(
+            FieldSeparationInterval::try_with_quadratic_penalties(
+                SourceId::new("soft-quadratic-separation"),
+                GroupId::new("reference"),
+                GroupId::new("target"),
+                field_scale * 3.5,
+                QuadraticPenalty::try_new(2.0 / field_scale.powi(2)).unwrap(),
+                field_scale * 4.5,
+                QuadraticPenalty::try_new(2.0 / field_scale.powi(2)).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    problem
+        .add(
+            FieldSeparationInterval::try_with_linear_violation_penalties(
+                SourceId::new("soft-linear-separation"),
+                GroupId::new("reference"),
+                GroupId::new("target"),
+                field_scale * 1.5,
+                LinearViolationPenalty::try_new(3.0 / field_scale).unwrap(),
+                field_scale * 2.5,
+                LinearViolationPenalty::try_new(3.0 / field_scale).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    problem
         .add(PointToLevelSetRelation::hard(
             SourceId::new("point-side"),
-            scale_point([0.0, 0.0, 1.0]),
+            transform_point([0.0, 0.0, 1.0]),
             GroupId::new("reference"),
             PointToLevelSetSide::Increasing,
             MinimumFieldOffset::try_new(field_scale * 2.5).unwrap(),
         ))
+        .unwrap();
+    problem
+        .add(PointToLevelSetRelation::with_quadratic_penalty(
+            SourceId::new("soft-point-decreasing"),
+            transform_point([0.0, 0.0, 1.0]),
+            GroupId::new("reference"),
+            PointToLevelSetSide::Decreasing,
+            MinimumFieldOffset::try_new(field_scale).unwrap(),
+            QuadraticPenalty::try_new(2.0 / field_scale.powi(2)).unwrap(),
+        ))
+        .unwrap();
+    problem
+        .add(PointToLevelSetRelation::with_linear_violation_penalty(
+            SourceId::new("soft-point-increasing"),
+            transform_point([0.0, 0.0, 1.0]),
+            GroupId::new("reference"),
+            PointToLevelSetSide::Increasing,
+            MinimumFieldOffset::try_new(field_scale * 4.0).unwrap(),
+            LinearViolationPenalty::try_new(3.0 / field_scale).unwrap(),
+        ))
+        .unwrap();
+    problem
+        .set_field_energy_normalization(
+            FieldEnergyNormalization::try_new(length_scale.powi(3) / field_scale.powi(2)).unwrap(),
+        )
         .unwrap();
     problem.build().unwrap().fit().unwrap()
 }
 
 #[test]
 fn frame_changes_leave_field_offsets_unchanged_and_field_rescaling_is_covariant() {
-    let original = covariant_affine_level_set_fit(1.0, 1.0);
-    let length_changed = covariant_affine_level_set_fit(2.5, 1.0);
-    let field_changed = covariant_affine_level_set_fit(1.0, 4.0);
+    let original = covariant_affine_level_set_fit(false, 1.0, 1.0);
+    let rigid_frame_changed = covariant_affine_level_set_fit(true, 1.0, 1.0);
+    let length_changed = covariant_affine_level_set_fit(true, 2.5, 1.0);
+    let field_changed = covariant_affine_level_set_fit(false, 1.0, 4.0);
 
-    for (transformed, field_scale) in [(&length_changed, 1.0), (&field_changed, 4.0)] {
+    for (transformed, field_scale) in [
+        (&rigid_frame_changed, 1.0),
+        (&length_changed, 1.0),
+        (&field_changed, 4.0),
+    ] {
         for (left, right) in original
             .report()
             .field_separation_intervals()
@@ -643,42 +918,169 @@ fn frame_changes_leave_field_offsets_unchanged_and_field_rescaling_is_covariant(
                 .abs()
                     <= 1.0e-7
             );
+            assert!((right.slack() - field_scale * left.slack()).abs() <= 1.0e-7);
+            let violation_tolerance =
+                if left.violation() <= 1.0e-2 && right.violation() <= field_scale * 1.0e-2 {
+                    field_scale * 1.0e-2
+                } else {
+                    field_scale * 1.0e-5
+                };
+            assert!(
+                (right.violation() - field_scale * left.violation()).abs() <= violation_tolerance,
+                "{} {:?}: expected {}, recovered {}",
+                left.source_id(),
+                left.side(),
+                field_scale * left.violation(),
+                right.violation()
+            );
+            assert!((right.tolerance() - field_scale * left.tolerance()).abs() <= 1.0e-8);
+            assert_eq!(right.active_state(), left.active_state());
+            match (left.quadratic_penalty(), right.quadratic_penalty()) {
+                (Some(left), Some(right)) => {
+                    assert!((right.weight() - left.weight() / field_scale.powi(2)).abs() <= 1.0e-10)
+                }
+                (None, None) => {}
+                _ => panic!("quadratic penalty kind changed under a unit transform"),
+            }
+            match (
+                left.linear_violation_penalty(),
+                right.linear_violation_penalty(),
+            ) {
+                (Some(left), Some(right)) => {
+                    assert!((right.weight() - left.weight() / field_scale).abs() <= 1.0e-10)
+                }
+                (None, None) => {}
+                _ => panic!("linear penalty kind changed under a unit transform"),
+            }
+            match (left.loss(), right.loss()) {
+                (Some(left), Some(right)) => assert!((right - left).abs() <= 1.0e-7),
+                (None, None) => {}
+                _ => panic!("hard/soft identity changed under a unit transform"),
+            }
         }
-        let left = &original.report().point_to_level_set_relations()[0];
-        let right = &transformed.report().point_to_level_set_relations()[0];
-        assert_eq!(left.side(), right.side());
+        for (left, right) in original
+            .report()
+            .point_to_level_set_relations()
+            .iter()
+            .zip(transformed.report().point_to_level_set_relations())
+        {
+            assert_eq!(left.source_id(), right.source_id());
+            assert_eq!(left.side(), right.side());
+            assert!(
+                (right.minimum_offset().value() - field_scale * left.minimum_offset().value())
+                    .abs()
+                    <= 1.0e-8
+            );
+            assert!(
+                (right.recovered_field_offset() - field_scale * left.recovered_field_offset())
+                    .abs()
+                    <= 1.0e-7
+            );
+            assert!((right.slack() - field_scale * left.slack()).abs() <= 1.0e-7);
+            assert!((right.violation() - field_scale * left.violation()).abs() <= 1.0e-7);
+            assert!((right.tolerance() - field_scale * left.tolerance()).abs() <= 1.0e-8);
+            assert_eq!(right.active_state(), left.active_state());
+            match (left.quadratic_penalty(), right.quadratic_penalty()) {
+                (Some(left), Some(right)) => {
+                    assert!((right.weight() - left.weight() / field_scale.powi(2)).abs() <= 1.0e-10)
+                }
+                (None, None) => {}
+                _ => panic!("quadratic penalty kind changed under a unit transform"),
+            }
+            match (
+                left.linear_violation_penalty(),
+                right.linear_violation_penalty(),
+            ) {
+                (Some(left), Some(right)) => {
+                    assert!((right.weight() - left.weight() / field_scale).abs() <= 1.0e-10)
+                }
+                (None, None) => {}
+                _ => panic!("linear penalty kind changed under a unit transform"),
+            }
+            match (left.loss(), right.loss()) {
+                (Some(left), Some(right)) => assert!((right - left).abs() <= 1.0e-7),
+                (None, None) => {}
+                _ => panic!("hard/soft identity changed under a unit transform"),
+            }
+        }
         assert!(
-            (right.minimum_offset().value() - field_scale * left.minimum_offset().value()).abs()
-                <= 1.0e-8
+            (transformed.report().field_energy().unwrap()
+                - original.report().field_energy().unwrap())
+            .abs()
+                <= 1.0e-7
         );
         assert!(
-            (right.recovered_field_offset() - field_scale * left.recovered_field_offset()).abs()
+            (transformed.report().total_objective().unwrap()
+                - original.report().total_objective().unwrap())
+            .abs()
                 <= 1.0e-7
         );
     }
 }
 
+fn interval_role_fit(
+    reference: &str,
+    target: &str,
+    lower: f64,
+    upper: f64,
+) -> Result<georbf::fit::FitSuccess, georbf::fit::FitFailure> {
+    let mut problem = builder();
+    for (source, location, value) in [
+        ("origin", point(0.0, 0.0, 0.0), 0.0),
+        ("east", point(1.0, 0.0, 0.0), 1.0),
+        ("north", point(0.0, 1.0, 0.0), 2.0),
+        ("up", point(0.0, 0.0, 1.0), 3.0),
+        ("target-value", point(1.0, 1.0, 0.0), 3.0),
+    ] {
+        problem
+            .add(FieldValueObservation::try_new(SourceId::new(source), location, value).unwrap())
+            .unwrap();
+    }
+    problem
+        .add(level("reference", "reference/member", point(0.0, 0.0, 0.0)))
+        .unwrap();
+    problem
+        .add(level("target", "target/member", point(1.0, 1.0, 0.0)))
+        .unwrap();
+    problem
+        .add(
+            FieldSeparationInterval::try_hard(
+                SourceId::new("role-sensitive-separation"),
+                GroupId::new(reference),
+                GroupId::new(target),
+                lower,
+                upper,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    problem.build().unwrap().fit()
+}
+
 #[test]
 fn swapping_interval_roles_is_equivalent_only_with_the_signed_interval_transform() {
-    let original = FieldSeparationInterval::try_hard(
-        SourceId::new("original"),
-        GroupId::new("reference"),
-        GroupId::new("target"),
-        -2.0,
-        5.0,
-    )
-    .unwrap();
-    let swapped = FieldSeparationInterval::try_hard(
-        SourceId::new("swapped"),
-        GroupId::new("target"),
-        GroupId::new("reference"),
-        -5.0,
-        2.0,
-    )
-    .unwrap();
-    assert_eq!(swapped.lower_bound(), -original.upper_bound());
-    assert_eq!(swapped.upper_bound(), -original.lower_bound());
-    assert_ne!(swapped.lower_bound(), original.lower_bound());
+    let original = interval_role_fit("reference", "target", 2.0, 4.0).unwrap();
+    let transformed_swap = interval_role_fit("target", "reference", -4.0, -2.0).unwrap();
+    assert!(interval_role_fit("target", "reference", 2.0, 4.0).is_err());
+
+    let original_separation =
+        original.report().field_separation_intervals()[0].recovered_field_separation();
+    let swapped_separation =
+        transformed_swap.report().field_separation_intervals()[0].recovered_field_separation();
+    assert!((swapped_separation + original_separation).abs() <= 1.0e-8);
+    for query in [point(0.2, -0.3, 0.4), point(0.4, 0.25, -0.1)] {
+        let left = original.model().evaluate(query).unwrap();
+        let right = transformed_swap.model().evaluate(query).unwrap();
+        assert!((right.value() - left.value()).abs() <= 1.0e-8);
+        for (right, left) in right
+            .gradient()
+            .components()
+            .into_iter()
+            .zip(left.gradient().components())
+        {
+            assert!((right - left).abs() <= 1.0e-8);
+        }
+    }
 }
 
 fn permuted_affine_level_set_fit(reverse: bool) -> georbf::fit::FitSuccess {

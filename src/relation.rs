@@ -310,6 +310,32 @@ pub enum PointToLevelSetSide {
     Decreasing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PointToLevelSetOrientation {
+    lower_bounded: bool,
+    bound_multiplier: f64,
+    recovered_offset_multiplier: f64,
+    semantic_role: &'static str,
+}
+
+impl PointToLevelSetOrientation {
+    pub(crate) fn is_lower_bounded(self) -> bool {
+        self.lower_bounded
+    }
+
+    pub(crate) fn bound(self, minimum_offset: MinimumFieldOffset) -> f64 {
+        self.bound_multiplier * minimum_offset.value()
+    }
+
+    pub(crate) fn recovered_field_offset(self, signed_difference: f64) -> f64 {
+        self.recovered_offset_multiplier * signed_difference
+    }
+
+    pub(crate) fn semantic_role(self) -> SemanticRolePath {
+        SemanticRolePath::new(self.semantic_role)
+    }
+}
+
 /// A finite, strictly positive point-to-level field-value difference.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MinimumFieldOffset {
@@ -462,6 +488,23 @@ impl PointToLevelSetRelation {
     /// Returns the explicitly declared field-value side.
     pub fn side(&self) -> PointToLevelSetSide {
         self.side
+    }
+
+    pub(crate) fn orientation(&self) -> PointToLevelSetOrientation {
+        match self.side {
+            PointToLevelSetSide::Increasing => PointToLevelSetOrientation {
+                lower_bounded: true,
+                bound_multiplier: 1.0,
+                recovered_offset_multiplier: 1.0,
+                semantic_role: "point-to-level-set/increasing/minimum-field-offset",
+            },
+            PointToLevelSetSide::Decreasing => PointToLevelSetOrientation {
+                lower_bounded: false,
+                bound_multiplier: -1.0,
+                recovered_offset_multiplier: -1.0,
+                semantic_role: "point-to-level-set/decreasing/minimum-field-offset",
+            },
+        }
     }
 
     /// Returns the strictly positive field-value offset.

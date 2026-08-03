@@ -39,8 +39,11 @@ basis. All coefficients sum to zero across field and latent terms, preserving
 the additive-gauge semantics.
 
 Hard difference edges participate in deterministic graph preflight alongside
-Shared Level Set member equalities and existing level relations. Positive
-difference cycles, including a strict point side at one of its own level-set
+Shared Level Set member equalities and existing level relations. The proof is
+derived from Canonical Problem IR and sums signed bounds as exact dyadic values
+of the checked finite `f64` inputs, including absolute value and gauge anchors;
+it never uses rounded or overflow-prone floating-point path accumulation. Such
+positive cycles, including a strict point side at one of its own level-set
 members, produce complete source/group/role evidence before backend execution.
 Soft relations never enter those conflict proofs. Complete affine
 infeasibility outside this exact graph boundary still requires a validated
