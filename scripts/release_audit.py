@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Aggregate the fail-closed v0.2.0 Convex Relations release audits."""
+"""Aggregate the fail-closed current-milestone release audits."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+from release_contract import RELEASE_VERSION
 from release_repository_checks import audit_repository_artifacts
 from release_traceability import (
     EXPECTED_REQUIREMENTS,
@@ -33,7 +34,7 @@ def main() -> int:
             print(f"release-audit.failure={failure}")
         return 1
     print("release-audit.result=PROVEN")
-    print("release-audit.release=0.2.0")
+    print(f"release-audit.release={RELEASE_VERSION}")
     print(f"release-audit.requirements={len(EXPECTED_REQUIREMENTS)}")
     print("release-audit.oracle-adoption=byte-identical")
     print("release-audit.placeholders=none")

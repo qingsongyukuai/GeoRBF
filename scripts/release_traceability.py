@@ -1,4 +1,4 @@
-"""Validate one requirement-level trace for every v0.2.0 contract."""
+"""Validate one requirement-level trace for the current release contract."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from release_contract import RELEASE_VERSION, TRACEABILITY_PATH
 
-TRACEABILITY_PATH = Path("validation/v0.2.0/traceability.json")
 REFERENCE_SET_KINDS = ("evidence_sets", "documentation_sets")
 
 
@@ -85,8 +85,8 @@ def validate_traceability(root: Path, document: object) -> list[str]:
         return ["traceability root must be an object"]
     if document.get("schema_version") != "georbf-traceability-v1":
         failures.append("traceability schema_version must be georbf-traceability-v1")
-    if document.get("release") != "0.2.0":
-        failures.append("traceability release must be 0.2.0")
+    if document.get("release") != RELEASE_VERSION:
+        failures.append(f"traceability release must be {RELEASE_VERSION}")
 
     reference_names: dict[str, set[str]] = {}
     for kind in REFERENCE_SET_KINDS:

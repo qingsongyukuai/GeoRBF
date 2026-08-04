@@ -160,6 +160,10 @@
         "contains": "v0_2_qp_smoke_accepts_512_constraints_and_10_000_ordered_queries"
       },
       {
+        "path": "tests/public_problem_contract.rs",
+        "contains": "property_cases(256)"
+      },
+      {
         "path": ".github/workflows/product-v0.2.yml",
         "contains": "release-corpus"
       },

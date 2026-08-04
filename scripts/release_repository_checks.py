@@ -6,6 +6,13 @@ import re
 import tomllib
 from pathlib import Path
 
+from release_contract import (
+    RELEASE_TAG,
+    RELEASE_VERSION,
+    TRACEABILITY_PATH,
+    WORKFLOW_PATH,
+)
+
 
 PLACEHOLDER_PATTERNS = (
     re.compile(r"\btodo!\s*\("),
@@ -99,7 +106,11 @@ def audit_release_metadata(root: Path) -> list[str]:
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
         return [f"cannot parse Cargo.toml: {error}"]
     package = manifest.get("package", {})
-    expected_fields = {"version": "0.2.0", "edition": "2024", "rust-version": "1.85"}
+    expected_fields = {
+        "version": RELEASE_VERSION,
+        "edition": "2024",
+        "rust-version": "1.85",
+    }
     for field, expected in expected_fields.items():
         if package.get(field) != expected:
             failures.append(f"Cargo package.{field} must be {expected}")
@@ -109,7 +120,7 @@ def audit_release_metadata(root: Path) -> list[str]:
         "/docs/implementation/25-equality-spine-release.md",
         "/docs/implementation/36-convex-relations-release.md",
         "/validation/v0.1.0/**",
-        "/validation/v0.2.0/**",
+        f"/{TRACEABILITY_PATH.parent.as_posix()}/**",
     }
     included = set(package.get("include", []))
     missing_package_paths = sorted(expected_package_paths - included)
@@ -120,7 +131,7 @@ def audit_release_metadata(root: Path) -> list[str]:
 
     artifact_markers = {
         "RELEASE_NOTES.md": (
-            "# GeoRBF v0.2.0",
+            f"# GeoRBF {RELEASE_TAG}",
             "## Supported scope",
             "## Compatibility boundary",
             "## Diagnostic semantics",
@@ -142,9 +153,14 @@ def audit_release_metadata(root: Path) -> list[str]:
             "evaluate_batch",
             "run_smoke",
         ),
-        "README.md": ("Version 0.2.0", "examples/convex_relations.rs"),
-        ".github/workflows/product-v0.2.yml": (
-            "v0.2.0",
+        "tests/public_problem_contract.rs": (
+            "property_cases(256)",
+            "property_cases(128)",
+            "property_cases(32)",
+        ),
+        "README.md": (f"Version {RELEASE_VERSION}", "examples/convex_relations.rs"),
+        WORKFLOW_PATH.as_posix(): (
+            RELEASE_TAG,
             "release-corpus",
             "PROPTEST_CASES",
             "PROPTEST_RNG_SEED",

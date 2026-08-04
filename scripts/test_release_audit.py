@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from release_contract import RELEASE_VERSION
 from release_repository_checks import audit_oracle_mirror, audit_source_placeholders
 from release_traceability import EXPECTED_REQUIREMENTS, validate_traceability
 
@@ -25,7 +26,7 @@ class TraceabilityAuditTests(unittest.TestCase):
     def traceability(self) -> dict[str, object]:
         return {
             "schema_version": "georbf-traceability-v1",
-            "release": "0.2.0",
+            "release": RELEASE_VERSION,
             "evidence_sets": {
                 "release": [
                     {

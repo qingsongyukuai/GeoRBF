@@ -34,6 +34,36 @@ fn affine_value(location: Point3) -> f64 {
     2.0 + 0.5 * x - 1.25 * y + 0.75 * z
 }
 
+#[test]
+fn property_profile_case_override_is_positive_and_fail_closed() {
+    assert_eq!(configured_property_cases(128, None), Ok(128));
+    assert_eq!(configured_property_cases(128, Some("2500")), Ok(2_500));
+    assert!(configured_property_cases(128, Some("0")).is_err());
+    assert!(configured_property_cases(128, Some("not-a-number")).is_err());
+}
+
+fn configured_property_cases(default: u32, override_value: Option<&str>) -> Result<u32, &str> {
+    let Some(value) = override_value else {
+        return Ok(default);
+    };
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|cases| *cases > 0)
+        .ok_or("PROPTEST_CASES must be a positive u32")
+}
+
+fn property_cases(default: u32) -> u32 {
+    match std::env::var("PROPTEST_CASES") {
+        Ok(value) => configured_property_cases(default, Some(&value))
+            .expect("PROPTEST_CASES must be a positive u32"),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("PROPTEST_CASES must contain valid Unicode")
+        }
+    }
+}
+
 fn add_affine_input(builder: &mut ProblemBuilder, input_index: usize) {
     let value_locations = [
         point(-1.0, -1.0, -1.0),
@@ -122,7 +152,7 @@ macro_rules! assert_group_draft_contract {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::with_cases(property_cases(256)))]
 
     #[test]
     fn checked_leaf_constructors_accept_exactly_their_finite_domains(
@@ -227,7 +257,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig::with_cases(property_cases(128)))]
 
     #[test]
     fn duplicate_source_rejection_leaves_the_builder_unchanged(
@@ -411,7 +441,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+    #![proptest_config(ProptestConfig::with_cases(property_cases(32)))]
 
     #[test]
     fn input_permutation_preserves_build_fit_and_exact_duplicate_identity(
