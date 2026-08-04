@@ -433,7 +433,7 @@ checksum = "d2c81fb5260e37854d09d5c87183309fd8c555b75289427884b25660bc87a85e"
 
 [[package]]
 name = "georbf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clarabel",
  "faer",

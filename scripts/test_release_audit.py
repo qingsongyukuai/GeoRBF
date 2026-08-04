@@ -25,7 +25,7 @@ class TraceabilityAuditTests(unittest.TestCase):
     def traceability(self) -> dict[str, object]:
         return {
             "schema_version": "georbf-traceability-v1",
-            "release": "0.1.0",
+            "release": "0.2.0",
             "evidence_sets": {
                 "release": [
                     {
@@ -53,6 +53,15 @@ class TraceabilityAuditTests(unittest.TestCase):
 
     def test_complete_traceability_is_accepted(self) -> None:
         self.assertEqual(validate_traceability(self.root, self.traceability()), [])
+
+    def test_v02_requirement_scope_matches_the_convex_relations_milestone(self) -> None:
+        self.assertIn("PAPI-019", EXPECTED_REQUIREMENTS)
+        self.assertIn("DOM-022", EXPECTED_REQUIREMENTS)
+        self.assertIn("VAL-015", EXPECTED_REQUIREMENTS)
+        self.assertNotIn("PAPI-016", EXPECTED_REQUIREMENTS)
+        self.assertNotIn("DOM-008", EXPECTED_REQUIREMENTS)
+        self.assertNotIn("KER-002", EXPECTED_REQUIREMENTS)
+        self.assertNotIn("VAL-016", EXPECTED_REQUIREMENTS)
 
     def test_duplicate_and_missing_requirements_fail_closed(self) -> None:
         traceability = self.traceability()

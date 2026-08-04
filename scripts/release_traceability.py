@@ -1,4 +1,4 @@
-"""Validate one requirement-level trace for every v0.1.0 contract."""
+"""Validate one requirement-level trace for every v0.2.0 contract."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 
-TRACEABILITY_PATH = Path("validation/v0.1.0/traceability.json")
+TRACEABILITY_PATH = Path("validation/v0.2.0/traceability.json")
 REFERENCE_SET_KINDS = ("evidence_sets", "documentation_sets")
 
 
@@ -16,13 +16,13 @@ def requirement_ids(prefix: str, numbers: list[int]) -> set[str]:
 
 
 EXPECTED_REQUIREMENTS = frozenset(
-    requirement_ids("PAPI", [*range(1, 10), *range(11, 16), 17, 18])
-    | requirement_ids("DOM", [1, 2, 3, 5, 10, 17, 19, 20, 21, 22])
-    | requirement_ids("IR", [*range(1, 6), *range(7, 15)])
-    | requirement_ids("KER", [1, 2, *range(4, 10)])
-    | requirement_ids("NUM", [*range(1, 5), *range(6, 16)])
-    | requirement_ids("DIA", [1, 2, 3, *range(5, 10)])
-    | requirement_ids("VAL", [*range(1, 9), 13, 14, 15])
+    requirement_ids("PAPI", [*range(1, 16), 17, 18, 19])
+    | requirement_ids("DOM", [*range(1, 8), *range(9, 23)])
+    | requirement_ids("IR", [*range(1, 15)])
+    | requirement_ids("KER", [1, *range(4, 10)])
+    | requirement_ids("NUM", [*range(1, 16)])
+    | requirement_ids("DIA", [*range(1, 10)])
+    | requirement_ids("VAL", [*range(1, 16)])
 )
 
 
@@ -85,8 +85,8 @@ def validate_traceability(root: Path, document: object) -> list[str]:
         return ["traceability root must be an object"]
     if document.get("schema_version") != "georbf-traceability-v1":
         failures.append("traceability schema_version must be georbf-traceability-v1")
-    if document.get("release") != "0.1.0":
-        failures.append("traceability release must be 0.1.0")
+    if document.get("release") != "0.2.0":
+        failures.append("traceability release must be 0.2.0")
 
     reference_names: dict[str, set[str]] = {}
     for kind in REFERENCE_SET_KINDS:

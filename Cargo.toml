@@ -1,6 +1,6 @@
 [package]
 name = "georbf"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Implicit geological scalar fields from geological observations"
@@ -35,8 +35,10 @@ include = [
     "/docs/implementation/33-level-set-affine-relations.md",
     "/docs/implementation/34-normal-direction-workflow.md",
     "/docs/implementation/35-convex-relations-verification-closure.md",
+    "/docs/implementation/36-convex-relations-release.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/v0.1.0/**",
+    "/validation/v0.2.0/**",
 ]
 
 [dependencies]

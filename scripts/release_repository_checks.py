@@ -99,7 +99,7 @@ def audit_release_metadata(root: Path) -> list[str]:
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
         return [f"cannot parse Cargo.toml: {error}"]
     package = manifest.get("package", {})
-    expected_fields = {"version": "0.1.0", "edition": "2024", "rust-version": "1.85"}
+    expected_fields = {"version": "0.2.0", "edition": "2024", "rust-version": "1.85"}
     for field, expected in expected_fields.items():
         if package.get(field) != expected:
             failures.append(f"Cargo package.{field} must be {expected}")
@@ -107,7 +107,9 @@ def audit_release_metadata(root: Path) -> list[str]:
         "/RELEASE_NOTES.md",
         "/examples/**",
         "/docs/implementation/25-equality-spine-release.md",
+        "/docs/implementation/36-convex-relations-release.md",
         "/validation/v0.1.0/**",
+        "/validation/v0.2.0/**",
     }
     included = set(package.get("include", []))
     missing_package_paths = sorted(expected_package_paths - included)
@@ -118,34 +120,39 @@ def audit_release_metadata(root: Path) -> list[str]:
 
     artifact_markers = {
         "RELEASE_NOTES.md": (
-            "# GeoRBF v0.1.0",
+            "# GeoRBF v0.2.0",
             "## Supported scope",
             "## Compatibility boundary",
             "## Diagnostic semantics",
             "## Out of scope",
             "## Verification",
         ),
-        "docs/implementation/25-equality-spine-release.md": (
-            "Issue: [#25]",
-            "Evidence seams: T01–T09, T11–T17",
+        "docs/implementation/36-convex-relations-release.md": (
+            "Issue: [#36]",
+            "Evidence seams: T01–T17",
             "Traceability audit",
             "Release procedure",
         ),
-        "examples/equality_spine.rs": (
+        "examples/convex_relations.rs": (
             "pub fn run",
             "HorizonBuilder",
-            "TangentDirectionObservation",
+            "CovarianceGroupBuilder",
+            "DirectionalDerivativeInterval",
+            "PolarityResolution",
             "evaluate_batch",
+            "run_smoke",
         ),
-        "README.md": ("Version 0.1.0", "examples/equality_spine.rs"),
-        ".github/workflows/product-v0.1.yml": (
-            "v0.1.0",
+        "README.md": ("Version 0.2.0", "examples/convex_relations.rs"),
+        ".github/workflows/product-v0.2.yml": (
+            "v0.2.0",
             "release-corpus",
             "PROPTEST_CASES",
             "PROPTEST_RNG_SEED",
             "scripts/release_audit.py",
             "spikes/oracle-fixtures/generate.py --check",
             "cargo build --locked --release",
+            "v0_2_qp_smoke",
+            "--example convex_relations",
             "cargo package --locked",
         ),
     }

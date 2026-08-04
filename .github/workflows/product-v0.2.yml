@@ -1,4 +1,4 @@
-name: Product v0.1 - Equality Spine release gates
+name: Product v0.2 - Convex Relations release gates
 
 on:
   workflow_dispatch:
@@ -17,9 +17,9 @@ on:
     branches:
       - main
     tags:
-      - v0.1.0
+      - v0.2.0
     paths:
-      - ".github/workflows/product-v0.1.yml"
+      - ".github/workflows/product-v0.2.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
@@ -34,7 +34,7 @@ on:
       - "RELEASE_NOTES.md"
   pull_request:
     paths:
-      - ".github/workflows/product-v0.1.yml"
+      - ".github/workflows/product-v0.2.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
@@ -115,7 +115,7 @@ jobs:
         run: rustup toolchain install 1.85.0 --profile minimal --component clippy
       - name: Verify types and compile targets
         run: cargo check --locked --all-targets
-      - name: Run the cumulative Equality Spine corpus
+      - name: Run the cumulative v0.1.0 and v0.2.0 corpus
         run: cargo test --locked --all-targets
       - name: Run rustdoc and compile tests
         run: cargo test --locked --doc
@@ -123,8 +123,14 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build the optimized release artifact
         run: cargo build --locked --release
-      - name: Run the public Equality Spine example
-        run: cargo run --locked --example equality_spine
+      - name: Run the optimized 512-constraint QP and 10,000-query smoke
+        run: >-
+          cargo test --locked --release --test public_convex_relations_release
+          v0_2_qp_smoke -- --ignored
+      - name: Run both public milestone examples
+        run: |
+          cargo run --locked --example equality_spine
+          cargo run --locked --example convex_relations
       - name: Test cross-platform and release audits
         run: python -m unittest discover -s scripts -p "test_*.py" -v
       - name: Audit release traceability and adopted oracle identity

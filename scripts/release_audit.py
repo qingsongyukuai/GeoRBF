@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate the fail-closed v0.1.0 Equality Spine release audits."""
+"""Aggregate the fail-closed v0.2.0 Convex Relations release audits."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def main() -> int:
             print(f"release-audit.failure={failure}")
         return 1
     print("release-audit.result=PROVEN")
-    print("release-audit.release=0.1.0")
+    print("release-audit.release=0.2.0")
     print(f"release-audit.requirements={len(EXPECTED_REQUIREMENTS)}")
     print("release-audit.oracle-adoption=byte-identical")
     print("release-audit.placeholders=none")

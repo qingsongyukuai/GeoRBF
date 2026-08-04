@@ -3,9 +3,10 @@
 GeoRBF is a Rust library for fitting implicit geological scalar fields from
 geological observations.
 
-Version 0.1.0 exposes complete public Cubic Equality tracers. The current v0.2
-development surface adds physical soft residual blocks and affine relations. Field Value and
-Tangent observations support checked scalar penalty/statistical configuration;
+Version 0.2.0 is the public Cubic Convex Relations preview. It retains the
+complete v0.1.0 Equality Spine and adds physical soft residual blocks and
+affine relations. Field Value and Tangent observations support checked scalar
+penalty/statistical configuration;
 complete Gradient observations support isotropic Euclidean quadratic penalties,
 isotropic standard deviations, or explicit checked three-component covariance.
 Directed Normal observations combine a rotation-invariant projection residual with
@@ -26,12 +27,13 @@ remain addressable by `GroupId`. A tangent direction constrains only
 a complete gradient observation nor the polarity and nonzero-slope semantics of
 a normal direction.
 
-The complete release workflow is available as a runnable
-[Equality Spine example](examples/equality_spine.rs). It combines a planar
-horizon, explicit additive gauge, absolute field value, complete gradient,
-tangent direction, typed fit evidence, shared-value recovery, and ordered
-single/batch queries. The supported scope and compatibility boundary are
-recorded in the [v0.1.0 release notes](RELEASE_NOTES.md).
+The cumulative release workflow is available as a runnable
+[Convex Relations example](examples/convex_relations.rs). It combines every
+v0.2.0 relation family through the shared Cubic KKT/QP, Recover and Verify,
+typed report, immutable model, shared values, and ordered single/batch queries.
+The earlier [Equality Spine example](examples/equality_spine.rs) remains as the
+v0.1.0 cumulative tracer. Supported scope, compatibility boundaries, and known
+exclusions are recorded in the [release notes](RELEASE_NOTES.md).
 
 ```rust,no_run
 use georbf::geometry::{
@@ -216,6 +218,7 @@ The crate is pinned to Rust 1.85.0 and uses the checked-in lockfile:
 cargo check --locked --all-targets
 cargo test --locked --all-targets
 python3 scripts/audit.py
+python3 scripts/release_audit.py
 cargo package --locked
 ```
 
@@ -239,6 +242,9 @@ no public affine-bound relation or public backend type.
 The cumulative certificate, recession, recovery, diagnosis, and all-relation
 closure for the v0.2 Convex surface is recorded in
 [#35](docs/implementation/35-convex-relations-verification-closure.md).
+The v0.2.0 release matrix, traceability, compatibility boundary, package, and
+publication procedure are recorded in
+[#36](docs/implementation/36-convex-relations-release.md).
 
 ## Shared-level affine relations
 
