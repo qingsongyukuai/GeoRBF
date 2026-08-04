@@ -12,6 +12,7 @@ mod cubic;
 mod cubic_equality;
 #[allow(dead_code)]
 mod cubic_execution;
+mod cubic_solver_form;
 pub mod diagnostics;
 #[allow(dead_code)]
 mod faer_backend;
