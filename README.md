@@ -236,6 +236,9 @@ Complete first-order residual blocks and named covariance groups are recorded in
 The crate-internal Cubic Convex QP execution seam and its Clarabel evidence are
 recorded in [#29](docs/implementation/29-cubic-convex-qp-execution.md); it adds
 no public affine-bound relation or public backend type.
+The cumulative certificate, recession, recovery, diagnosis, and all-relation
+closure for the v0.2 Convex surface is recorded in
+[#35](docs/implementation/35-convex-relations-verification-closure.md).
 
 ## Shared-level affine relations
 

@@ -27,18 +27,20 @@ use crate::cubic_equality::{
 use crate::cubic_execution::{
     CubicExecutionCore, CubicExecutionFailure, CubicExecutionSolution, QpAttemptFailureReason,
     QpAttemptRecord, RecoveredAffineInequality, ValidatedInfeasibilityEvidence,
+    ValidatedRecessionEvidence,
 };
 use crate::diagnostics::{
     AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
     BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
-    CanonicalAcceptanceEvidenceParts, CapacityEvidence, CapacityFailureKind,
-    ConvexResidualEvidence as PublicConvexResidualEvidence, ConvexResidualEvidenceParts,
-    CubicAnalysisEvidence, CubicAnalysisEvidenceParts, DirectInputConflictEvidence, InertiaCounts,
-    InertiaEvidence, InfeasibilityCertificateEvidence, InfeasibilityCertificateEvidenceParts,
-    InterpretableRankDeficiencyEvidence, InterpretableRankDeficiencyEvidenceParts,
-    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
-    RankEvidenceDomain, RankEvidenceParts, RecoveryVerificationEvidence,
+    CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
+    CapacityFailureKind, ConvexResidualEvidence as PublicConvexResidualEvidence,
+    ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
+    DirectInputConflictEvidence, InertiaCounts, InertiaEvidence, InfeasibilityCertificateEvidence,
+    InfeasibilityCertificateEvidenceParts, InterpretableRankDeficiencyEvidence,
+    InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
+    RankDecision, RankDeficiencyConcept, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
+    RecessionRayEvidence, RecessionRayEvidenceParts, RecoveryVerificationEvidence,
     RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
     ScalingFailureReason, ScalingSummary, SharedLevelSetConflictSourceEvidence,
     SharedLevelSetRelationConflictEvidence, SideConditionEvidence, SolveAttemptKind,
@@ -1411,6 +1413,7 @@ pub struct FitReport {
     capacity: Option<CapacityEvidence>,
     analysis_failure: Option<AnalysisFailureEvidence>,
     infeasibility_certificate: Option<InfeasibilityCertificateEvidence>,
+    recession_ray: Option<RecessionRayEvidence>,
     unidentified_additive_gauge: Option<UnidentifiedAdditiveGaugeEvidence>,
     uninformative_shared_level_sets: Vec<UninformativeSharedLevelSetEvidence>,
     unresolved_axial_normals: Vec<UnresolvedAxialNormalEvidence>,
@@ -1608,7 +1611,12 @@ impl FitReport {
 
     /// Returns independently validated Farkas-ray evidence for infeasibility.
     pub fn infeasibility_certificate(&self) -> Option<InfeasibilityCertificateEvidence> {
-        self.infeasibility_certificate
+        self.infeasibility_certificate.clone()
+    }
+
+    /// Returns independently validated recession-ray evidence for unboundedness.
+    pub fn recession_ray(&self) -> Option<RecessionRayEvidence> {
+        self.recession_ray.clone()
     }
 
     /// Returns structural evidence for a missing additive-field representative.
@@ -2006,6 +2014,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         capacity: None,
         analysis_failure: None,
         infeasibility_certificate: None,
+        recession_ray: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
         unresolved_axial_normals: Vec::new(),
@@ -5689,6 +5698,7 @@ fn success_report_qp(
         capacity: None,
         analysis_failure: None,
         infeasibility_certificate: None,
+        recession_ray: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
         unresolved_axial_normals: Vec::new(),
@@ -5929,6 +5939,7 @@ fn public_qp_success_acceptance(solution: &CubicExecutionSolution) -> CanonicalA
     let qp = solution.qp.as_ref().expect("QP success retains evidence");
     CanonicalAcceptanceEvidence::new(CanonicalAcceptanceEvidenceParts {
         accepted: solution.canonical_acceptance_verified,
+        backend_standard_form_verified: solution.backend_standard_form_verified,
         recovery_finite: true,
         provenance_verified: qp.provenance_verified,
         side_condition: Some(public_side_condition(solution.side_condition)),
@@ -5949,6 +5960,29 @@ fn public_qp_success_acceptance(solution: &CubicExecutionSolution) -> CanonicalA
                 .chain(&qp.affine_relation_tolerances)
                 .map(|tolerance| tolerance.round_trip_error)
                 .fold(0.0_f64, f64::max),
+        ),
+        hard_affine_inequality_violation_max: Some(
+            solution
+                .affine_inequalities
+                .iter()
+                .filter(|relation| relation.violation_loss.is_none())
+                .map(|relation| relation.violation)
+                .fold(0.0_f64, f64::max),
+        ),
+        backend_standard_form_residual: Some(qp.physical_standard_form_violation),
+        physical_convex_residual: Some(PublicConvexResidualEvidence::new(
+            ConvexResidualEvidenceParts {
+                primal: qp.physical_residuals.primal,
+                dual: qp.physical_residuals.dual,
+                stationarity: qp.physical_residuals.stationarity,
+                complementarity: qp.physical_residuals.complementarity,
+                relative_gap: qp.physical_residuals.relative_gap,
+            },
+        )),
+        scaling_round_trip_error: Some(qp.scaling_round_trip_error),
+        reduction_round_trip_error: Some(qp.reduction_round_trip_error),
+        backend_internal_scaling_round_trip_error: Some(
+            qp.backend_internal_scaling_round_trip_error,
         ),
     })
 }
@@ -6065,6 +6099,7 @@ fn success_report(
         capacity: None,
         analysis_failure: None,
         infeasibility_certificate: None,
+        recession_ray: None,
         unidentified_additive_gauge: None,
         uninformative_shared_level_sets: Vec::new(),
         unresolved_axial_normals: Vec::new(),
@@ -6830,6 +6865,7 @@ fn public_failure_acceptance(
     Some(CanonicalAcceptanceEvidence::new(
         CanonicalAcceptanceEvidenceParts {
             accepted: false,
+            backend_standard_form_verified: true,
             recovery_finite: evidence.recovery_finite?,
             provenance_verified: evidence.provenance_verified?,
             side_condition: evidence.side_condition.map(public_side_condition),
@@ -6846,6 +6882,12 @@ fn public_failure_acceptance(
                     .reasons
                     .contains(&crate::cubic_equality::RecoveryVerificationFailureReason::ObjectiveRoundTripViolation),
             tolerance_round_trip_error: evidence.tolerance_round_trip_error,
+            hard_affine_inequality_violation_max: None,
+            backend_standard_form_residual: None,
+            physical_convex_residual: None,
+            scaling_round_trip_error: None,
+            reduction_round_trip_error: None,
+            backend_internal_scaling_round_trip_error: None,
         },
     ))
 }
@@ -6899,6 +6941,7 @@ fn public_attempts(attempts: &[KktAttemptRecord]) -> Vec<SolveAttemptRecord> {
                     attempt.scaling.rounds,
                     attempt.scaling.saturated_outside_target,
                 ),
+                scaling_round_trip_error: None,
                 refinement_steps: attempt.refinement_steps,
                 residual: attempt.residual.map(|residual| {
                     LinearResidualEvidence::new([
@@ -6964,6 +7007,7 @@ fn public_qp_attempts(attempts: &[QpAttemptRecord]) -> Vec<SolveAttemptRecord> {
                     attempt.georbf_scaling.rounds.len(),
                     attempt.georbf_scaling.saturated_outside_target,
                 ),
+                scaling_round_trip_error: Some(attempt.georbf_scaling_round_trip_error),
                 refinement_steps: 0,
                 residual: None,
                 convex_residual: attempt.residuals.map(|residual| {
@@ -7006,6 +7050,9 @@ fn public_qp_attempt_failure(reason: QpAttemptFailureReason) -> AttemptFailureEv
         }
         QpAttemptFailureReason::InvalidInfeasibilityCertificate => {
             AttemptFailureCategory::InvalidInfeasibilityCertificate
+        }
+        QpAttemptFailureReason::InvalidRecessionCertificate => {
+            AttemptFailureCategory::InvalidRecessionCertificate
         }
     };
     AttemptFailureEvidence::new(category, None, None)
@@ -7112,6 +7159,7 @@ fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
         null_space_defect: evidence.null_space_defect,
         reduced_symmetry_defect: evidence.reduced_symmetry_defect,
         reduced_symmetry_defect_limit: evidence.symmetry_defect_limit,
+        reduced_largest_singular_value: evidence.reduced_largest_singular_value,
         reduced_smallest_singular_value: evidence.reduced_smallest_singular_value,
         affine_reproduction_error: evidence.affine_reproduction_error,
         solve_coordinate_length: evidence.solve_coordinate_length,
@@ -7167,6 +7215,7 @@ fn public_side_condition(evidence: PhysicalSideConditionEvidence) -> SideConditi
 fn public_success_acceptance(solution: &CubicEqualitySolution) -> CanonicalAcceptanceEvidence {
     CanonicalAcceptanceEvidence::new(CanonicalAcceptanceEvidenceParts {
         accepted: true,
+        backend_standard_form_verified: true,
         recovery_finite: solution.recovery_finite,
         provenance_verified: solution.provenance_verified,
         side_condition: Some(public_side_condition(solution.side_condition)),
@@ -7181,6 +7230,12 @@ fn public_success_acceptance(solution: &CubicEqualitySolution) -> CanonicalAccep
         objective_round_trip_error: Some(solution.objective_round_trip_error),
         objective_verified: solution.objective_verified,
         tolerance_round_trip_error: Some(solution.tolerance_round_trip_error),
+        hard_affine_inequality_violation_max: None,
+        backend_standard_form_residual: None,
+        physical_convex_residual: None,
+        scaling_round_trip_error: None,
+        reduction_round_trip_error: None,
+        backend_internal_scaling_round_trip_error: None,
     })
 }
 
@@ -7199,6 +7254,25 @@ fn public_recovery_evidence(
         whitening_round_trip_error: evidence.whitening_round_trip_error,
         objective_round_trip_error: evidence.objective_round_trip_error,
         tolerance_round_trip_error: evidence.tolerance_round_trip_error,
+        backend_standard_form_residual: None,
+        reduction_round_trip_error: None,
+        scaling_round_trip_error: None,
+        sources: evidence
+            .hard_equalities
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .map(|relation| &relation.provenance)
+            .chain(
+                evidence
+                    .soft_equalities
+                    .as_deref()
+                    .into_iter()
+                    .flatten()
+                    .map(|relation| &relation.provenance),
+            )
+            .map(public_canonical_evidence_source)
+            .collect(),
         no_model_produced: evidence.no_model_produced,
     })
 }
@@ -7226,6 +7300,10 @@ fn diagnose_qp(failure: &CubicExecutionFailure) -> ProblemDiagnosis {
             ProblemDiagnosis::RecoveryVerificationFailure
         }
         CubicExecutionFailure::ValidatedInfeasible { .. } => ProblemDiagnosis::InfeasibleProblem,
+        CubicExecutionFailure::ValidatedUnbounded { .. } => ProblemDiagnosis::UnboundedProblem,
+        CubicExecutionFailure::InconsistentAttempts { .. } => {
+            ProblemDiagnosis::NumericalConsistencyFailure
+        }
         CubicExecutionFailure::Assembly(_)
         | CubicExecutionFailure::BackendAdapter(_)
         | CubicExecutionFailure::AttemptsExhausted { .. } => ProblemDiagnosis::NumericalFailure,
@@ -7298,8 +7376,26 @@ fn qp_failure_report(mut report: FitReport, failure: &CubicExecutionFailure) -> 
             }
         }
         CubicExecutionFailure::ValidatedInfeasible { evidence, attempts } => {
-            report.infeasibility_certificate = Some(public_infeasibility_certificate(*evidence));
+            report.infeasibility_certificate = Some(public_infeasibility_certificate(evidence));
             report.attempts = public_qp_attempts(attempts);
+            if let Some(last) = attempts.last() {
+                report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
+            }
+        }
+        CubicExecutionFailure::ValidatedUnbounded { evidence, attempts } => {
+            report.recession_ray = Some(public_recession_ray(evidence));
+            report.attempts = public_qp_attempts(attempts);
+            if let Some(last) = attempts.last() {
+                report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
+            }
+        }
+        CubicExecutionFailure::InconsistentAttempts { attempts } => {
+            report.attempts = public_qp_attempts(attempts);
+            report.execution_failure = Some(AttemptFailureEvidence::new(
+                AttemptFailureCategory::InconsistentValidatedConclusions,
+                None,
+                None,
+            ));
             if let Some(last) = attempts.last() {
                 report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
             }
@@ -7359,12 +7455,20 @@ fn public_qp_recovery_evidence(
         whitening_round_trip_error: None,
         objective_round_trip_error: None,
         tolerance_round_trip_error: None,
+        backend_standard_form_residual: Some(evidence.backend_standard_form_violation),
+        reduction_round_trip_error: Some(evidence.reduction_round_trip_error),
+        scaling_round_trip_error: Some(evidence.scaling_round_trip_error),
+        sources: evidence
+            .sources
+            .iter()
+            .map(public_canonical_evidence_source)
+            .collect(),
         no_model_produced: evidence.no_model_produced,
     })
 }
 
 fn public_infeasibility_certificate(
-    evidence: ValidatedInfeasibilityEvidence,
+    evidence: &ValidatedInfeasibilityEvidence,
 ) -> InfeasibilityCertificateEvidence {
     InfeasibilityCertificateEvidence::new(InfeasibilityCertificateEvidenceParts {
         finite: evidence.finite,
@@ -7374,8 +7478,43 @@ fn public_infeasibility_certificate(
         separation_margin: evidence.separation_margin,
         residual_limit: evidence.residual_limit,
         separation_limit: evidence.separation_limit,
+        recovery_round_trip_error: evidence.recovery_round_trip_error,
+        provenance_verified: evidence.provenance_verified,
+        sources: evidence
+            .sources
+            .iter()
+            .map(public_canonical_evidence_source)
+            .collect(),
         backend_invoked: true,
     })
+}
+
+fn public_recession_ray(evidence: &ValidatedRecessionEvidence) -> RecessionRayEvidence {
+    RecessionRayEvidence::new(RecessionRayEvidenceParts {
+        finite: evidence.finite,
+        normalized_ray_norm: evidence.normalized_ray_norm,
+        hessian_null_residual: evidence.hessian_null_residual,
+        constraint_ray_violation: evidence.constraint_ray_violation,
+        descent_margin: evidence.descent_margin,
+        residual_limit: evidence.residual_limit,
+        separation_limit: evidence.separation_limit,
+        recovery_round_trip_error: evidence.recovery_round_trip_error,
+        provenance_verified: evidence.provenance_verified,
+        sources: evidence
+            .sources
+            .iter()
+            .map(public_canonical_evidence_source)
+            .collect(),
+        backend_invoked: true,
+    })
+}
+
+fn public_canonical_evidence_source(provenance: &UsageProvenance) -> CanonicalEvidenceSource {
+    CanonicalEvidenceSource::new(
+        provenance.source().clone(),
+        provenance.groups().to_vec(),
+        provenance.semantic_role().clone(),
+    )
 }
 
 fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis {
@@ -7751,6 +7890,15 @@ mod tests {
             recovery.reasons(),
             &[RecoveryVerificationFailureReason::ReductionRoundTripViolation]
         );
+        assert!(recovery.backend_standard_form_residual().is_some());
+        assert!(recovery.reduction_round_trip_error().unwrap() > 1.0e-11);
+        assert!(recovery.scaling_round_trip_error().is_some());
+        assert!(
+            recovery
+                .sources()
+                .iter()
+                .any(|source| source.source_id().as_str() == "bound")
+        );
         assert!(recovery.no_model_produced());
         assert!(!failure.report().attempts().is_empty());
     }
@@ -7913,6 +8061,132 @@ mod tests {
                     evidence.category() == AttemptFailureCategory::InvalidInfeasibilityCertificate
                 })
         }));
+    }
+
+    #[test]
+    fn validated_recession_evidence_maps_to_unbounded_problem_without_a_model() {
+        let evidence = crate::cubic_execution::ValidatedRecessionEvidence {
+            finite: true,
+            normalized_ray_norm: 1.0,
+            hessian_null_residual: 0.0,
+            constraint_ray_violation: 0.0,
+            descent_margin: 1.0,
+            residual_limit: 1.0e-8,
+            separation_limit: 1.0e-7,
+            recovery_round_trip_error: 0.0,
+            provenance_verified: true,
+            sources: vec![UsageProvenance::new(
+                SourceId::new("unbounded-source"),
+                None,
+                RelationId::new("unbounded-relation"),
+                ResidualId::new("unbounded-residual"),
+                SemanticRolePath::new("recession/objective"),
+            )],
+        };
+        let failure = CubicExecutionFailure::ValidatedUnbounded {
+            evidence,
+            attempts: Vec::new(),
+        };
+        assert_eq!(diagnose_qp(&failure), ProblemDiagnosis::UnboundedProblem);
+
+        let snapshot = injectable_bounded_snapshot();
+        let report = qp_failure_report(
+            empty_report(
+                &snapshot,
+                conservative_problem_size(0, ScalarRelationCounts { hard: 0, soft: 0 }, 0, 0, 0, 0),
+            ),
+            &failure,
+        );
+        let ray = report
+            .recession_ray()
+            .expect("the report exposes independently validated recession evidence");
+        assert!(ray.finite());
+        assert_eq!(ray.normalized_ray_norm(), 1.0);
+        assert_eq!(ray.hessian_null_residual(), 0.0);
+        assert_eq!(ray.constraint_ray_violation(), 0.0);
+        assert_eq!(ray.descent_margin(), 1.0);
+        assert!(ray.provenance_verified());
+        assert_eq!(ray.recovery_round_trip_error(), 0.0);
+        assert_eq!(ray.sources()[0].source_id().as_str(), "unbounded-source");
+        assert!(report.canonical_acceptance().is_none());
+    }
+
+    #[test]
+    fn almost_solved_remains_a_reduced_accuracy_candidate_under_identical_acceptance() {
+        inject_qp_fault_once(QpFaultInjection::AlmostSolved);
+        let success = injectable_bounded_snapshot()
+            .fit()
+            .expect("an almost-solved candidate that passes every canonical check is accepted");
+
+        assert!(success.report().canonical_acceptance().unwrap().accepted());
+        assert_eq!(success.report().attempts().len(), 1);
+        assert_eq!(
+            success.report().attempts()[0].termination(),
+            SolveAttemptTermination::ReducedAccuracyCandidateProduced
+        );
+        let residual = success.report().attempts()[0].convex_residual().unwrap();
+        assert!(residual.primal() <= 1.0e-8);
+        assert!(residual.dual() <= 1.0e-8);
+        assert!(residual.stationarity() <= 1.0e-8);
+        assert!(residual.complementarity() <= 1.0e-8);
+        assert!(residual.relative_gap() <= 1.0e-8);
+        let physical_residual = success
+            .report()
+            .canonical_acceptance()
+            .unwrap()
+            .physical_convex_residual()
+            .unwrap();
+        assert!(physical_residual.primal() <= 1.0e-8);
+        assert!(physical_residual.dual() <= 1.0e-8);
+        assert!(physical_residual.stationarity() <= 1.0e-8);
+        assert!(physical_residual.complementarity() <= 1.0e-8);
+        assert!(physical_residual.relative_gap() <= 1.0e-8);
+    }
+
+    #[test]
+    fn limit_terminations_exhaust_the_fixed_plan_without_a_candidate_or_diagnosis_upgrade() {
+        inject_qp_fault_once(QpFaultInjection::Limit);
+        let failure = injectable_bounded_snapshot()
+            .fit()
+            .expect_err("limit terminations must never publish a partial model");
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+        assert!(failure.report().canonical_acceptance().is_none());
+        assert!(failure.report().infeasibility_certificate().is_none());
+        assert!(failure.report().recession_ray().is_none());
+        assert_eq!(failure.report().attempts().len(), 2);
+        assert!(failure.report().attempts().iter().all(|attempt| {
+            attempt.termination() == SolveAttemptTermination::LimitReached
+                && attempt.failure_reason().is_some_and(|evidence| {
+                    evidence.category() == AttemptFailureCategory::UnverifiedTermination
+                })
+        }));
+    }
+
+    #[test]
+    fn contradictory_validated_attempts_map_to_a_distinct_consistency_failure() {
+        let failure = CubicExecutionFailure::InconsistentAttempts {
+            attempts: Vec::new(),
+        };
+        assert_eq!(
+            diagnose_qp(&failure),
+            ProblemDiagnosis::NumericalConsistencyFailure
+        );
+        let snapshot = injectable_bounded_snapshot();
+        let report = qp_failure_report(
+            empty_report(
+                &snapshot,
+                conservative_problem_size(0, ScalarRelationCounts { hard: 0, soft: 0 }, 0, 0, 0, 0),
+            ),
+            &failure,
+        );
+        assert_eq!(
+            report.execution_failure().unwrap().category(),
+            AttemptFailureCategory::InconsistentValidatedConclusions
+        );
+        assert!(report.canonical_acceptance().is_none());
+        assert!(report.infeasibility_certificate().is_none());
+        assert!(report.recession_ray().is_none());
     }
 
     #[test]

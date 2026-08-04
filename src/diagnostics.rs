@@ -32,6 +32,10 @@ pub enum ProblemDiagnosis {
     RecoveryVerificationFailure,
     /// The convex feasible set is empty under an independently validated certificate.
     InfeasibleProblem,
+    /// The convex objective is unbounded below along an independently validated recession ray.
+    UnboundedProblem,
+    /// Independently validated attempts reached mutually incompatible conclusions.
+    NumericalConsistencyFailure,
     /// Numerical execution failed without proving a stronger diagnosis.
     NumericalFailure,
 }
@@ -77,8 +81,45 @@ pub struct UnidentifiedAdditiveGaugeEvidence {
     backend_invoked: bool,
 }
 
+/// Stable canonical source association retained by certificate and recovery evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalEvidenceSource {
+    source_id: SourceId,
+    group_ids: Box<[GroupId]>,
+    semantic_role: SemanticRolePath,
+}
+
+impl CanonicalEvidenceSource {
+    pub(crate) fn new(
+        source_id: SourceId,
+        group_ids: Vec<GroupId>,
+        semantic_role: SemanticRolePath,
+    ) -> Self {
+        Self {
+            source_id,
+            group_ids: group_ids.into(),
+            semantic_role,
+        }
+    }
+
+    /// Returns the caller-owned source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns every stable semantic group associated with this evidence edge.
+    pub fn group_ids(&self) -> &[GroupId] {
+        &self.group_ids
+    }
+
+    /// Returns the canonical semantic role of this evidence edge.
+    pub fn semantic_role(&self) -> &SemanticRolePath {
+        &self.semantic_role
+    }
+}
+
 /// Independently validated Farkas-ray evidence for convex infeasibility.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InfeasibilityCertificateEvidence {
     finite: bool,
     normalized_ray_norm: f64,
@@ -87,6 +128,9 @@ pub struct InfeasibilityCertificateEvidence {
     separation_margin: f64,
     residual_limit: f64,
     separation_limit: f64,
+    recovery_round_trip_error: f64,
+    provenance_verified: bool,
+    sources: Box<[CanonicalEvidenceSource]>,
     backend_invoked: bool,
 }
 
@@ -100,40 +144,55 @@ impl InfeasibilityCertificateEvidence {
             separation_margin: parts.separation_margin,
             residual_limit: parts.residual_limit,
             separation_limit: parts.separation_limit,
+            recovery_round_trip_error: parts.recovery_round_trip_error,
+            provenance_verified: parts.provenance_verified,
+            sources: parts.sources.into(),
             backend_invoked: parts.backend_invoked,
         }
     }
 
     /// Reports whether every retained certificate quantity is finite.
-    pub fn finite(self) -> bool {
+    pub fn finite(&self) -> bool {
         self.finite
     }
     /// Returns the infinity norm after deterministic ray normalization.
-    pub fn normalized_ray_norm(self) -> f64 {
+    pub fn normalized_ray_norm(&self) -> f64 {
         self.normalized_ray_norm
     }
     /// Returns the normalized `A^T z` residual.
-    pub fn stationarity_residual(self) -> f64 {
+    pub fn stationarity_residual(&self) -> f64 {
         self.stationarity_residual
     }
     /// Returns the largest violation of the dual cone.
-    pub fn dual_cone_violation(self) -> f64 {
+    pub fn dual_cone_violation(&self) -> f64 {
         self.dual_cone_violation
     }
     /// Returns normalized strict separation `-b^T z`.
-    pub fn separation_margin(self) -> f64 {
+    pub fn separation_margin(&self) -> f64 {
         self.separation_margin
     }
     /// Returns the fixed residual and cone-violation limit.
-    pub fn residual_limit(self) -> f64 {
+    pub fn residual_limit(&self) -> f64 {
         self.residual_limit
     }
     /// Returns the fixed minimum strict-separation margin.
-    pub fn separation_limit(self) -> f64 {
+    pub fn separation_limit(&self) -> f64 {
         self.separation_limit
     }
+    /// Returns the scaled-ray recovery round-trip error.
+    pub fn recovery_round_trip_error(&self) -> f64 {
+        self.recovery_round_trip_error
+    }
+    /// Reports whether the complete canonical/backend provenance map was verified.
+    pub fn provenance_verified(&self) -> bool {
+        self.provenance_verified
+    }
+    /// Returns stable source/group/role associations for the certificate proof.
+    pub fn sources(&self) -> &[CanonicalEvidenceSource] {
+        &self.sources
+    }
     /// Reports that the backend supplied the candidate ray.
-    pub fn backend_invoked(self) -> bool {
+    pub fn backend_invoked(&self) -> bool {
         self.backend_invoked
     }
 }
@@ -146,6 +205,102 @@ pub(crate) struct InfeasibilityCertificateEvidenceParts {
     pub(crate) separation_margin: f64,
     pub(crate) residual_limit: f64,
     pub(crate) separation_limit: f64,
+    pub(crate) recovery_round_trip_error: f64,
+    pub(crate) provenance_verified: bool,
+    pub(crate) sources: Vec<CanonicalEvidenceSource>,
+    pub(crate) backend_invoked: bool,
+}
+
+/// Independently recovered and validated recession-ray evidence for unboundedness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecessionRayEvidence {
+    finite: bool,
+    normalized_ray_norm: f64,
+    hessian_null_residual: f64,
+    constraint_ray_violation: f64,
+    descent_margin: f64,
+    residual_limit: f64,
+    separation_limit: f64,
+    recovery_round_trip_error: f64,
+    provenance_verified: bool,
+    sources: Box<[CanonicalEvidenceSource]>,
+    backend_invoked: bool,
+}
+
+impl RecessionRayEvidence {
+    pub(crate) fn new(parts: RecessionRayEvidenceParts) -> Self {
+        Self {
+            finite: parts.finite,
+            normalized_ray_norm: parts.normalized_ray_norm,
+            hessian_null_residual: parts.hessian_null_residual,
+            constraint_ray_violation: parts.constraint_ray_violation,
+            descent_margin: parts.descent_margin,
+            residual_limit: parts.residual_limit,
+            separation_limit: parts.separation_limit,
+            recovery_round_trip_error: parts.recovery_round_trip_error,
+            provenance_verified: parts.provenance_verified,
+            sources: parts.sources.into(),
+            backend_invoked: parts.backend_invoked,
+        }
+    }
+
+    /// Reports whether every retained recession quantity is finite.
+    pub fn finite(&self) -> bool {
+        self.finite
+    }
+    /// Returns the infinity norm after deterministic ray normalization.
+    pub fn normalized_ray_norm(&self) -> f64 {
+        self.normalized_ray_norm
+    }
+    /// Returns the normalized residual of the zero-curvature condition `P d = 0`.
+    pub fn hessian_null_residual(&self) -> f64 {
+        self.hessian_null_residual
+    }
+    /// Returns the largest normalized equality or recession-cone violation.
+    pub fn constraint_ray_violation(&self) -> f64 {
+        self.constraint_ray_violation
+    }
+    /// Returns normalized strict objective descent `-q^T d`.
+    pub fn descent_margin(&self) -> f64 {
+        self.descent_margin
+    }
+    /// Returns the fixed residual and ray-violation limit.
+    pub fn residual_limit(&self) -> f64 {
+        self.residual_limit
+    }
+    /// Returns the fixed minimum strict-descent margin.
+    pub fn separation_limit(&self) -> f64 {
+        self.separation_limit
+    }
+    /// Returns the scaled-ray recovery round-trip error.
+    pub fn recovery_round_trip_error(&self) -> f64 {
+        self.recovery_round_trip_error
+    }
+    /// Reports whether the complete canonical/backend provenance map was verified.
+    pub fn provenance_verified(&self) -> bool {
+        self.provenance_verified
+    }
+    /// Returns stable source/group/role associations for the recession proof.
+    pub fn sources(&self) -> &[CanonicalEvidenceSource] {
+        &self.sources
+    }
+    /// Reports that the backend supplied the candidate ray.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+}
+
+pub(crate) struct RecessionRayEvidenceParts {
+    pub(crate) finite: bool,
+    pub(crate) normalized_ray_norm: f64,
+    pub(crate) hessian_null_residual: f64,
+    pub(crate) constraint_ray_violation: f64,
+    pub(crate) descent_margin: f64,
+    pub(crate) residual_limit: f64,
+    pub(crate) separation_limit: f64,
+    pub(crate) recovery_round_trip_error: f64,
+    pub(crate) provenance_verified: bool,
+    pub(crate) sources: Vec<CanonicalEvidenceSource>,
     pub(crate) backend_invoked: bool,
 }
 
@@ -470,6 +625,7 @@ pub struct CubicAnalysisEvidence {
     null_space_defect: f64,
     reduced_symmetry_defect: f64,
     reduced_symmetry_defect_limit: f64,
+    reduced_largest_singular_value: f64,
     reduced_smallest_singular_value: f64,
     affine_reproduction_error: f64,
     solve_coordinate_length: f64,
@@ -488,6 +644,7 @@ pub(crate) struct CubicAnalysisEvidenceParts {
     pub(crate) null_space_defect: f64,
     pub(crate) reduced_symmetry_defect: f64,
     pub(crate) reduced_symmetry_defect_limit: f64,
+    pub(crate) reduced_largest_singular_value: f64,
     pub(crate) reduced_smallest_singular_value: f64,
     pub(crate) affine_reproduction_error: f64,
     pub(crate) solve_coordinate_length: f64,
@@ -508,6 +665,7 @@ impl CubicAnalysisEvidence {
             null_space_defect: parts.null_space_defect,
             reduced_symmetry_defect: parts.reduced_symmetry_defect,
             reduced_symmetry_defect_limit: parts.reduced_symmetry_defect_limit,
+            reduced_largest_singular_value: parts.reduced_largest_singular_value,
             reduced_smallest_singular_value: parts.reduced_smallest_singular_value,
             affine_reproduction_error: parts.affine_reproduction_error,
             solve_coordinate_length: parts.solve_coordinate_length,
@@ -570,9 +728,20 @@ impl CubicAnalysisEvidence {
         self.reduced_symmetry_defect_limit
     }
 
+    /// Returns the reduced pairing's largest singular value.
+    pub fn reduced_largest_singular_value(&self) -> f64 {
+        self.reduced_largest_singular_value
+    }
+
     /// Returns the reduced pairing's smallest singular value.
     pub fn reduced_smallest_singular_value(&self) -> f64 {
         self.reduced_smallest_singular_value
+    }
+
+    /// Returns a largest-to-smallest condition estimate for the reduced pairing.
+    pub fn reduced_condition_estimate(&self) -> Option<f64> {
+        let estimate = self.reduced_largest_singular_value / self.reduced_smallest_singular_value;
+        estimate.is_finite().then_some(estimate)
     }
 
     /// Returns the complete-affine reproduction error.
@@ -938,6 +1107,7 @@ impl SideConditionEvidence {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanonicalAcceptanceEvidence {
     accepted: bool,
+    backend_standard_form_verified: bool,
     recovery_finite: bool,
     provenance_verified: bool,
     side_condition: Option<SideConditionEvidence>,
@@ -950,10 +1120,17 @@ pub struct CanonicalAcceptanceEvidence {
     objective_round_trip_error: Option<f64>,
     objective_verified: bool,
     tolerance_round_trip_error: Option<f64>,
+    hard_affine_inequality_violation_max: Option<f64>,
+    backend_standard_form_residual: Option<f64>,
+    physical_convex_residual: Option<ConvexResidualEvidence>,
+    scaling_round_trip_error: Option<f64>,
+    reduction_round_trip_error: Option<f64>,
+    backend_internal_scaling_round_trip_error: Option<f64>,
 }
 
 pub(crate) struct CanonicalAcceptanceEvidenceParts {
     pub(crate) accepted: bool,
+    pub(crate) backend_standard_form_verified: bool,
     pub(crate) recovery_finite: bool,
     pub(crate) provenance_verified: bool,
     pub(crate) side_condition: Option<SideConditionEvidence>,
@@ -965,12 +1142,19 @@ pub(crate) struct CanonicalAcceptanceEvidenceParts {
     pub(crate) objective_round_trip_error: Option<f64>,
     pub(crate) objective_verified: bool,
     pub(crate) tolerance_round_trip_error: Option<f64>,
+    pub(crate) hard_affine_inequality_violation_max: Option<f64>,
+    pub(crate) backend_standard_form_residual: Option<f64>,
+    pub(crate) physical_convex_residual: Option<ConvexResidualEvidence>,
+    pub(crate) scaling_round_trip_error: Option<f64>,
+    pub(crate) reduction_round_trip_error: Option<f64>,
+    pub(crate) backend_internal_scaling_round_trip_error: Option<f64>,
 }
 
 impl CanonicalAcceptanceEvidence {
     pub(crate) fn new(parts: CanonicalAcceptanceEvidenceParts) -> Self {
         Self {
             accepted: parts.accepted,
+            backend_standard_form_verified: parts.backend_standard_form_verified,
             recovery_finite: parts.recovery_finite,
             provenance_verified: parts.provenance_verified,
             side_condition: parts.side_condition,
@@ -985,12 +1169,24 @@ impl CanonicalAcceptanceEvidence {
             objective_round_trip_error: parts.objective_round_trip_error,
             objective_verified: parts.objective_verified,
             tolerance_round_trip_error: parts.tolerance_round_trip_error,
+            hard_affine_inequality_violation_max: parts.hard_affine_inequality_violation_max,
+            backend_standard_form_residual: parts.backend_standard_form_residual,
+            physical_convex_residual: parts.physical_convex_residual,
+            scaling_round_trip_error: parts.scaling_round_trip_error,
+            reduction_round_trip_error: parts.reduction_round_trip_error,
+            backend_internal_scaling_round_trip_error: parts
+                .backend_internal_scaling_round_trip_error,
         }
     }
 
     /// Reports whether every canonical acceptance check passed.
     pub fn accepted(&self) -> bool {
         self.accepted
+    }
+
+    /// Reports whether the recovered backend-standard-form contract passed.
+    pub fn backend_standard_form_verified(&self) -> bool {
+        self.backend_standard_form_verified
     }
 
     /// Reports whether every recovered physical quantity was finite.
@@ -1053,6 +1249,37 @@ impl CanonicalAcceptanceEvidence {
     /// Returns relation-tolerance recovery round-trip error when reached.
     pub fn tolerance_round_trip_error(&self) -> Option<f64> {
         self.tolerance_round_trip_error
+    }
+
+    /// Returns the largest recovered hard affine-inequality violation.
+    pub fn hard_affine_inequality_violation_max(&self) -> Option<f64> {
+        self.hard_affine_inequality_violation_max
+    }
+
+    /// Returns the recovered backend-standard-form residual for a QP candidate.
+    pub fn backend_standard_form_residual(&self) -> Option<f64> {
+        self.backend_standard_form_residual
+    }
+
+    /// Returns the five-part convex residual envelope recomputed after
+    /// recovering the candidate into the physical canonical QP coordinates.
+    pub fn physical_convex_residual(&self) -> Option<ConvexResidualEvidence> {
+        self.physical_convex_residual
+    }
+
+    /// Returns the QP candidate scaling recovery round-trip error.
+    pub fn scaling_round_trip_error(&self) -> Option<f64> {
+        self.scaling_round_trip_error
+    }
+
+    /// Returns the QP null-space reduction round-trip error.
+    pub fn reduction_round_trip_error(&self) -> Option<f64> {
+        self.reduction_round_trip_error
+    }
+
+    /// Returns Clarabel's independently checked internal-scaling round-trip error.
+    pub fn backend_internal_scaling_round_trip_error(&self) -> Option<f64> {
+        self.backend_internal_scaling_round_trip_error
     }
 }
 
@@ -1608,6 +1835,10 @@ pub enum AttemptFailureCategory {
     UnverifiedTermination,
     /// A claimed primal-infeasibility ray failed independent validation.
     InvalidInfeasibilityCertificate,
+    /// A claimed dual-infeasibility ray failed independent validation.
+    InvalidRecessionCertificate,
+    /// Independently validated attempts reached incompatible conclusions.
+    InconsistentValidatedConclusions,
 }
 
 /// Independently recomputed dimensionless residuals for a convex candidate.
@@ -1706,6 +1937,7 @@ pub struct SolveAttemptRecord {
     termination: SolveAttemptTermination,
     settings: BackendAttemptSettings,
     scaling: ScalingSummary,
+    scaling_round_trip_error: Option<f64>,
     refinement_steps: usize,
     residual: Option<LinearResidualEvidence>,
     convex_residual: Option<ConvexResidualEvidence>,
@@ -1720,6 +1952,7 @@ pub(crate) struct SolveAttemptRecordParts {
     pub(crate) termination: SolveAttemptTermination,
     pub(crate) settings: BackendAttemptSettings,
     pub(crate) scaling: ScalingSummary,
+    pub(crate) scaling_round_trip_error: Option<f64>,
     pub(crate) refinement_steps: usize,
     pub(crate) residual: Option<LinearResidualEvidence>,
     pub(crate) convex_residual: Option<ConvexResidualEvidence>,
@@ -1736,6 +1969,7 @@ impl SolveAttemptRecord {
             termination: parts.termination,
             settings: parts.settings,
             scaling: parts.scaling,
+            scaling_round_trip_error: parts.scaling_round_trip_error,
             refinement_steps: parts.refinement_steps,
             residual: parts.residual,
             convex_residual: parts.convex_residual,
@@ -1768,6 +2002,11 @@ impl SolveAttemptRecord {
     /// Returns the scaling summary applied to this attempt.
     pub fn scaling(&self) -> &ScalingSummary {
         &self.scaling
+    }
+
+    /// Returns the scaling forward/inverse round-trip error when retained.
+    pub fn scaling_round_trip_error(&self) -> Option<f64> {
+        self.scaling_round_trip_error
     }
 
     /// Returns the number of completed iterative-refinement steps.
@@ -1820,6 +2059,10 @@ pub struct RecoveryVerificationEvidence {
     whitening_round_trip_error: Option<f64>,
     objective_round_trip_error: Option<f64>,
     tolerance_round_trip_error: Option<f64>,
+    backend_standard_form_residual: Option<f64>,
+    reduction_round_trip_error: Option<f64>,
+    scaling_round_trip_error: Option<f64>,
+    sources: Box<[CanonicalEvidenceSource]>,
     no_model_produced: bool,
 }
 
@@ -1833,6 +2076,10 @@ pub(crate) struct RecoveryVerificationEvidenceParts {
     pub(crate) whitening_round_trip_error: Option<f64>,
     pub(crate) objective_round_trip_error: Option<f64>,
     pub(crate) tolerance_round_trip_error: Option<f64>,
+    pub(crate) backend_standard_form_residual: Option<f64>,
+    pub(crate) reduction_round_trip_error: Option<f64>,
+    pub(crate) scaling_round_trip_error: Option<f64>,
+    pub(crate) sources: Vec<CanonicalEvidenceSource>,
     pub(crate) no_model_produced: bool,
 }
 
@@ -1851,6 +2098,10 @@ impl RecoveryVerificationEvidence {
             whitening_round_trip_error: parts.whitening_round_trip_error,
             objective_round_trip_error: parts.objective_round_trip_error,
             tolerance_round_trip_error: parts.tolerance_round_trip_error,
+            backend_standard_form_residual: parts.backend_standard_form_residual,
+            reduction_round_trip_error: parts.reduction_round_trip_error,
+            scaling_round_trip_error: parts.scaling_round_trip_error,
+            sources: parts.sources.into(),
             no_model_produced: parts.no_model_produced,
         }
     }
@@ -1903,6 +2154,26 @@ impl RecoveryVerificationEvidence {
     /// Returns relation-tolerance round-trip error when available.
     pub fn tolerance_round_trip_error(&self) -> Option<f64> {
         self.tolerance_round_trip_error
+    }
+
+    /// Returns the recovered backend-standard-form residual for a QP candidate.
+    pub fn backend_standard_form_residual(&self) -> Option<f64> {
+        self.backend_standard_form_residual
+    }
+
+    /// Returns the QP null-space reduction recovery error when available.
+    pub fn reduction_round_trip_error(&self) -> Option<f64> {
+        self.reduction_round_trip_error
+    }
+
+    /// Returns the GeoRBF QP scaling recovery error when available.
+    pub fn scaling_round_trip_error(&self) -> Option<f64> {
+        self.scaling_round_trip_error
+    }
+
+    /// Returns stable source/group/role associations reached during recovery.
+    pub fn sources(&self) -> &[CanonicalEvidenceSource] {
+        &self.sources
     }
 
     /// Confirms that rejection produced no public model.

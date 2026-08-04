@@ -169,6 +169,43 @@ fn hard_lower_upper_and_interval_fit_through_the_public_qp_path() {
     let success = builder.build().unwrap().fit().unwrap();
     let backend = success.report().backend_fingerprint().unwrap();
     assert_eq!(backend.enabled_features().collect::<Vec<_>>(), ["serde"]);
+    let acceptance = success.report().canonical_acceptance().unwrap();
+    assert!(acceptance.accepted());
+    assert!(acceptance.backend_standard_form_verified());
+    assert!(acceptance.backend_standard_form_residual().unwrap() <= 1.0e-8);
+    assert!(acceptance.hard_affine_inequality_violation_max().unwrap() <= 1.0e-8);
+    assert!(acceptance.scaling_round_trip_error().unwrap() <= 1.0e-11);
+    assert!(acceptance.reduction_round_trip_error().unwrap() <= 1.0e-11);
+    assert!(
+        acceptance
+            .backend_internal_scaling_round_trip_error()
+            .unwrap()
+            <= 1.0e-11
+    );
+    let residual = success
+        .report()
+        .attempts()
+        .last()
+        .unwrap()
+        .convex_residual()
+        .unwrap();
+    assert!(residual.primal() <= 1.0e-8);
+    assert!(residual.dual() <= 1.0e-8);
+    assert!(residual.stationarity() <= 1.0e-8);
+    assert!(residual.complementarity() <= 1.0e-8);
+    assert!(residual.relative_gap() <= 1.0e-8);
+    let physical_residual = acceptance.physical_convex_residual().unwrap();
+    assert!(physical_residual.primal() <= 1.0e-8);
+    assert!(physical_residual.dual() <= 1.0e-8);
+    assert!(physical_residual.stationarity() <= 1.0e-8);
+    assert!(physical_residual.complementarity() <= 1.0e-8);
+    assert!(physical_residual.relative_gap() <= 1.0e-8);
+    let analysis = success.report().cubic_analysis().unwrap();
+    assert!(
+        analysis
+            .reduced_condition_estimate()
+            .is_some_and(|value| value >= 1.0)
+    );
     for (location, expected) in [
         (point(0.0, 0.0, 0.0), 0.0),
         (point(1.0, 0.0, 0.0), 1.0),
@@ -437,6 +474,20 @@ fn general_bound_infeasibility_requires_a_validated_farkas_certificate() {
     assert!(certificate.stationarity_residual() <= certificate.residual_limit());
     assert!(certificate.dual_cone_violation() <= certificate.residual_limit());
     assert!(certificate.separation_margin() >= certificate.separation_limit());
+    assert!(certificate.provenance_verified());
+    assert!(certificate.recovery_round_trip_error() <= 1.0e-11);
+    assert!(
+        certificate
+            .sources()
+            .iter()
+            .any(|source| source.source_id().as_str() == "lower")
+    );
+    assert!(
+        certificate
+            .sources()
+            .iter()
+            .any(|source| source.source_id().as_str() == "upper")
+    );
     assert!(
         failure
             .report()

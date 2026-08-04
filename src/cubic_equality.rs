@@ -292,6 +292,7 @@ pub(crate) struct CpdEvidence {
     pub(crate) null_space_defect: f64,
     pub(crate) reduced_symmetry_defect: f64,
     pub(crate) symmetry_defect_limit: f64,
+    pub(crate) reduced_largest_singular_value: f64,
     pub(crate) reduced_smallest_singular_value: f64,
     pub(crate) affine_reproduction_error: f64,
     pub(crate) solve_coordinate_center: [f64; 3],
@@ -449,7 +450,8 @@ impl CubicRepresentation {
             });
         }
         symmetrize(&mut reduced);
-        let reduced_smallest_singular_value = verify_reduced_pairing(&reduced)?;
+        let (reduced_largest_singular_value, reduced_smallest_singular_value) =
+            verify_reduced_pairing(&reduced)?;
         let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial)?;
         if affine_reproduction_error > EQUALITY_KKT_POLICY_V1.affine_reproduction_limit {
             return Err(RepresentationFailure::AffineReproductionContract {
@@ -478,6 +480,7 @@ impl CubicRepresentation {
                 null_space_defect,
                 reduced_symmetry_defect,
                 symmetry_defect_limit,
+                reduced_largest_singular_value,
                 reduced_smallest_singular_value,
                 affine_reproduction_error,
                 solve_coordinate_center: coordinates.center(),
@@ -1008,9 +1011,9 @@ fn symmetrize(matrix: &mut DenseMatrix) {
     }
 }
 
-fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, RepresentationFailure> {
+fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<(f64, f64), RepresentationFailure> {
     if matrix.rows == 0 {
-        return Ok(f64::INFINITY);
+        return Ok((f64::INFINITY, f64::INFINITY));
     }
     let faer_matrix = matrix.to_faer();
     let cholesky = faer_backend::cholesky_minimum_diagonal(faer_matrix.as_ref());
@@ -1091,10 +1094,16 @@ fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<f64, RepresentationFai
                     solver_invoked: false,
                 });
             }
-            Ok(*spectrum
-                .singular_values
-                .last()
-                .expect("a nonempty reduced pairing has a singular value"))
+            Ok((
+                *spectrum
+                    .singular_values
+                    .first()
+                    .expect("a nonempty reduced pairing has a singular value"),
+                *spectrum
+                    .singular_values
+                    .last()
+                    .expect("a nonempty reduced pairing has a singular value"),
+            ))
         }
     }
 }

@@ -90,9 +90,10 @@ pub(crate) enum QpAttemptFailureReason {
     BackendFingerprintMismatch,
     UnverifiedTermination,
     InvalidInfeasibilityCertificate,
+    InvalidRecessionCertificate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValidatedInfeasibilityEvidence {
     pub(crate) finite: bool,
     pub(crate) normalized_ray_norm: f64,
@@ -101,6 +102,43 @@ pub(crate) struct ValidatedInfeasibilityEvidence {
     pub(crate) separation_margin: f64,
     pub(crate) residual_limit: f64,
     pub(crate) separation_limit: f64,
+    pub(crate) recovery_round_trip_error: f64,
+    pub(crate) provenance_verified: bool,
+    pub(crate) sources: Vec<UsageProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ValidatedRecessionEvidence {
+    pub(crate) finite: bool,
+    pub(crate) normalized_ray_norm: f64,
+    pub(crate) hessian_null_residual: f64,
+    pub(crate) constraint_ray_violation: f64,
+    pub(crate) descent_margin: f64,
+    pub(crate) residual_limit: f64,
+    pub(crate) separation_limit: f64,
+    pub(crate) recovery_round_trip_error: f64,
+    pub(crate) provenance_verified: bool,
+    pub(crate) sources: Vec<UsageProvenance>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidatedQpConclusion {
+    Candidate,
+    Infeasible,
+    Unbounded,
+}
+
+fn reconcile_validated_conclusions(
+    conclusions: &[ValidatedQpConclusion],
+) -> Result<Option<ValidatedQpConclusion>, ()> {
+    let Some(first) = conclusions.first().copied() else {
+        return Ok(None);
+    };
+    conclusions
+        .iter()
+        .all(|conclusion| *conclusion == first)
+        .then_some(Some(first))
+        .ok_or(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +148,7 @@ pub(crate) struct QpAttemptRecord {
     pub(crate) georbf_scaling_round_trip_error: f64,
     pub(crate) residuals: Option<ConvexResidualEvidence>,
     pub(crate) infeasibility_certificate: Option<ValidatedInfeasibilityEvidence>,
+    pub(crate) recession_ray: Option<ValidatedRecessionEvidence>,
     pub(crate) failure_reason: Option<QpAttemptFailureReason>,
 }
 
@@ -120,6 +159,9 @@ pub(crate) struct QpAttemptPlan {
     pub(crate) maximum_attempts: usize,
     pub(crate) canonical_tolerance_is_immutable: bool,
     pub(crate) form_family_is_immutable: bool,
+    pub(crate) objective_is_immutable: bool,
+    pub(crate) hardness_is_immutable: bool,
+    pub(crate) kernel_is_immutable: bool,
 }
 
 impl QpAttemptPlan {
@@ -133,6 +175,9 @@ impl QpAttemptPlan {
             maximum_attempts: 2,
             canonical_tolerance_is_immutable: true,
             form_family_is_immutable: true,
+            objective_is_immutable: true,
+            hardness_is_immutable: true,
+            kernel_is_immutable: true,
         }
     }
 }
@@ -173,6 +218,7 @@ pub(crate) struct CubicQpEvidence {
     pub(crate) scaling: QpScalingEvidence,
     pub(crate) scaling_round_trip_error: f64,
     pub(crate) backend_residuals: ConvexResidualEvidence,
+    pub(crate) physical_residuals: ConvexResidualEvidence,
     pub(crate) backend_internal_scaling_round_trip_error: f64,
     pub(crate) attempts: Vec<QpAttemptRecord>,
     pub(crate) attempt_plan: QpAttemptPlan,
@@ -242,6 +288,7 @@ pub(crate) struct QpRecoveryFailureEvidence {
     pub(crate) backend_standard_form_violation: f64,
     pub(crate) reduction_round_trip_error: f64,
     pub(crate) scaling_round_trip_error: f64,
+    pub(crate) sources: Vec<UsageProvenance>,
     pub(crate) no_model_produced: bool,
 }
 
@@ -264,6 +311,13 @@ pub(crate) enum CubicExecutionFailure {
         evidence: ValidatedInfeasibilityEvidence,
         attempts: Vec<QpAttemptRecord>,
     },
+    ValidatedUnbounded {
+        evidence: ValidatedRecessionEvidence,
+        attempts: Vec<QpAttemptRecord>,
+    },
+    InconsistentAttempts {
+        attempts: Vec<QpAttemptRecord>,
+    },
     RecoveryVerification {
         evidence: Box<QpRecoveryFailureEvidence>,
         attempts: Vec<QpAttemptRecord>,
@@ -282,7 +336,11 @@ pub(crate) enum QpFaultInjection {
     BackendStandardForm,
     Objective,
     StandardRetry,
+    AlmostSolved,
+    Limit,
     InfeasibilityCertificate,
+    RecessionCertificate,
+    ConflictingValidatedConclusions,
 }
 
 #[cfg(test)]
@@ -523,8 +581,10 @@ fn solve_convex_qp(
     if matches!(fault, Some(QpFaultInjection::ScalingMap)) {
         scaled.round_trip_error = 1.0e-2;
     }
+    let certificate_provenance_verified =
+        verifies_qp_form_provenance(&representation, &problem, &form)?;
     let (candidate, residuals, attempts, accepted_attempt, internal_scaling_error) =
-        execute_qp_attempts(&form, &scaled, fault)?;
+        execute_qp_attempts(&form, &scaled, fault, certificate_provenance_verified)?;
     recover_and_verify_qp(
         plan,
         representation,
@@ -1170,6 +1230,7 @@ fn execute_qp_attempts(
     form: &ConvexQpForm,
     scaled: &ScaledQpForm,
     fault: Option<QpFaultInjection>,
+    certificate_provenance_verified: bool,
 ) -> Result<
     (
         ClarabelCandidateEnvelope,
@@ -1183,6 +1244,7 @@ fn execute_qp_attempts(
     let variables = scaled.linear_objective.len();
     let constraints_count = scaled.constraint_rhs.len();
     let mut attempts = Vec::with_capacity(2);
+    let mut validated_conclusions = Vec::with_capacity(2);
     for (sequence, profile) in [
         ClarabelAttemptProfile::Standard,
         ClarabelAttemptProfile::Robust,
@@ -1205,6 +1267,32 @@ fn execute_qp_attempts(
             sequence,
         )
         .map_err(|failure| CubicExecutionFailure::BackendAdapter(Box::new(failure)))?;
+        if matches!(
+            fault,
+            Some(QpFaultInjection::ConflictingValidatedConclusions)
+        ) {
+            candidate.primal.fill(0.0);
+            candidate.slack.fill(0.0);
+            if sequence == 0 {
+                candidate.dual.fill(0.0);
+                candidate.attempt.termination = ClarabelTermination::Solved;
+            } else {
+                for (dual, factor) in candidate
+                    .dual
+                    .iter_mut()
+                    .zip(scaled.scaling.constraint_factors())
+                {
+                    *dual = 1.0 / factor;
+                }
+                candidate.attempt.termination = ClarabelTermination::PrimalInfeasible;
+            }
+        }
+        if matches!(fault, Some(QpFaultInjection::AlmostSolved)) {
+            candidate.attempt.termination = ClarabelTermination::AlmostSolved;
+        }
+        if matches!(fault, Some(QpFaultInjection::Limit)) {
+            candidate.attempt.termination = ClarabelTermination::IterationLimit;
+        }
         if matches!(fault, Some(QpFaultInjection::InfeasibilityCertificate))
             && matches!(
                 candidate.attempt.termination,
@@ -1212,6 +1300,14 @@ fn execute_qp_attempts(
             )
         {
             candidate.dual.fill(0.0);
+        }
+        if matches!(fault, Some(QpFaultInjection::RecessionCertificate))
+            && matches!(
+                candidate.attempt.termination,
+                ClarabelTermination::DualInfeasible | ClarabelTermination::AlmostDualInfeasible
+            )
+        {
+            candidate.primal.fill(0.0);
         }
         let finite = candidate
             .primal
@@ -1230,8 +1326,23 @@ fn execute_qp_attempts(
             candidate.attempt.termination,
             ClarabelTermination::PrimalInfeasible | ClarabelTermination::AlmostPrimalInfeasible
         );
-        let mut residuals =
-            (finite && candidate_termination).then(|| convex_residuals(scaled, &candidate));
+        let recession_termination = matches!(
+            candidate.attempt.termination,
+            ClarabelTermination::DualInfeasible | ClarabelTermination::AlmostDualInfeasible
+        );
+        let mut residuals = (finite && candidate_termination).then(|| {
+            convex_residuals(
+                scaled.linear_objective.len(),
+                &scaled.hessian,
+                &scaled.linear_objective,
+                &scaled.constraints,
+                &scaled.constraint_rhs,
+                scaled.equality_constraints,
+                &candidate.primal,
+                &candidate.dual,
+                &candidate.slack,
+            )
+        });
         if sequence == 0 && matches!(fault, Some(QpFaultInjection::StandardRetry)) {
             residuals = residuals.map(|mut residuals| {
                 residuals.primal = 1.0;
@@ -1267,7 +1378,25 @@ fn execute_qp_attempts(
         });
         let infeasibility_certificate =
             (finite && threads_verified && fingerprint_verified && infeasibility_termination)
-                .then(|| validate_primal_infeasibility_certificate(form, scaled, &candidate))
+                .then(|| {
+                    validate_primal_infeasibility_certificate(
+                        form,
+                        scaled,
+                        &candidate,
+                        certificate_provenance_verified,
+                    )
+                })
+                .flatten();
+        let recession_ray =
+            (finite && threads_verified && fingerprint_verified && recession_termination)
+                .then(|| {
+                    validate_recession_certificate(
+                        form,
+                        scaled,
+                        &candidate,
+                        certificate_provenance_verified,
+                    )
+                })
                 .flatten();
         let failure_reason = if !finite {
             Some(QpAttemptFailureReason::NonFiniteCandidate)
@@ -1279,8 +1408,10 @@ fn execute_qp_attempts(
             Some(QpAttemptFailureReason::BackendResidualExceeded)
         } else if infeasibility_termination && infeasibility_certificate.is_none() {
             Some(QpAttemptFailureReason::InvalidInfeasibilityCertificate)
+        } else if recession_termination && recession_ray.is_none() {
+            Some(QpAttemptFailureReason::InvalidRecessionCertificate)
         } else if !candidate_termination {
-            if infeasibility_certificate.is_some() {
+            if infeasibility_certificate.is_some() || recession_ray.is_some() {
                 None
             } else {
                 Some(QpAttemptFailureReason::UnverifiedTermination)
@@ -1293,11 +1424,37 @@ fn execute_qp_attempts(
             georbf_scaling: scaled.scaling.clone(),
             georbf_scaling_round_trip_error: scaled.round_trip_error,
             residuals,
-            infeasibility_certificate,
+            infeasibility_certificate: infeasibility_certificate.clone(),
+            recession_ray: recession_ray.clone(),
             failure_reason,
         });
+        let conclusion = if failure_reason.is_none() && residual_verified {
+            Some(ValidatedQpConclusion::Candidate)
+        } else if failure_reason.is_none() && infeasibility_certificate.is_some() {
+            Some(ValidatedQpConclusion::Infeasible)
+        } else if failure_reason.is_none() && recession_ray.is_some() {
+            Some(ValidatedQpConclusion::Unbounded)
+        } else {
+            None
+        };
+        validated_conclusions.extend(conclusion);
+        if reconcile_validated_conclusions(&validated_conclusions).is_err() {
+            return Err(CubicExecutionFailure::InconsistentAttempts { attempts });
+        }
+        if sequence == 0
+            && conclusion.is_some()
+            && matches!(
+                fault,
+                Some(QpFaultInjection::ConflictingValidatedConclusions)
+            )
+        {
+            continue;
+        }
         if let Some(evidence) = infeasibility_certificate {
             return Err(CubicExecutionFailure::ValidatedInfeasible { evidence, attempts });
+        }
+        if let Some(evidence) = recession_ray {
+            return Err(CubicExecutionFailure::ValidatedUnbounded { evidence, attempts });
         }
         if failure_reason.is_none() {
             return Ok((
@@ -1346,6 +1503,7 @@ fn validate_primal_infeasibility_certificate(
     form: &ConvexQpForm,
     scaled: &ScaledQpForm,
     candidate: &ClarabelCandidateEnvelope,
+    provenance_verified: bool,
 ) -> Option<ValidatedInfeasibilityEvidence> {
     let constraint_factors = scaled.scaling.constraint_factors();
     if constraint_factors.len() != candidate.dual.len() {
@@ -1357,13 +1515,108 @@ fn validate_primal_infeasibility_certificate(
         .zip(constraint_factors)
         .map(|(value, factor)| value * factor)
         .collect::<Vec<_>>();
-    validate_primal_infeasibility_ray(
+    let recovery_round_trip_error = candidate
+        .dual
+        .iter()
+        .zip(&recovered_ray)
+        .zip(scaled.scaling.constraint_factors())
+        .map(|((scaled_value, recovered_value), factor)| {
+            relative_error(recovered_value / factor, *scaled_value)
+        })
+        .fold(0.0_f64, f64::max);
+    let mut evidence = validate_primal_infeasibility_ray(
         form.variables,
         &form.constraints,
         &form.constraint_rhs,
         form.equality_constraints,
         &recovered_ray,
-    )
+    )?;
+    if !provenance_verified
+        || !recovery_round_trip_error.is_finite()
+        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+    {
+        return None;
+    }
+    evidence.recovery_round_trip_error = recovery_round_trip_error;
+    evidence.provenance_verified = provenance_verified;
+    evidence.sources = constraint_certificate_sources(form);
+    Some(evidence)
+}
+
+fn constraint_certificate_sources(form: &ConvexQpForm) -> Vec<UsageProvenance> {
+    let mut sources = form
+        .hard_equality_rows
+        .iter()
+        .chain(&form.affine_inequality_rows)
+        .flat_map(|row| {
+            row.provenance_edges
+                .iter()
+                .map(|edge| edge.provenance.clone())
+        })
+        .chain(
+            form.violation_nonnegative_rows
+                .iter()
+                .map(|row| row.provenance_edge.provenance.clone()),
+        )
+        .collect::<Vec<_>>();
+    normalize_provenance_sources(&mut sources);
+    sources
+}
+
+fn validate_recession_certificate(
+    form: &ConvexQpForm,
+    scaled: &ScaledQpForm,
+    candidate: &ClarabelCandidateEnvelope,
+    provenance_verified: bool,
+) -> Option<ValidatedRecessionEvidence> {
+    let variable_factors = scaled.scaling.variable_factors();
+    if variable_factors.len() != candidate.primal.len() {
+        return None;
+    }
+    let recovered_ray = candidate
+        .primal
+        .iter()
+        .zip(variable_factors)
+        .map(|(value, factor)| value * factor)
+        .collect::<Vec<_>>();
+    let recovery_round_trip_error = candidate
+        .primal
+        .iter()
+        .zip(&recovered_ray)
+        .zip(scaled.scaling.variable_factors())
+        .map(|((scaled_value, recovered_value), factor)| {
+            relative_error(recovered_value / factor, *scaled_value)
+        })
+        .fold(0.0_f64, f64::max);
+    let mut evidence = validate_recession_ray(
+        form.variables,
+        &form.hessian,
+        &form.linear_objective,
+        &form.constraints,
+        form.equality_constraints,
+        &recovered_ray,
+    )?;
+    if !provenance_verified
+        || !recovery_round_trip_error.is_finite()
+        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+    {
+        return None;
+    }
+    evidence.recovery_round_trip_error = recovery_round_trip_error;
+    evidence.provenance_verified = provenance_verified;
+    evidence.sources = recession_certificate_sources(form);
+    Some(evidence)
+}
+
+fn recession_certificate_sources(form: &ConvexQpForm) -> Vec<UsageProvenance> {
+    let mut sources = constraint_certificate_sources(form);
+    sources.extend(
+        form.soft_objective_blocks
+            .iter()
+            .flat_map(|block| block.provenances.iter().cloned()),
+    );
+    normalize_provenance_sources(&mut sources);
+    sources
 }
 
 fn validate_primal_infeasibility_ray(
@@ -1425,6 +1678,9 @@ fn validate_primal_infeasibility_ray(
         separation_margin,
         residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit,
         separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit,
+        recovery_round_trip_error: 0.0,
+        provenance_verified: false,
+        sources: Vec::new(),
     };
     (evidence.finite
         && (evidence.normalized_ray_norm - 1.0).abs()
@@ -1435,15 +1691,111 @@ fn validate_primal_infeasibility_ray(
         .then_some(evidence)
 }
 
+fn validate_recession_ray(
+    variables: usize,
+    hessian: &[f64],
+    linear_objective: &[f64],
+    constraints: &[f64],
+    equality_constraints: usize,
+    candidate_ray: &[f64],
+) -> Option<ValidatedRecessionEvidence> {
+    if hessian.len() != variables.saturating_mul(variables)
+        || linear_objective.len() != variables
+        || candidate_ray.len() != variables
+        || variables == 0
+        || constraints.len() % variables != 0
+    {
+        return None;
+    }
+    let constraints_count = constraints.len() / variables;
+    if equality_constraints > constraints_count {
+        return None;
+    }
+    let ray_norm = candidate_ray
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    if !ray_norm.is_finite() || ray_norm <= 0.0 {
+        return None;
+    }
+    let ray = candidate_ray
+        .iter()
+        .map(|value| value / ray_norm)
+        .collect::<Vec<_>>();
+    let normalized_ray_norm = ray.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    let hessian_scale = hessian
+        .iter()
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let hessian_null_residual = dense_matrix_vector_product(hessian, variables, variables, &ray)
+        .into_iter()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max)
+        / hessian_scale;
+    let constraint_scale = constraints
+        .iter()
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let ray_constraints =
+        dense_matrix_vector_product(constraints, constraints_count, variables, &ray);
+    let equality_residual = ray_constraints[..equality_constraints]
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    let inequality_violation = ray_constraints[equality_constraints..]
+        .iter()
+        .map(|value| value.max(0.0))
+        .fold(0.0_f64, f64::max);
+    let constraint_ray_violation = equality_residual.max(inequality_violation) / constraint_scale;
+    let objective_scale = linear_objective
+        .iter()
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let descent_margin = -dot_product(linear_objective, &ray) / objective_scale;
+    let evidence = ValidatedRecessionEvidence {
+        finite: normalized_ray_norm.is_finite()
+            && hessian_null_residual.is_finite()
+            && constraint_ray_violation.is_finite()
+            && descent_margin.is_finite(),
+        normalized_ray_norm,
+        hessian_null_residual,
+        constraint_ray_violation,
+        descent_margin,
+        residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit,
+        separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit,
+        recovery_round_trip_error: 0.0,
+        provenance_verified: false,
+        sources: Vec::new(),
+    };
+    (evidence.finite
+        && (evidence.normalized_ray_norm - 1.0).abs()
+            <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+        && evidence.hessian_null_residual <= evidence.residual_limit
+        && evidence.constraint_ray_violation <= evidence.residual_limit
+        && evidence.descent_margin >= evidence.separation_limit)
+        .then_some(evidence)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn convex_residuals(
-    form: &ScaledQpForm,
-    candidate: &ClarabelCandidateEnvelope,
+    variables: usize,
+    hessian: &[f64],
+    linear_objective: &[f64],
+    constraints: &[f64],
+    constraint_rhs: &[f64],
+    equality_constraints: usize,
+    primal_candidate: &[f64],
+    dual_candidate: &[f64],
+    slack_candidate: &[f64],
 ) -> ConvexResidualEvidence {
-    let variables = form.linear_objective.len();
-    let constraints_count = form.constraint_rhs.len();
-    if candidate.primal.len() != variables
-        || candidate.dual.len() != constraints_count
-        || candidate.slack.len() != constraints_count
+    let constraints_count = constraint_rhs.len();
+    if hessian.len() != variables.saturating_mul(variables)
+        || linear_objective.len() != variables
+        || constraints.len() != constraints_count.saturating_mul(variables)
+        || equality_constraints > constraints_count
+        || primal_candidate.len() != variables
+        || dual_candidate.len() != constraints_count
+        || slack_candidate.len() != constraints_count
     {
         return ConvexResidualEvidence {
             primal: f64::INFINITY,
@@ -1453,29 +1805,25 @@ fn convex_residuals(
             relative_gap: f64::INFINITY,
         };
     }
-    let affine = dense_matrix_vector_product(
-        &form.constraints,
-        constraints_count,
-        variables,
-        &candidate.primal,
-    );
+    let affine =
+        dense_matrix_vector_product(constraints, constraints_count, variables, primal_candidate);
     let equation_residual = affine
         .iter()
-        .zip(&candidate.slack)
-        .zip(&form.constraint_rhs)
+        .zip(slack_candidate)
+        .zip(constraint_rhs)
         .map(|((affine, slack), rhs)| (affine + slack - rhs).abs())
         .fold(0.0_f64, f64::max);
     let primal_scale = affine
         .iter()
-        .chain(&candidate.slack)
-        .chain(&form.constraint_rhs)
+        .chain(slack_candidate)
+        .chain(constraint_rhs)
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
-    let zero_slack_violation = candidate.slack[..form.equality_constraints]
+    let zero_slack_violation = slack_candidate[..equality_constraints]
         .iter()
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max);
-    let nonnegative_slack_violation = candidate.slack[form.equality_constraints..]
+    let nonnegative_slack_violation = slack_candidate[equality_constraints..]
         .iter()
         .map(|value| (-value).max(0.0))
         .fold(0.0_f64, f64::max);
@@ -1483,19 +1831,19 @@ fn convex_residuals(
         .max(zero_slack_violation / primal_scale)
         .max(nonnegative_slack_violation / primal_scale);
     let hessian_product =
-        dense_matrix_vector_product(&form.hessian, variables, variables, &candidate.primal);
+        dense_matrix_vector_product(hessian, variables, variables, primal_candidate);
     let stationarity_vector = (0..variables)
         .map(|column| {
             hessian_product[column]
-                + form.linear_objective[column]
+                + linear_objective[column]
                 + (0..constraints_count)
-                    .map(|row| form.constraints[row * variables + column] * candidate.dual[row])
+                    .map(|row| constraints[row * variables + column] * dual_candidate[row])
                     .sum::<f64>()
         })
         .collect::<Vec<_>>();
     let stationarity_scale = hessian_product
         .iter()
-        .chain(&form.linear_objective)
+        .chain(linear_objective)
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
     let stationarity = stationarity_vector
@@ -1503,26 +1851,25 @@ fn convex_residuals(
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max)
         / stationarity_scale;
-    let dual_scale = candidate
-        .dual
+    let dual_scale = dual_candidate
         .iter()
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
-    let dual = candidate.dual[form.equality_constraints..]
+    let dual = dual_candidate[equality_constraints..]
         .iter()
         .map(|value| (-value).max(0.0))
         .fold(0.0_f64, f64::max)
         / dual_scale;
-    let primal_objective = 0.5 * dot_product(&candidate.primal, &hessian_product)
-        + dot_product(&form.linear_objective, &candidate.primal);
-    let dual_objective = -0.5 * dot_product(&candidate.primal, &hessian_product)
-        - dot_product(&form.constraint_rhs, &candidate.dual);
+    let primal_objective = 0.5 * dot_product(primal_candidate, &hessian_product)
+        + dot_product(linear_objective, primal_candidate);
+    let dual_objective = -0.5 * dot_product(primal_candidate, &hessian_product)
+        - dot_product(constraint_rhs, dual_candidate);
     let objective_scale = 1.0 + primal_objective.abs().max(dual_objective.abs());
     ConvexResidualEvidence {
         primal,
         dual,
         stationarity,
-        complementarity: dot_product(&candidate.slack, &candidate.dual).abs() / objective_scale,
+        complementarity: dot_product(slack_candidate, dual_candidate).abs() / objective_scale,
         relative_gap: (primal_objective - dual_objective).abs() / objective_scale,
     }
 }
@@ -1578,6 +1925,7 @@ fn recover_and_verify_qp(
     backend_internal_scaling_round_trip_error: f64,
     fault: Option<QpFaultInjection>,
 ) -> Result<CubicExecutionSolution, CubicExecutionFailure> {
+    let recovery_sources = canonical_problem_sources(&problem);
     if !representation
         .solve_coordinate_transform()
         .is_valid_recovery_map()
@@ -1587,6 +1935,7 @@ fn recover_and_verify_qp(
             f64::INFINITY,
             f64::INFINITY,
             scaled.round_trip_error,
+            recovery_sources.clone(),
             attempts,
         );
     }
@@ -1597,12 +1946,14 @@ fn recover_and_verify_qp(
             f64::INFINITY,
             f64::INFINITY,
             scaled.round_trip_error,
+            recovery_sources.clone(),
             attempts,
         );
     }
     let variable_factors = scaled.scaling.variable_factors();
     let constraint_factors = scaled.scaling.constraint_factors();
     if candidate.primal.len() != form.variables
+        || candidate.dual.len() != form.constraint_rhs.len()
         || candidate.slack.len() != form.constraint_rhs.len()
         || variable_factors.len() != form.variables
         || constraint_factors.len() != form.constraint_rhs.len()
@@ -1612,6 +1963,7 @@ fn recover_and_verify_qp(
             f64::INFINITY,
             f64::INFINITY,
             scaled.round_trip_error,
+            recovery_sources.clone(),
             attempts,
         );
     }
@@ -1627,6 +1979,12 @@ fn recover_and_verify_qp(
         .zip(&constraint_factors)
         .map(|(value, factor)| value / factor)
         .collect::<Vec<_>>();
+    let unscaled_duals = candidate
+        .dual
+        .iter()
+        .zip(&constraint_factors)
+        .map(|(value, factor)| value * factor)
+        .collect::<Vec<_>>();
     let candidate_scaling_round_trip = candidate
         .primal
         .iter()
@@ -1641,10 +1999,29 @@ fn recover_and_verify_qp(
                 .zip(&constraint_factors)
                 .map(|((scaled, unscaled), factor)| relative_error(unscaled * factor, *scaled)),
         )
+        .chain(
+            candidate
+                .dual
+                .iter()
+                .zip(&unscaled_duals)
+                .zip(&constraint_factors)
+                .map(|((scaled, unscaled), factor)| relative_error(unscaled / factor, *scaled)),
+        )
         .fold(scaled.round_trip_error, f64::max);
     if matches!(fault, Some(QpFaultInjection::BackendStandardForm)) {
         unscaled_slacks[0] += 1.0;
     }
+    let physical_residuals = convex_residuals(
+        form.variables,
+        &form.hessian,
+        &form.linear_objective,
+        &form.constraints,
+        &form.constraint_rhs,
+        form.equality_constraints,
+        &unscaled_candidate,
+        &unscaled_duals,
+        &unscaled_slacks,
+    );
     let reduced = &unscaled_candidate[..form.reduced_field_variables];
     let standard_coefficients = representation
         .null_space()
@@ -1864,12 +2241,13 @@ fn recover_and_verify_qp(
             .map(|equality| (equality.dimension, equality.residual)),
     );
 
-    let physical_standard_form_violation =
-        standard_form_violation(&form, &unscaled_candidate, &unscaled_slacks);
-    if physical_standard_form_violation > EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit {
+    let physical_standard_form_violation = physical_residuals.primal;
+    if !physical_residuals.is_finite()
+        || physical_residuals.maximum() > EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit
+    {
         return Err(CubicExecutionFailure::BackendContract {
             attempts,
-            observed: physical_standard_form_violation,
+            observed: physical_residuals.maximum(),
             limit: EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit,
         });
     }
@@ -2053,6 +2431,7 @@ fn recover_and_verify_qp(
             physical_standard_form_violation,
             reduction_round_trip_error,
             candidate_scaling_round_trip,
+            recovery_sources,
             attempts,
         );
     }
@@ -2077,6 +2456,7 @@ fn recover_and_verify_qp(
             scaling: scaled.scaling,
             scaling_round_trip_error: candidate_scaling_round_trip,
             backend_residuals,
+            physical_residuals,
             backend_internal_scaling_round_trip_error,
             attempts,
             attempt_plan: QpAttemptPlan::georbf_v1(),
@@ -2398,28 +2778,12 @@ fn relation_tolerance(
     }
 }
 
-fn standard_form_violation(form: &ConvexQpForm, primal: &[f64], slacks: &[f64]) -> f64 {
-    let rows = form.constraint_rhs.len();
-    let affine = dense_matrix_vector_product(&form.constraints, rows, form.variables, primal);
-    let scale = affine
-        .iter()
-        .chain(slacks)
-        .chain(&form.constraint_rhs)
-        .map(|value| value.abs())
-        .fold(1.0_f64, f64::max);
-    affine
-        .iter()
-        .zip(slacks)
-        .zip(&form.constraint_rhs)
-        .map(|((affine, slack), rhs)| (affine + slack - rhs).abs() / scale)
-        .fold(0.0_f64, f64::max)
-}
-
 fn recovery_failure<T>(
     reasons: Vec<QpRecoveryFailureReason>,
     backend_standard_form_violation: f64,
     reduction_round_trip_error: f64,
     scaling_round_trip_error: f64,
+    sources: Vec<UsageProvenance>,
     attempts: Vec<QpAttemptRecord>,
 ) -> Result<T, CubicExecutionFailure> {
     Err(CubicExecutionFailure::RecoveryVerification {
@@ -2428,10 +2792,47 @@ fn recovery_failure<T>(
             backend_standard_form_violation,
             reduction_round_trip_error,
             scaling_round_trip_error,
+            sources,
             no_model_produced: true,
         }),
         attempts,
     })
+}
+
+fn canonical_problem_sources(problem: &CubicCanonicalProblem) -> Vec<UsageProvenance> {
+    let mut sources = problem
+        .equalities
+        .iter()
+        .map(|relation| relation.provenance().clone())
+        .chain(
+            problem
+                .soft_equalities
+                .iter()
+                .map(|relation| relation.provenance().clone()),
+        )
+        .chain(
+            problem
+                .affine_inequalities
+                .iter()
+                .flat_map(|relation| relation.source_provenances().iter().cloned()),
+        )
+        .collect::<Vec<_>>();
+    normalize_provenance_sources(&mut sources);
+    sources
+}
+
+fn normalize_provenance_sources(sources: &mut Vec<UsageProvenance>) {
+    sources.sort_by(|left, right| {
+        left.semantic_role()
+            .cmp(right.semantic_role())
+            .then_with(|| left.source().cmp(right.source()))
+            .then_with(|| left.groups().cmp(right.groups()))
+    });
+    sources.dedup_by(|left, right| {
+        left.source() == right.source()
+            && left.groups() == right.groups()
+            && left.semantic_role() == right.semantic_role()
+    });
 }
 
 fn relative_error(actual: f64, expected: f64) -> f64 {
@@ -3247,6 +3648,12 @@ mod tests {
         );
         assert_eq!(qp.accepted_attempt, 1);
         assert_eq!(qp.attempts.len(), 2);
+        assert_eq!(qp.attempt_plan.maximum_attempts, 2);
+        assert!(qp.attempt_plan.canonical_tolerance_is_immutable);
+        assert!(qp.attempt_plan.form_family_is_immutable);
+        assert!(qp.attempt_plan.objective_is_immutable);
+        assert!(qp.attempt_plan.hardness_is_immutable);
+        assert!(qp.attempt_plan.kernel_is_immutable);
         assert_eq!(
             qp.attempts[0].failure_reason,
             Some(QpAttemptFailureReason::BackendResidualExceeded)
@@ -3305,6 +3712,171 @@ mod tests {
                 )
                 .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn recession_validation_requires_zero_curvature_feasible_ray_and_strict_descent() {
+        // min -x subject to x >= 0, written as -x + s = 0.
+        let valid = validate_recession_ray(1, &[0.0], &[-1.0], &[-1.0], 0, &[1.0])
+            .expect("the positive direction is a feasible strict-descent recession ray");
+        assert_eq!(valid.normalized_ray_norm, 1.0);
+        assert_eq!(valid.hessian_null_residual, 0.0);
+        assert_eq!(valid.constraint_ray_violation, 0.0);
+        assert_eq!(valid.descent_margin, 1.0);
+
+        assert!(validate_recession_ray(1, &[0.0], &[-1.0], &[-1.0], 0, &[0.0]).is_none());
+        assert!(validate_recession_ray(1, &[1.0], &[-1.0], &[-1.0], 0, &[1.0]).is_none());
+        assert!(validate_recession_ray(1, &[0.0], &[-1.0], &[-1.0], 0, &[-1.0]).is_none());
+        assert!(validate_recession_ray(1, &[0.0], &[0.0], &[-1.0], 0, &[1.0]).is_none());
+    }
+
+    #[test]
+    fn dual_infeasible_termination_requires_a_validated_recession_ray() {
+        let form = ConvexQpForm {
+            variables: 1,
+            reduced_field_variables: 0,
+            polynomial_variables: 0,
+            semantic_latents: 1,
+            soft_violation_variables: 0,
+            hessian: vec![0.0],
+            linear_objective: vec![-1.0],
+            constraints: vec![-1.0],
+            constraint_rhs: vec![0.0],
+            equality_constraints: 0,
+            inequality_constraints: 1,
+            hard_equality_rows: Vec::new(),
+            affine_inequality_rows: Vec::new(),
+            violation_nonnegative_rows: Vec::new(),
+            soft_objective_blocks: Vec::new(),
+            capacity: plan_convex_qp_capacity(1, 1, 1).unwrap(),
+        };
+        let scaled = scale_qp_form(&form).expect("the manufactured QP must scale reversibly");
+
+        let failure = execute_qp_attempts(&form, &scaled, None, true)
+            .expect_err("an independently verified recession ray must not produce a model");
+        match failure {
+            CubicExecutionFailure::ValidatedUnbounded { evidence, attempts } => {
+                assert!(evidence.finite);
+                assert_eq!(evidence.normalized_ray_norm, 1.0);
+                assert!(evidence.hessian_null_residual <= evidence.residual_limit);
+                assert!(evidence.constraint_ray_violation <= evidence.residual_limit);
+                assert!(evidence.descent_margin >= evidence.separation_limit);
+                assert!(!attempts.is_empty());
+            }
+            other => panic!("unexpected unbounded-QP result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_recession_candidates_exhaust_the_bounded_attempt_plan() {
+        let form = ConvexQpForm {
+            variables: 1,
+            reduced_field_variables: 0,
+            polynomial_variables: 0,
+            semantic_latents: 1,
+            soft_violation_variables: 0,
+            hessian: vec![0.0],
+            linear_objective: vec![-1.0],
+            constraints: vec![-1.0],
+            constraint_rhs: vec![0.0],
+            equality_constraints: 0,
+            inequality_constraints: 1,
+            hard_equality_rows: Vec::new(),
+            affine_inequality_rows: Vec::new(),
+            violation_nonnegative_rows: Vec::new(),
+            soft_objective_blocks: Vec::new(),
+            capacity: plan_convex_qp_capacity(1, 1, 1).unwrap(),
+        };
+        let scaled = scale_qp_form(&form).expect("the manufactured QP must scale reversibly");
+
+        let failure = execute_qp_attempts(
+            &form,
+            &scaled,
+            Some(QpFaultInjection::RecessionCertificate),
+            true,
+        )
+        .expect_err("unverified dual-infeasibility rays must not prove unboundedness");
+        match failure {
+            CubicExecutionFailure::AttemptsExhausted { attempts } => {
+                assert_eq!(attempts.len(), 2);
+                assert!(attempts.iter().all(|attempt| {
+                    attempt.recession_ray.is_none()
+                        && attempt.failure_reason
+                            == Some(QpAttemptFailureReason::InvalidRecessionCertificate)
+                }));
+            }
+            other => panic!("unexpected invalid-recession result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contradictory_validated_attempt_conclusions_are_never_selected_by_order() {
+        assert_eq!(
+            reconcile_validated_conclusions(&[
+                ValidatedQpConclusion::Candidate,
+                ValidatedQpConclusion::Candidate,
+            ]),
+            Ok(Some(ValidatedQpConclusion::Candidate))
+        );
+        assert!(
+            reconcile_validated_conclusions(&[
+                ValidatedQpConclusion::Infeasible,
+                ValidatedQpConclusion::Unbounded,
+            ])
+            .is_err()
+        );
+        assert!(
+            reconcile_validated_conclusions(&[
+                ValidatedQpConclusion::Candidate,
+                ValidatedQpConclusion::Infeasible,
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn executed_attempts_reject_two_independently_validated_contradictory_conclusions() {
+        // Twelve equality rows make both envelopes independently satisfiable at
+        // their fixed numerical thresholds: x = 0 misses every rhs by 1e-8,
+        // while the normalized all-ones Farkas ray separates by 1.2e-7.
+        let mut constraints = Vec::with_capacity(12);
+        constraints.extend(std::iter::repeat_n(1.0, 6));
+        constraints.extend(std::iter::repeat_n(-1.0, 6));
+        let form = ConvexQpForm {
+            variables: 1,
+            reduced_field_variables: 0,
+            polynomial_variables: 0,
+            semantic_latents: 1,
+            soft_violation_variables: 0,
+            hessian: vec![1.0],
+            linear_objective: vec![0.0],
+            constraints,
+            constraint_rhs: vec![-1.0e-8; 12],
+            equality_constraints: 12,
+            inequality_constraints: 0,
+            hard_equality_rows: Vec::new(),
+            affine_inequality_rows: Vec::new(),
+            violation_nonnegative_rows: Vec::new(),
+            soft_objective_blocks: Vec::new(),
+            capacity: plan_convex_qp_capacity(1, 12, 1).unwrap(),
+        };
+        let scaled = scale_qp_form(&form).expect("the manufactured QP must scale reversibly");
+
+        let failure = execute_qp_attempts(
+            &form,
+            &scaled,
+            Some(QpFaultInjection::ConflictingValidatedConclusions),
+            true,
+        )
+        .expect_err("validated contradictory attempts must not select either conclusion");
+        match failure {
+            CubicExecutionFailure::InconsistentAttempts { attempts } => {
+                assert_eq!(attempts.len(), 2);
+                assert!(attempts[0].residuals.is_some());
+                assert!(attempts[1].infeasibility_certificate.is_some());
+            }
+            other => panic!("unexpected contradictory-attempt result: {other:?}"),
         }
     }
 }
