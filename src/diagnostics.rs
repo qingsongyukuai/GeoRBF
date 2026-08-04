@@ -611,12 +611,71 @@ pub enum ResidualDimension {
     FieldValuePerLength,
 }
 
+/// Evidence for the implicit complete-Pi1 quotient construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CubicQuotientConstructionEvidence {
+    quotient_dimension: usize,
+    householder_reflector_count: usize,
+    congruence_pass_count: usize,
+    householder_orthogonality_error: f64,
+    canonical_response_round_trip_error: f64,
+}
+
+pub(crate) struct CubicQuotientConstructionEvidenceParts {
+    pub(crate) quotient_dimension: usize,
+    pub(crate) householder_reflector_count: usize,
+    pub(crate) congruence_pass_count: usize,
+    pub(crate) householder_orthogonality_error: f64,
+    pub(crate) canonical_response_round_trip_error: f64,
+}
+
+impl CubicQuotientConstructionEvidence {
+    pub(crate) fn new(parts: CubicQuotientConstructionEvidenceParts) -> Self {
+        Self {
+            quotient_dimension: parts.quotient_dimension,
+            householder_reflector_count: parts.householder_reflector_count,
+            congruence_pass_count: parts.congruence_pass_count,
+            householder_orthogonality_error: parts.householder_orthogonality_error,
+            canonical_response_round_trip_error: parts.canonical_response_round_trip_error,
+        }
+    }
+
+    /// Returns the quotient dimension produced by the implicit construction.
+    pub fn quotient_dimension(self) -> usize {
+        self.quotient_dimension
+    }
+
+    /// Returns the number of Householder reflectors in the complete Pi1 QR.
+    pub fn householder_reflector_count(self) -> usize {
+        self.householder_reflector_count
+    }
+
+    /// Returns the number of full-matrix Householder applications used by the
+    /// quotient congruence.
+    pub fn congruence_pass_count(self) -> usize {
+        self.congruence_pass_count
+    }
+
+    /// Returns the observed orthogonality defect of the complete Pi1
+    /// Householder image.
+    pub fn householder_orthogonality_error(self) -> f64 {
+        self.householder_orthogonality_error
+    }
+
+    /// Returns the round-trip error for a canonical response through the
+    /// implicit quotient coordinates.
+    pub fn canonical_response_round_trip_error(self) -> f64 {
+        self.canonical_response_round_trip_error
+    }
+}
+
 /// Complete Cubic representation analysis retained by a successful fit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CubicAnalysisEvidence {
     fitting_functional_count: usize,
     polynomial_dimension: usize,
     polynomial_rank: usize,
+    quotient_construction: CubicQuotientConstructionEvidence,
     polynomial_singular_values: Box<[f64]>,
     polynomial_rrqr_ratio: f64,
     polynomial_svd_ratio: f64,
@@ -636,6 +695,7 @@ pub(crate) struct CubicAnalysisEvidenceParts {
     pub(crate) fitting_functional_count: usize,
     pub(crate) polynomial_dimension: usize,
     pub(crate) polynomial_rank: usize,
+    pub(crate) quotient_construction: CubicQuotientConstructionEvidence,
     pub(crate) polynomial_singular_values: Vec<f64>,
     pub(crate) polynomial_rrqr_ratio: f64,
     pub(crate) polynomial_svd_ratio: f64,
@@ -657,6 +717,7 @@ impl CubicAnalysisEvidence {
             fitting_functional_count: parts.fitting_functional_count,
             polynomial_dimension: parts.polynomial_dimension,
             polynomial_rank: parts.polynomial_rank,
+            quotient_construction: parts.quotient_construction,
             polynomial_singular_values: parts.polynomial_singular_values.into(),
             polynomial_rrqr_ratio: parts.polynomial_rrqr_ratio,
             polynomial_svd_ratio: parts.polynomial_svd_ratio,
@@ -686,6 +747,11 @@ impl CubicAnalysisEvidence {
     /// Returns the accepted numerical rank of the polynomial pairing.
     pub fn polynomial_rank(&self) -> usize {
         self.polynomial_rank
+    }
+
+    /// Returns evidence for the implicit complete-Pi1 quotient construction.
+    pub fn quotient_construction(&self) -> CubicQuotientConstructionEvidence {
+        self.quotient_construction
     }
 
     /// Returns the polynomial-pairing singular values.
@@ -1394,6 +1460,10 @@ pub enum SolveCoordinateFailureReason {
 pub enum AnalysisContractQuantity {
     /// Null-space reconstruction defect.
     NullSpaceDefect,
+    /// Householder orthogonality defect.
+    HouseholderOrthogonalityError,
+    /// Canonical response quotient-coordinate round-trip error.
+    CanonicalResponseRoundTripError,
     /// Reduced-pairing symmetry defect.
     ReducedSymmetryDefect,
     /// Complete-affine reproduction error.

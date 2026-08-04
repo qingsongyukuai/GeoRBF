@@ -201,8 +201,16 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     let cubic_analysis = report
         .cubic_analysis()
         .expect("the Cubic path retains representation rank and condition evidence");
+    assert_eq!(cubic_analysis.fitting_functional_count(), 14);
     assert_eq!(cubic_analysis.polynomial_dimension(), 4);
     assert_eq!(cubic_analysis.polynomial_rank(), 4);
+    let quotient = cubic_analysis.quotient_construction();
+    assert_eq!(quotient.quotient_dimension(), 10);
+    assert_eq!(quotient.householder_reflector_count(), 4);
+    assert_eq!(quotient.congruence_pass_count(), 2);
+    assert!(quotient.householder_orthogonality_error() <= 1.0e-11);
+    assert!(cubic_analysis.null_space_defect() <= 1.0e-11);
+    assert!(quotient.canonical_response_round_trip_error() <= 1.0e-11);
     assert!(cubic_analysis.reduced_smallest_singular_value() > 0.0);
     let backend_rank = report
         .backend_rank()

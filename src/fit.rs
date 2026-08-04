@@ -36,6 +36,7 @@ use crate::diagnostics::{
     CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
     CapacityFailureKind, ConvexResidualEvidence as PublicConvexResidualEvidence,
     ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
+    CubicQuotientConstructionEvidence, CubicQuotientConstructionEvidenceParts,
     DirectInputConflictEvidence, InertiaCounts, InertiaEvidence, InfeasibilityCertificateEvidence,
     InfeasibilityCertificateEvidenceParts, InterpretableRankDeficiencyEvidence,
     InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
@@ -6594,6 +6595,20 @@ fn retain_representation_failure(
                 limit: *limit,
             });
         }
+        RepresentationFailure::HouseholderOrthogonalityContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::HouseholderOrthogonalityError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::CanonicalResponseRoundTripContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::CanonicalResponseRoundTripError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
         RepresentationFailure::ReducedSymmetryContract { observed, limit } => {
             report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
                 quantity: AnalysisContractQuantity::ReducedSymmetryDefect,
@@ -7151,12 +7166,27 @@ fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
         fitting_functional_count: evidence.fitting_functional_count,
         polynomial_dimension: evidence.polynomial_dimension,
         polynomial_rank: evidence.polynomial_rank,
+        quotient_construction: CubicQuotientConstructionEvidence::new(
+            CubicQuotientConstructionEvidenceParts {
+                quotient_dimension: evidence.quotient_construction.quotient_dimension,
+                householder_reflector_count: evidence
+                    .quotient_construction
+                    .householder_reflector_count,
+                congruence_pass_count: evidence.quotient_construction.congruence_pass_count,
+                householder_orthogonality_error: evidence
+                    .quotient_construction
+                    .householder_orthogonality_error,
+                canonical_response_round_trip_error: evidence
+                    .quotient_construction
+                    .canonical_response_round_trip_error,
+            },
+        ),
         polynomial_singular_values: evidence.singular_values.clone(),
         polynomial_rrqr_ratio: evidence.polynomial_rrqr_ratio,
         polynomial_svd_ratio: evidence.polynomial_svd_ratio,
         polynomial_rank_reject_ratio: evidence.polynomial_rank_reject_ratio,
         polynomial_rank_accept_ratio: evidence.polynomial_rank_accept_ratio,
-        null_space_defect: evidence.null_space_defect,
+        null_space_defect: evidence.quotient_construction.null_space_defect,
         reduced_symmetry_defect: evidence.reduced_symmetry_defect,
         reduced_symmetry_defect_limit: evidence.symmetry_defect_limit,
         reduced_largest_singular_value: evidence.reduced_largest_singular_value,

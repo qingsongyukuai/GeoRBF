@@ -3,7 +3,6 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_scratch,
     apply_block_householder_sequence_on_the_left_in_place_with_conj,
-    apply_block_householder_sequence_transpose_on_the_left_in_place_scratch,
     apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj,
 };
 use faer::prelude::*;
@@ -287,12 +286,12 @@ pub(crate) struct CpdEvidence {
     pub(crate) fitting_functional_count: usize,
     pub(crate) polynomial_dimension: usize,
     pub(crate) polynomial_rank: usize,
+    pub(crate) quotient_construction: QuotientConstructionEvidence,
     pub(crate) singular_values: Vec<f64>,
     pub(crate) polynomial_rrqr_ratio: f64,
     pub(crate) polynomial_svd_ratio: f64,
     pub(crate) polynomial_rank_reject_ratio: f64,
     pub(crate) polynomial_rank_accept_ratio: f64,
-    pub(crate) null_space_defect: f64,
     pub(crate) reduced_symmetry_defect: f64,
     pub(crate) symmetry_defect_limit: f64,
     pub(crate) reduced_largest_singular_value: f64,
@@ -361,6 +360,14 @@ pub(crate) enum RepresentationFailure {
     },
     NullSpaceWorkspaceAllocation,
     NullSpaceDefect {
+        observed: f64,
+        limit: f64,
+    },
+    HouseholderOrthogonalityContract {
+        observed: f64,
+        limit: f64,
+    },
+    CanonicalResponseRoundTripContract {
         observed: f64,
         limit: f64,
     },
@@ -485,12 +492,29 @@ impl CubicRepresentation {
             verify_polynomial_rank(&polynomial, &functionals, &coordinates)?;
         let kernel = assemble_kernel_pairing(&standard_functionals, &metric);
         let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank)?;
-        let (mut reduced, null_space_defect) =
-            materialize_reduced_pairing(&kernel, &polynomial, &null_space)?;
+        let (mut reduced, quotient_construction) =
+            implicit_quotient_congruence(&kernel, &polynomial, &null_space)?;
+        let null_space_defect = quotient_construction.null_space_defect;
         if null_space_defect > EQUALITY_KKT_POLICY_V1.null_space_defect_limit {
             return Err(RepresentationFailure::NullSpaceDefect {
                 observed: null_space_defect,
                 limit: EQUALITY_KKT_POLICY_V1.null_space_defect_limit,
+            });
+        }
+        if quotient_construction.householder_orthogonality_error
+            > EQUALITY_KKT_POLICY_V1.quotient_householder_orthogonality_limit
+        {
+            return Err(RepresentationFailure::HouseholderOrthogonalityContract {
+                observed: quotient_construction.householder_orthogonality_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_householder_orthogonality_limit,
+            });
+        }
+        if quotient_construction.canonical_response_round_trip_error
+            > EQUALITY_KKT_POLICY_V1.quotient_canonical_response_round_trip_limit
+        {
+            return Err(RepresentationFailure::CanonicalResponseRoundTripContract {
+                observed: quotient_construction.canonical_response_round_trip_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_canonical_response_round_trip_limit,
             });
         }
         let reduced_symmetry_defect = normalized_symmetry_defect(&reduced);
@@ -513,7 +537,6 @@ impl CubicRepresentation {
                 limit: EQUALITY_KKT_POLICY_V1.affine_reproduction_limit,
             });
         }
-
         Ok(Self {
             fitting_uses,
             metric,
@@ -526,12 +549,12 @@ impl CubicRepresentation {
                 fitting_functional_count: functionals.len(),
                 polynomial_dimension: POLYNOMIAL_DIMENSION,
                 polynomial_rank,
+                quotient_construction,
                 singular_values,
                 polynomial_rrqr_ratio: polynomial_rank_evidence.rrqr_ratio,
                 polynomial_svd_ratio: polynomial_rank_evidence.svd_ratio,
                 polynomial_rank_reject_ratio: polynomial_rank_evidence.reject_ratio,
                 polynomial_rank_accept_ratio: polynomial_rank_evidence.accept_ratio,
-                null_space_defect,
                 reduced_symmetry_defect,
                 symmetry_defect_limit,
                 reduced_largest_singular_value,
@@ -840,6 +863,12 @@ pub(crate) struct HouseholderNullSpace {
     polynomial_rank: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HouseholderDirection {
+    Forward,
+    Transpose,
+}
+
 impl HouseholderNullSpace {
     fn new(
         polynomial: &DenseMatrix,
@@ -860,27 +889,62 @@ impl HouseholderNullSpace {
         self.ambient_dimension - self.polynomial_rank
     }
 
+    fn reflector_count(&self) -> usize {
+        self.coefficients.ncols()
+    }
+
+    fn apply_on_left(
+        &self,
+        matrix: MatMut<'_, f64>,
+        direction: HouseholderDirection,
+    ) -> Result<(), RepresentationFailure> {
+        let rhs_columns = matrix.ncols();
+        let requirement = apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
+            self.ambient_dimension,
+            self.coefficients.nrows(),
+            rhs_columns,
+        );
+        let mut memory = MemBuffer::try_new(requirement)
+            .map_err(|_| RepresentationFailure::NullSpaceWorkspaceAllocation)?;
+        match direction {
+            HouseholderDirection::Forward => {
+                apply_block_householder_sequence_on_the_left_in_place_with_conj(
+                    self.basis.as_ref(),
+                    self.coefficients.as_ref(),
+                    Conj::No,
+                    matrix,
+                    faer_backend::parallelism(),
+                    MemStack::new(&mut memory),
+                );
+            }
+            HouseholderDirection::Transpose => {
+                apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+                    self.basis.as_ref(),
+                    self.coefficients.as_ref(),
+                    Conj::No,
+                    matrix,
+                    faer_backend::parallelism(),
+                    MemStack::new(&mut memory),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_on_right(&self, mut matrix: MatMut<'_, f64>) -> Result<(), RepresentationFailure> {
+        self.apply_on_left(
+            matrix.rb_mut().transpose_mut(),
+            HouseholderDirection::Transpose,
+        )
+    }
+
     pub(crate) fn expand(&self, reduced: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
         debug_assert_eq!(reduced.len(), self.reduced_dimension());
         let mut embedded = Mat::<f64>::zeros(self.ambient_dimension, 1);
         for (index, value) in reduced.iter().enumerate() {
             embedded[(self.polynomial_rank + index, 0)] = *value;
         }
-        let requirement = apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
-            self.ambient_dimension,
-            self.coefficients.nrows(),
-            1,
-        );
-        let mut memory = MemBuffer::try_new(requirement)
-            .map_err(|_| RepresentationFailure::NullSpaceWorkspaceAllocation)?;
-        apply_block_householder_sequence_on_the_left_in_place_with_conj(
-            self.basis.as_ref(),
-            self.coefficients.as_ref(),
-            Conj::No,
-            embedded.as_mut(),
-            faer_backend::parallelism(),
-            MemStack::new(&mut memory),
-        );
+        self.apply_on_left(embedded.as_mut(), HouseholderDirection::Forward)?;
         Ok((0..self.ambient_dimension)
             .map(|row| embedded[(row, 0)])
             .collect())
@@ -889,19 +953,7 @@ impl HouseholderNullSpace {
     pub(crate) fn project(&self, ambient: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
         debug_assert_eq!(ambient.len(), self.ambient_dimension);
         let mut transformed = Mat::<f64>::from_fn(self.ambient_dimension, 1, |row, _| ambient[row]);
-        let requirement = apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<
-            f64,
-        >(self.ambient_dimension, self.coefficients.nrows(), 1);
-        let mut memory = MemBuffer::try_new(requirement)
-            .map_err(|_| RepresentationFailure::NullSpaceWorkspaceAllocation)?;
-        apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
-            self.basis.as_ref(),
-            self.coefficients.as_ref(),
-            Conj::No,
-            transformed.as_mut(),
-            faer_backend::parallelism(),
-            MemStack::new(&mut memory),
-        );
+        self.apply_on_left(transformed.as_mut(), HouseholderDirection::Transpose)?;
         Ok((self.polynomial_rank..self.ambient_dimension)
             .map(|row| transformed[(row, 0)])
             .collect())
@@ -1124,34 +1176,95 @@ fn assemble_kernel_pairing(
     kernel
 }
 
-fn materialize_reduced_pairing(
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct QuotientConstructionEvidence {
+    pub(crate) quotient_dimension: usize,
+    pub(crate) householder_reflector_count: usize,
+    pub(crate) congruence_pass_count: usize,
+    pub(crate) householder_orthogonality_error: f64,
+    pub(crate) null_space_defect: f64,
+    pub(crate) canonical_response_round_trip_error: f64,
+}
+
+fn implicit_quotient_congruence(
     kernel: &DenseMatrix,
     polynomial: &DenseMatrix,
     null_space: &HouseholderNullSpace,
-) -> Result<(DenseMatrix, f64), RepresentationFailure> {
+) -> Result<(DenseMatrix, QuotientConstructionEvidence), RepresentationFailure> {
+    let ambient_dimension = kernel.rows;
     let reduced_dimension = null_space.reduced_dimension();
-    let mut columns = Vec::with_capacity(reduced_dimension);
-    let mut null_space_defect = 0.0_f64;
-    for column in 0..reduced_dimension {
-        let mut unit = vec![0.0; reduced_dimension];
-        unit[column] = 1.0;
-        let expanded = null_space.expand(&unit)?;
-        for polynomial_column in 0..POLYNOMIAL_DIMENSION {
-            let side_value = (0..polynomial.rows)
-                .map(|row| polynomial.get(row, polynomial_column) * expanded[row])
-                .sum::<f64>();
-            null_space_defect = null_space_defect.max(side_value.abs());
-        }
-        columns.push(expanded);
-    }
-    let kernel_columns = columns
-        .iter()
-        .map(|column| kernel.multiply_vector(column))
-        .collect::<Vec<_>>();
-    let reduced = DenseMatrix::from_fn(reduced_dimension, reduced_dimension, |row, column| {
-        dot_product(&columns[row], &kernel_columns[column])
+    let polynomial_rank = null_space.polynomial_rank;
+
+    let mut q1 = Mat::<f64>::from_fn(ambient_dimension, polynomial_rank, |row, column| {
+        usize::from(row == column) as f64
     });
-    Ok((reduced, null_space_defect))
+    null_space.apply_on_left(q1.as_mut(), HouseholderDirection::Forward)?;
+    let householder_orthogonality_error = (0..polynomial_rank)
+        .flat_map(|row| {
+            let q1 = &q1;
+            (0..polynomial_rank).map(move |column| {
+                let product = (0..ambient_dimension)
+                    .map(|index| q1[(index, row)] * q1[(index, column)])
+                    .sum::<f64>();
+                (product - f64::from(row == column)).abs()
+            })
+        })
+        .fold(0.0_f64, f64::max);
+
+    let mut transformed_polynomial = polynomial.to_faer();
+    null_space.apply_on_left(
+        transformed_polynomial.as_mut(),
+        HouseholderDirection::Transpose,
+    )?;
+    let null_space_defect = (polynomial_rank..ambient_dimension)
+        .flat_map(|row| {
+            let transformed_polynomial = &transformed_polynomial;
+            (0..POLYNOMIAL_DIMENSION).map(move |column| transformed_polynomial[(row, column)].abs())
+        })
+        .fold(0.0_f64, f64::max);
+
+    let mut congruence_pass_count = 0;
+    let mut transformed_kernel = kernel.to_faer();
+    null_space.apply_on_left(transformed_kernel.as_mut(), HouseholderDirection::Transpose)?;
+    congruence_pass_count += 1;
+
+    let canonical_response_round_trip_error = if reduced_dimension == 0 {
+        0.0
+    } else {
+        let response_column = (0..ambient_dimension)
+            .max_by(|left, right| {
+                let norm = |column: usize| {
+                    (polynomial_rank..ambient_dimension)
+                        .map(|row| transformed_kernel[(row, column)].powi(2))
+                        .sum::<f64>()
+                };
+                norm(*left).total_cmp(&norm(*right))
+            })
+            .expect("a nonempty representer span has a canonical response");
+        let quotient_response = (polynomial_rank..ambient_dimension)
+            .map(|row| transformed_kernel[(row, response_column)])
+            .collect::<Vec<_>>();
+        let expanded = null_space.expand(&quotient_response)?;
+        let recovered = null_space.project(&expanded)?;
+        relative_slice_error(&recovered, &quotient_response)
+    };
+
+    null_space.apply_on_right(transformed_kernel.as_mut())?;
+    congruence_pass_count += 1;
+    let reduced = DenseMatrix::from_fn(reduced_dimension, reduced_dimension, |row, column| {
+        transformed_kernel[(polynomial_rank + row, polynomial_rank + column)]
+    });
+    Ok((
+        reduced,
+        QuotientConstructionEvidence {
+            quotient_dimension: reduced_dimension,
+            householder_reflector_count: null_space.reflector_count(),
+            congruence_pass_count,
+            householder_orthogonality_error,
+            null_space_defect,
+            canonical_response_round_trip_error,
+        },
+    ))
 }
 
 fn normalized_symmetry_defect(matrix: &DenseMatrix) -> f64 {
@@ -3534,7 +3647,7 @@ mod tests {
         assert!(evidence.polynomial_svd_ratio > evidence.polynomial_rank_accept_ratio);
         assert_eq!(representation.kernel.shape(), (10, 10));
         assert_eq!(representation.polynomial.shape(), (10, 4));
-        assert!(evidence.null_space_defect <= 1.0e-12);
+        assert!(evidence.quotient_construction.null_space_defect <= 1.0e-12);
         assert!(evidence.reduced_smallest_singular_value > 0.0);
         assert!(evidence.reduced_symmetry_defect <= evidence.symmetry_defect_limit);
         assert!(evidence.affine_reproduction_error <= 1.0e-11);
@@ -3556,6 +3669,46 @@ mod tests {
         for (actual, expected) in round_trip.into_iter().zip(TRUTH_POLYNOMIAL) {
             assert_close(actual, expected, 1.0e-15);
         }
+    }
+
+    #[test]
+    fn implicit_quotient_retains_nearby_same_direction_functionals() {
+        let mut distinct_uses = usages()[..4].to_vec();
+        let nearby_x = f64::from_bits(0.25_f64.to_bits() + 1);
+        for (index, support) in [[0.25, 0.5, 0.75], [nearby_x, 0.5, 0.75]]
+            .into_iter()
+            .enumerate()
+        {
+            distinct_uses.push(FunctionalUse::new(
+                functional(support, 0.0, [1.0, 0.0, 0.0]),
+                UsageProvenance::new(
+                    SourceId::new(format!("nearby-direction-{index}")),
+                    None,
+                    RelationId::new(format!("nearby-direction-relation-{index}")),
+                    ResidualId::new(format!("nearby-direction-residual-{index}")),
+                    SemanticRolePath::new("nearby-same-direction"),
+                ),
+            ));
+        }
+        let problem = canonical_problem(distinct_uses, vec![0.0; 6]);
+
+        let fitting_uses = canonical_fitting_uses(
+            &problem.equalities,
+            &problem.soft_equalities,
+            &problem.affine_inequalities,
+        );
+        assert_eq!(fitting_uses.len(), 6);
+        let functionals = fitting_uses
+            .iter()
+            .map(|usage| usage.functional().clone())
+            .collect::<Vec<_>>();
+        let (_, _, polynomial) = assemble_polynomial_pairing(&functionals)
+            .expect("nearby finite supports preserve the complete polynomial pairing");
+        let complement = HouseholderNullSpace::new(&polynomial, POLYNOMIAL_DIMENSION)
+            .expect("the full-rank pairing has an implicit complement");
+
+        assert_eq!(polynomial.shape(), (6, POLYNOMIAL_DIMENSION));
+        assert_eq!(complement.reduced_dimension(), 2);
     }
 
     #[test]
