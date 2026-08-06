@@ -211,6 +211,27 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
     assert!(quotient.householder_orthogonality_error() <= 1.0e-11);
     assert!(cubic_analysis.null_space_defect() <= 1.0e-11);
     assert!(quotient.canonical_response_round_trip_error() <= 1.0e-11);
+    let factorization = cubic_analysis.quotient_factorization();
+    assert_eq!(factorization.quotient_dimension(), 10);
+    assert_eq!(factorization.retained_modes(), 10);
+    assert_eq!(factorization.truncated_modes(), 0);
+    assert_eq!(factorization.unregularized_llt_count(), 1);
+    assert_eq!(factorization.full_spectrum_analysis_count(), 0);
+    assert!(factorization.normalized_backward_error() <= 1.0e-11);
+    assert_eq!(factorization.pivot_intervals().len(), 10);
+    assert!(
+        factorization
+            .pivot_intervals()
+            .iter()
+            .all(|interval| interval.lower_bound() > 0.0)
+    );
+    assert!(factorization.field_energy_identity_error() <= 1.0e-11);
+    assert!(factorization.side_condition_error() <= 1.0e-11);
+    assert!(factorization.recovery_round_trip_error() <= 1.0e-11);
+    assert!(factorization.canonical_response_round_trip_error() <= 1.0e-11);
+    assert!(!factorization.kernel_ridge_applied());
+    assert!(!factorization.gram_jitter_applied());
+    assert!(!factorization.mode_truncation_applied());
     assert!(cubic_analysis.reduced_smallest_singular_value() > 0.0);
     let backend_rank = report
         .backend_rank()

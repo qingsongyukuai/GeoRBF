@@ -1,3 +1,4 @@
+use faer::Accum;
 use faer::Conj;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::householder::{
@@ -5,6 +6,7 @@ use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_with_conj,
     apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj,
 };
+use faer::linalg::{matmul::matmul, triangular_solve::solve_lower_triangular_in_place};
 use faer::prelude::*;
 #[cfg(test)]
 use std::cell::RefCell;
@@ -287,6 +289,7 @@ pub(crate) struct CpdEvidence {
     pub(crate) polynomial_dimension: usize,
     pub(crate) polynomial_rank: usize,
     pub(crate) quotient_construction: QuotientConstructionEvidence,
+    pub(crate) quotient_factorization: QuotientFactorizationEvidence,
     pub(crate) singular_values: Vec<f64>,
     pub(crate) polynomial_rrqr_ratio: f64,
     pub(crate) polynomial_svd_ratio: f64,
@@ -347,7 +350,6 @@ pub(crate) enum RepresentationFailure {
     PolynomialRankGrayZone {
         evidence: PolynomialRankEvidence,
     },
-    ReducedPairingGrayZone(AnalysisExecutionEvidence),
     AlgebraicAnalysisFailure {
         stage: AlgebraicAnalysisStage,
         solver_invoked: bool,
@@ -371,15 +373,41 @@ pub(crate) enum RepresentationFailure {
         observed: f64,
         limit: f64,
     },
-    ReducedSymmetryContract {
+    QuotientPivotRequiresPrecisionRescue {
+        quotient_dimension: usize,
+        pivot_index: usize,
+        interval: Option<OutwardRoundedInterval>,
+        execution: AnalysisExecutionEvidence,
+    },
+    QuotientFactorizationNotPositive {
+        quotient_dimension: usize,
+        pivot_index: usize,
+        interval: OutwardRoundedInterval,
+        execution: AnalysisExecutionEvidence,
+    },
+    QuotientLltContract {
         observed: f64,
         limit: f64,
     },
-    ReducedPairingNotPositive {
-        classification: ReducedPairingFailureClassification,
-        rank: usize,
-        negative_pivots: usize,
-        execution: AnalysisExecutionEvidence,
+    QuotientFieldEnergyIdentityContract {
+        observed: f64,
+        limit: f64,
+    },
+    QuotientSideConditionContract {
+        observed: f64,
+        limit: f64,
+    },
+    QuotientRecoveryRoundTripContract {
+        observed: f64,
+        limit: f64,
+    },
+    QuotientResponseRoundTripContract {
+        observed: f64,
+        limit: f64,
+    },
+    ReducedSymmetryContract {
+        observed: f64,
+        limit: f64,
     },
     AffineReproductionBackend(Box<KktFailure>),
     AffineReproductionContract {
@@ -392,14 +420,6 @@ pub(crate) enum RepresentationFailure {
 pub(crate) enum AlgebraicAnalysisStage {
     PolynomialRank,
     ReducedCholesky,
-    ReducedInertia,
-    ReducedSpectrum,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReducedPairingFailureClassification {
-    RankDeficient,
-    NegativeCurvature,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,7 +445,7 @@ pub(crate) struct CubicRepresentation {
     kernel: DenseMatrix,
     polynomial: DenseMatrix,
     null_space: HouseholderNullSpace,
-    reduced_kernel: DenseMatrix,
+    energy_basis: EnergyOrthonormalQuotientBasis,
     evidence: CpdEvidence,
     field_energy_normalization: FieldEnergyNormalization,
 }
@@ -469,8 +489,8 @@ impl CubicRepresentation {
         metric: GlobalAnisotropyMetric,
         field_energy_normalization: FieldEnergyNormalization,
     ) -> Result<(Self, CanonicalCubicFieldForm), RepresentationFailure> {
-        let mut representation = Self::new(fitting_uses, metric)?;
-        representation.field_energy_normalization = field_energy_normalization;
+        let representation =
+            Self::new_with_normalization(fitting_uses, metric, field_energy_normalization)?;
         let field_form = representation.solver_field_form();
         Ok((representation, field_form))
     }
@@ -478,6 +498,14 @@ impl CubicRepresentation {
     fn new(
         fitting_uses: Vec<FunctionalUse>,
         metric: GlobalAnisotropyMetric,
+    ) -> Result<Self, RepresentationFailure> {
+        Self::new_with_normalization(fitting_uses, metric, FieldEnergyNormalization::all_hard())
+    }
+
+    fn new_with_normalization(
+        fitting_uses: Vec<FunctionalUse>,
+        metric: GlobalAnisotropyMetric,
+        field_energy_normalization: FieldEnergyNormalization,
     ) -> Result<Self, RepresentationFailure> {
         if fitting_uses.is_empty() {
             return Err(RepresentationFailure::EmptyRepresenterSpan);
@@ -492,7 +520,7 @@ impl CubicRepresentation {
             verify_polynomial_rank(&polynomial, &functionals, &coordinates)?;
         let kernel = assemble_kernel_pairing(&standard_functionals, &metric);
         let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank)?;
-        let (mut reduced, quotient_construction) =
+        let (mut reduced, trailing_polynomial, canonical_responses, quotient_construction) =
             implicit_quotient_congruence(&kernel, &polynomial, &null_space)?;
         let null_space_defect = quotient_construction.null_space_defect;
         if null_space_defect > EQUALITY_KKT_POLICY_V1.null_space_defect_limit {
@@ -528,8 +556,19 @@ impl CubicRepresentation {
             });
         }
         symmetrize(&mut reduced);
+        let field_energy_scale = field_energy_normalization.factor() / coordinates.length().powi(3);
+        let quotient_energy_gram =
+            DenseMatrix::from_fn(reduced.rows, reduced.columns, |row, column| {
+                field_energy_scale * reduced.get(row, column)
+            });
+        let energy_basis = EnergyOrthonormalQuotientBasis::factor(
+            &quotient_energy_gram,
+            &trailing_polynomial,
+            &canonical_responses,
+        )?;
+        let quotient_factorization = energy_basis.evidence.clone();
         let (reduced_largest_singular_value, reduced_smallest_singular_value) =
-            verify_reduced_pairing(&reduced)?;
+            quotient_mode_risk_estimates(&reduced, &energy_basis, field_energy_scale);
         let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial)?;
         if affine_reproduction_error > EQUALITY_KKT_POLICY_V1.affine_reproduction_limit {
             return Err(RepresentationFailure::AffineReproductionContract {
@@ -544,12 +583,13 @@ impl CubicRepresentation {
             kernel,
             polynomial,
             null_space,
-            reduced_kernel: reduced,
+            energy_basis,
             evidence: CpdEvidence {
                 fitting_functional_count: functionals.len(),
                 polynomial_dimension: POLYNOMIAL_DIMENSION,
                 polynomial_rank,
                 quotient_construction,
+                quotient_factorization,
                 singular_values,
                 polynomial_rrqr_ratio: polynomial_rank_evidence.rrqr_ratio,
                 polynomial_svd_ratio: polynomial_rank_evidence.svd_ratio,
@@ -564,12 +604,8 @@ impl CubicRepresentation {
                 solve_coordinate_length: coordinates.length(),
                 degenerate_extent: coordinates.degenerate_extent(),
             },
-            field_energy_normalization: FieldEnergyNormalization::all_hard(),
+            field_energy_normalization,
         })
-    }
-
-    fn set_field_energy_normalization(&mut self, normalization: FieldEnergyNormalization) {
-        self.field_energy_normalization = normalization;
     }
 
     fn standard_functional_row(
@@ -610,8 +646,7 @@ impl CubicRepresentation {
             .collect();
         let quotient_field_energy = (0..quotient_field_variables)
             .flat_map(|row| {
-                (0..quotient_field_variables)
-                    .map(move |column| field_energy_scale * self.reduced_kernel.get(row, column))
+                (0..quotient_field_variables).map(move |column| f64::from(row == column))
             })
             .collect();
         let standard_side_conditions = (0..POLYNOMIAL_DIMENSION)
@@ -637,7 +672,8 @@ impl CubicRepresentation {
         functional: &CanonicalFunctional,
     ) -> Result<CubicFunctionalResponse, RepresentationFailure> {
         let (standard_field, polynomial) = self.standard_functional_row(functional)?;
-        let quotient_field = self.null_space.project(&standard_field)?;
+        let quotient_response = self.null_space.project(&standard_field)?;
+        let quotient_field = self.energy_basis.response(&quotient_response)?;
         Ok(CubicFunctionalResponse {
             standard_field,
             quotient_field,
@@ -659,13 +695,21 @@ impl CubicRepresentation {
                     (coefficients.to_vec(), coefficients.to_vec(), 0.0)
                 }
                 CubicSolverFieldCoordinates::Quotient(coefficients) => {
+                    let reduced = self
+                        .energy_basis
+                        .to_householder_coordinates(coefficients)
+                        .map_err(CubicRepresentationRecoveryFailure::Representation)?;
                     let standard = self
                         .null_space
-                        .expand(coefficients)
+                        .expand(&reduced)
                         .map_err(CubicRepresentationRecoveryFailure::Representation)?;
-                    let recovered = self
+                    let recovered_reduced = self
                         .null_space
                         .project(&standard)
+                        .map_err(CubicRepresentationRecoveryFailure::Representation)?;
+                    let recovered = self
+                        .energy_basis
+                        .to_solver_coordinates(&recovered_reduced)
                         .map_err(CubicRepresentationRecoveryFailure::Representation)?;
                     let round_trip_error = relative_slice_error(&recovered, coefficients);
                     (standard, recovered, round_trip_error)
@@ -1190,7 +1234,15 @@ fn implicit_quotient_congruence(
     kernel: &DenseMatrix,
     polynomial: &DenseMatrix,
     null_space: &HouseholderNullSpace,
-) -> Result<(DenseMatrix, QuotientConstructionEvidence), RepresentationFailure> {
+) -> Result<
+    (
+        DenseMatrix,
+        DenseMatrix,
+        DenseMatrix,
+        QuotientConstructionEvidence,
+    ),
+    RepresentationFailure,
+> {
     let ambient_dimension = kernel.rows;
     let reduced_dimension = null_space.reduced_dimension();
     let polynomial_rank = null_space.polynomial_rank;
@@ -1222,6 +1274,10 @@ fn implicit_quotient_congruence(
             (0..POLYNOMIAL_DIMENSION).map(move |column| transformed_polynomial[(row, column)].abs())
         })
         .fold(0.0_f64, f64::max);
+    let trailing_polynomial =
+        DenseMatrix::from_fn(reduced_dimension, POLYNOMIAL_DIMENSION, |row, column| {
+            transformed_polynomial[(polynomial_rank + row, column)]
+        });
 
     let mut congruence_pass_count = 0;
     let mut transformed_kernel = kernel.to_faer();
@@ -1248,6 +1304,10 @@ fn implicit_quotient_congruence(
         let recovered = null_space.project(&expanded)?;
         relative_slice_error(&recovered, &quotient_response)
     };
+    let canonical_responses =
+        DenseMatrix::from_fn(reduced_dimension, ambient_dimension, |row, column| {
+            transformed_kernel[(polynomial_rank + row, column)]
+        });
 
     null_space.apply_on_right(transformed_kernel.as_mut())?;
     congruence_pass_count += 1;
@@ -1256,6 +1316,8 @@ fn implicit_quotient_congruence(
     });
     Ok((
         reduced,
+        trailing_polynomial,
+        canonical_responses,
         QuotientConstructionEvidence {
             quotient_dimension: reduced_dimension,
             householder_reflector_count: null_space.reflector_count(),
@@ -1289,101 +1351,601 @@ fn symmetrize(matrix: &mut DenseMatrix) {
     }
 }
 
-fn verify_reduced_pairing(matrix: &DenseMatrix) -> Result<(f64, f64), RepresentationFailure> {
-    if matrix.rows == 0 {
-        return Ok((f64::INFINITY, f64::INFINITY));
-    }
-    let faer_matrix = matrix.to_faer();
-    let cholesky = faer_backend::cholesky_minimum_diagonal(faer_matrix.as_ref());
-    let failed_cholesky_inertia = match cholesky {
-        Ok(_) => None,
-        Err(faer_backend::CholeskyFailure::WorkspaceAllocation(failure)) => {
-            return Err(
-                RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
-                    stage: AlgebraicAnalysisStage::ReducedCholesky,
-                    bytes: failure.bytes,
-                    alignment: failure.alignment,
-                    solver_invoked: false,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OutwardRoundedInterval {
+    pub(crate) lower: f64,
+    pub(crate) upper: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuotientFactorizationEvidence {
+    pub(crate) quotient_dimension: usize,
+    pub(crate) retained_modes: usize,
+    pub(crate) truncated_modes: usize,
+    pub(crate) unregularized_llt_count: usize,
+    pub(crate) full_spectrum_analysis_count: usize,
+    pub(crate) normalized_backward_error: f64,
+    pub(crate) pivot_intervals: Vec<OutwardRoundedInterval>,
+    pub(crate) field_energy_identity_error: f64,
+    pub(crate) side_condition_error: f64,
+    pub(crate) recovery_round_trip_error: f64,
+    pub(crate) canonical_response_round_trip_error: f64,
+    pub(crate) kernel_ridge_applied: bool,
+    pub(crate) gram_jitter_applied: bool,
+    pub(crate) mode_truncation_applied: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EnergyOrthonormalQuotientBasis {
+    lower: DenseMatrix,
+    evidence: QuotientFactorizationEvidence,
+}
+
+impl EnergyOrthonormalQuotientBasis {
+    fn factor(
+        gram: &DenseMatrix,
+        trailing_polynomial: &DenseMatrix,
+        canonical_responses: &DenseMatrix,
+    ) -> Result<Self, RepresentationFailure> {
+        debug_assert_eq!(gram.rows, gram.columns);
+        debug_assert_eq!(trailing_polynomial.rows, gram.rows);
+        debug_assert_eq!(canonical_responses.rows, gram.rows);
+        let dimension = gram.rows;
+        if dimension == 0 {
+            return Ok(Self {
+                lower: DenseMatrix::from_fn(0, 0, |_, _| unreachable!()),
+                evidence: QuotientFactorizationEvidence {
+                    quotient_dimension: 0,
+                    retained_modes: 0,
+                    truncated_modes: 0,
+                    unregularized_llt_count: 0,
+                    full_spectrum_analysis_count: 0,
+                    normalized_backward_error: 0.0,
+                    pivot_intervals: Vec::new(),
+                    field_energy_identity_error: 0.0,
+                    side_condition_error: 0.0,
+                    recovery_round_trip_error: 0.0,
+                    canonical_response_round_trip_error: 0.0,
+                    kernel_ridge_applied: false,
+                    gram_jitter_applied: false,
+                    mode_truncation_applied: false,
                 },
-            );
+            });
         }
-        Err(faer_backend::CholeskyFailure::NonPositivePivot) => Some(
-            faer_backend::bunch_kaufman_inertia(faer_matrix.as_ref()).map_err(|failure| {
-                match failure {
-                    faer_backend::DecompositionFailure::WorkspaceAllocation(failure) => {
-                        RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
-                            stage: AlgebraicAnalysisStage::ReducedInertia,
-                            bytes: failure.bytes,
-                            alignment: failure.alignment,
-                            solver_invoked: false,
-                        }
-                    }
-                    faer_backend::DecompositionFailure::NumericalError => {
-                        RepresentationFailure::AlgebraicAnalysisFailure {
-                            stage: AlgebraicAnalysisStage::ReducedInertia,
-                            solver_invoked: false,
-                        }
-                    }
-                }
-            })?,
-        ),
-    };
-    let spectrum =
-        analyze_spectral_rank(faer_matrix.as_ref()).map_err(|failure| match failure {
-            SpectralAnalysisFailure::WorkspaceAllocation(failure) => {
-                RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
-                    stage: AlgebraicAnalysisStage::ReducedSpectrum,
-                    bytes: failure.bytes,
-                    alignment: failure.alignment,
-                    solver_invoked: false,
-                }
+
+        let factors = match faer_backend::unregularized_llt(gram.to_faer().as_ref()) {
+            Ok(factors) => factors,
+            Err(faer_backend::CholeskyFailure::WorkspaceAllocation(failure)) => {
+                return Err(
+                    RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
+                        stage: AlgebraicAnalysisStage::ReducedCholesky,
+                        bytes: failure.bytes,
+                        alignment: failure.alignment,
+                        solver_invoked: false,
+                    },
+                );
             }
-            SpectralAnalysisFailure::NumericalError => {
-                RepresentationFailure::AlgebraicAnalysisFailure {
-                    stage: AlgebraicAnalysisStage::ReducedSpectrum,
-                    solver_invoked: false,
-                }
-            }
-        })?;
-    match spectrum.decision {
-        SpectralRankDecision::Reject => Err(RepresentationFailure::ReducedPairingNotPositive {
-            classification: ReducedPairingFailureClassification::RankDeficient,
-            rank: spectrum.rank,
-            negative_pivots: failed_cholesky_inertia
-                .map(|inertia| inertia.negative)
-                .unwrap_or(0),
-            execution: AnalysisExecutionEvidence::pre_backend(),
-        }),
-        SpectralRankDecision::GrayZone => Err(RepresentationFailure::ReducedPairingGrayZone(
-            AnalysisExecutionEvidence::pre_backend(),
-        )),
-        SpectralRankDecision::Accept => {
-            if let Some(inertia) = failed_cholesky_inertia {
-                if inertia.negative > 0 {
-                    return Err(RepresentationFailure::ReducedPairingNotPositive {
-                        classification: ReducedPairingFailureClassification::NegativeCurvature,
-                        rank: spectrum.rank,
-                        negative_pivots: inertia.negative,
+            Err(faer_backend::CholeskyFailure::NonPositivePivot { index }) => {
+                let interval = recomputed_failed_pivot_interval(gram, index)?;
+                if interval.upper <= 0.0 {
+                    return Err(RepresentationFailure::QuotientFactorizationNotPositive {
+                        quotient_dimension: dimension,
+                        pivot_index: index,
+                        interval,
                         execution: AnalysisExecutionEvidence::pre_backend(),
                     });
                 }
-                return Err(RepresentationFailure::AlgebraicAnalysisFailure {
-                    stage: AlgebraicAnalysisStage::ReducedInertia,
-                    solver_invoked: false,
+                if interval.lower <= 0.0 {
+                    return Err(
+                        RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+                            quotient_dimension: dimension,
+                            pivot_index: index,
+                            interval: Some(interval),
+                            execution: AnalysisExecutionEvidence::pre_backend(),
+                        },
+                    );
+                }
+                return Err(RepresentationFailure::QuotientLltContract {
+                    observed: f64::INFINITY,
+                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
                 });
             }
-            Ok((
-                *spectrum
-                    .singular_values
-                    .first()
-                    .expect("a nonempty reduced pairing has a singular value"),
-                *spectrum
-                    .singular_values
-                    .last()
-                    .expect("a nonempty reduced pairing has a singular value"),
-            ))
+        };
+        if factors.dynamic_regularization_count != 0 {
+            return Err(RepresentationFailure::QuotientLltContract {
+                observed: f64::INFINITY,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+            });
+        }
+        let lower = retained_lower_triangle(factors.lower.as_ref());
+        let pivot_intervals = (0..dimension)
+            .map(|index| outward_rounded_pivot_interval(gram, &lower, index))
+            .collect::<Vec<_>>();
+        if let Some((pivot_index, interval)) = pivot_intervals
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, interval)| interval.lower <= 0.0)
+        {
+            if interval.upper <= 0.0 {
+                return Err(RepresentationFailure::QuotientFactorizationNotPositive {
+                    quotient_dimension: dimension,
+                    pivot_index,
+                    interval,
+                    execution: AnalysisExecutionEvidence::pre_backend(),
+                });
+            }
+            return Err(
+                RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+                    quotient_dimension: dimension,
+                    pivot_index,
+                    interval: Some(interval),
+                    execution: AnalysisExecutionEvidence::pre_backend(),
+                },
+            );
+        }
+
+        let normalized_backward_error = normalized_llt_backward_error(gram, &lower);
+        if !normalized_backward_error.is_finite()
+            || normalized_backward_error > EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit
+        {
+            return Err(RepresentationFailure::QuotientLltContract {
+                observed: normalized_backward_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+            });
+        }
+
+        let provisional = Self {
+            lower,
+            evidence: QuotientFactorizationEvidence {
+                quotient_dimension: dimension,
+                retained_modes: dimension,
+                truncated_modes: 0,
+                unregularized_llt_count: 1,
+                full_spectrum_analysis_count: 0,
+                normalized_backward_error,
+                pivot_intervals,
+                field_energy_identity_error: 0.0,
+                side_condition_error: 0.0,
+                recovery_round_trip_error: 0.0,
+                canonical_response_round_trip_error: 0.0,
+                kernel_ridge_applied: false,
+                gram_jitter_applied: false,
+                mode_truncation_applied: false,
+            },
+        };
+
+        let solver_probe = (0..dimension)
+            .map(|index| {
+                let magnitude = (index % 7 + 1) as f64;
+                if index % 2 == 0 {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect::<Vec<_>>();
+        let householder_probe = provisional.to_householder_coordinates(&solver_probe)?;
+        let recovered_probe = provisional.to_solver_coordinates(&householder_probe)?;
+        let recovery_round_trip_error = relative_slice_error(&recovered_probe, &solver_probe);
+        if recovery_round_trip_error
+            > EQUALITY_KKT_POLICY_V1.quotient_basis_recovery_round_trip_limit
+        {
+            return Err(RepresentationFailure::QuotientRecoveryRoundTripContract {
+                observed: recovery_round_trip_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_basis_recovery_round_trip_limit,
+            });
+        }
+
+        let field_energy_identity_error =
+            quotient_field_energy_identity_error(gram, &provisional.lower);
+        if field_energy_identity_error > EQUALITY_KKT_POLICY_V1.quotient_field_energy_identity_limit
+        {
+            return Err(RepresentationFailure::QuotientFieldEnergyIdentityContract {
+                observed: field_energy_identity_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_field_energy_identity_limit,
+            });
+        }
+
+        let side_condition_error = (0..trailing_polynomial.columns)
+            .map(|column| {
+                let response = (0..dimension)
+                    .map(|row| trailing_polynomial.get(row, column))
+                    .collect::<Vec<_>>();
+                provisional
+                    .solve_lower(&response)
+                    .into_iter()
+                    .map(f64::abs)
+                    .fold(0.0_f64, f64::max)
+            })
+            .fold(0.0_f64, f64::max);
+        if side_condition_error > EQUALITY_KKT_POLICY_V1.quotient_basis_side_condition_limit {
+            return Err(RepresentationFailure::QuotientSideConditionContract {
+                observed: side_condition_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_basis_side_condition_limit,
+            });
+        }
+
+        let canonical_response_round_trip_error = (0..canonical_responses.columns)
+            .map(|column| {
+                let quotient_response = (0..dimension)
+                    .map(|row| canonical_responses.get(row, column))
+                    .collect::<Vec<_>>();
+                let energy_response = provisional.response(&quotient_response)?;
+                let recovered_response = provisional.multiply_lower(&energy_response);
+                Ok(relative_slice_error(
+                    &recovered_response,
+                    &quotient_response,
+                ))
+            })
+            .collect::<Result<Vec<_>, RepresentationFailure>>()?
+            .into_iter()
+            .fold(0.0_f64, f64::max);
+        if canonical_response_round_trip_error
+            > EQUALITY_KKT_POLICY_V1.quotient_basis_response_round_trip_limit
+        {
+            return Err(RepresentationFailure::QuotientResponseRoundTripContract {
+                observed: canonical_response_round_trip_error,
+                limit: EQUALITY_KKT_POLICY_V1.quotient_basis_response_round_trip_limit,
+            });
+        }
+
+        Ok(Self {
+            evidence: QuotientFactorizationEvidence {
+                field_energy_identity_error,
+                side_condition_error,
+                recovery_round_trip_error,
+                canonical_response_round_trip_error,
+                ..provisional.evidence
+            },
+            ..provisional
+        })
+    }
+
+    fn response(&self, quotient_response: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
+        let response = self.solve_lower(quotient_response);
+        finite_basis_coordinates(response)
+    }
+
+    fn to_householder_coordinates(
+        &self,
+        solver_coordinates: &[f64],
+    ) -> Result<Vec<f64>, RepresentationFailure> {
+        let coordinates = self.solve_lower_transpose(solver_coordinates);
+        finite_basis_coordinates(coordinates)
+    }
+
+    fn to_solver_coordinates(
+        &self,
+        householder_coordinates: &[f64],
+    ) -> Result<Vec<f64>, RepresentationFailure> {
+        finite_basis_coordinates(self.multiply_lower_transpose(householder_coordinates))
+    }
+
+    fn solve_lower(&self, right_hand_side: &[f64]) -> Vec<f64> {
+        debug_assert_eq!(right_hand_side.len(), self.lower.rows);
+        let mut solution = vec![0.0; right_hand_side.len()];
+        for row in 0..self.lower.rows {
+            let residual = right_hand_side[row]
+                - (0..row)
+                    .map(|column| self.lower.get(row, column) * solution[column])
+                    .sum::<f64>();
+            solution[row] = residual / self.lower.get(row, row);
+        }
+        solution
+    }
+
+    fn solve_lower_transpose(&self, right_hand_side: &[f64]) -> Vec<f64> {
+        debug_assert_eq!(right_hand_side.len(), self.lower.rows);
+        let mut solution = vec![0.0; right_hand_side.len()];
+        for row in (0..self.lower.rows).rev() {
+            let residual = right_hand_side[row]
+                - ((row + 1)..self.lower.rows)
+                    .map(|column| self.lower.get(column, row) * solution[column])
+                    .sum::<f64>();
+            solution[row] = residual / self.lower.get(row, row);
+        }
+        solution
+    }
+
+    fn solve_energy_gram(&self, right_hand_side: &[f64]) -> Vec<f64> {
+        let lower_solution = self.solve_lower(right_hand_side);
+        self.solve_lower_transpose(&lower_solution)
+    }
+
+    fn multiply_lower(&self, vector: &[f64]) -> Vec<f64> {
+        debug_assert_eq!(vector.len(), self.lower.rows);
+        (0..self.lower.rows)
+            .map(|row| {
+                (0..=row)
+                    .map(|column| self.lower.get(row, column) * vector[column])
+                    .sum()
+            })
+            .collect()
+    }
+
+    fn multiply_lower_transpose(&self, vector: &[f64]) -> Vec<f64> {
+        debug_assert_eq!(vector.len(), self.lower.rows);
+        (0..self.lower.rows)
+            .map(|row| {
+                (row..self.lower.rows)
+                    .map(|column| self.lower.get(column, row) * vector[column])
+                    .sum()
+            })
+            .collect()
+    }
+}
+
+fn retained_lower_triangle(matrix: faer::MatRef<'_, f64>) -> DenseMatrix {
+    DenseMatrix::from_fn(matrix.nrows(), matrix.ncols(), |row, column| {
+        if column <= row {
+            matrix[(row, column)]
+        } else {
+            0.0
+        }
+    })
+}
+
+fn recomputed_failed_pivot_interval(
+    gram: &DenseMatrix,
+    failed_pivot: usize,
+) -> Result<OutwardRoundedInterval, RepresentationFailure> {
+    let mut lower = DenseMatrix::from_fn(gram.rows, gram.columns, |_, _| 0.0);
+    for row in 0..=failed_pivot {
+        for column in 0..row {
+            let residual = gram.get(row, column)
+                - (0..column)
+                    .map(|index| lower.get(row, index) * lower.get(column, index))
+                    .sum::<f64>();
+            let coordinate = residual / lower.get(column, column);
+            if !coordinate.is_finite() {
+                return Err(RepresentationFailure::QuotientLltContract {
+                    observed: f64::INFINITY,
+                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                });
+            }
+            lower.set(row, column, coordinate);
+        }
+        if row < failed_pivot {
+            let interval = outward_rounded_pivot_interval(gram, &lower, row);
+            if interval.lower <= 0.0 {
+                return Err(RepresentationFailure::QuotientLltContract {
+                    observed: f64::INFINITY,
+                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                });
+            }
+            let pivot_value = gram.get(row, row)
+                - (0..row)
+                    .map(|column| lower.get(row, column).powi(2))
+                    .sum::<f64>();
+            if !pivot_value.is_finite() || pivot_value <= 0.0 {
+                return Err(RepresentationFailure::QuotientLltContract {
+                    observed: f64::INFINITY,
+                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                });
+            }
+            lower.set(row, row, pivot_value.sqrt());
         }
     }
+    Ok(outward_rounded_pivot_interval(gram, &lower, failed_pivot))
+}
+
+fn finite_basis_coordinates(coordinates: Vec<f64>) -> Result<Vec<f64>, RepresentationFailure> {
+    if coordinates.iter().all(|value| value.is_finite()) {
+        Ok(coordinates)
+    } else {
+        Err(RepresentationFailure::AlgebraicAnalysisFailure {
+            stage: AlgebraicAnalysisStage::ReducedCholesky,
+            solver_invoked: false,
+        })
+    }
+}
+
+fn outward_rounded_pivot_interval(
+    gram: &DenseMatrix,
+    lower: &DenseMatrix,
+    pivot: usize,
+) -> OutwardRoundedInterval {
+    let mut sum_lower = 0.0;
+    let mut sum_upper = 0.0;
+    for column in 0..pivot {
+        let value = lower.get(pivot, column);
+        let rounded_square = value * value;
+        let square_lower = if rounded_square == 0.0 {
+            0.0
+        } else {
+            next_down(rounded_square)
+        };
+        let square_upper = if value == 0.0 {
+            0.0
+        } else {
+            next_up(rounded_square)
+        };
+        sum_lower = if sum_lower == 0.0 && square_lower == 0.0 {
+            0.0
+        } else {
+            next_down(sum_lower + square_lower)
+        };
+        sum_upper = if sum_upper == 0.0 && square_upper == 0.0 {
+            0.0
+        } else {
+            next_up(sum_upper + square_upper)
+        };
+    }
+    if sum_lower == 0.0 && sum_upper == 0.0 {
+        let diagonal = gram.get(pivot, pivot);
+        OutwardRoundedInterval {
+            lower: diagonal,
+            upper: diagonal,
+        }
+    } else {
+        OutwardRoundedInterval {
+            lower: next_down(gram.get(pivot, pivot) - sum_upper),
+            upper: next_up(gram.get(pivot, pivot) - sum_lower),
+        }
+    }
+}
+
+fn normalized_llt_backward_error(gram: &DenseMatrix, lower: &DenseMatrix) -> f64 {
+    let lower = lower.to_faer();
+    let absolute_lower = Mat::<f64>::from_fn(lower.nrows(), lower.ncols(), |row, column| {
+        lower[(row, column)].abs()
+    });
+    let mut product = Mat::<f64>::zeros(lower.nrows(), lower.ncols());
+    let mut absolute_product = Mat::<f64>::zeros(lower.nrows(), lower.ncols());
+    matmul(
+        product.as_mut(),
+        Accum::Replace,
+        lower.as_ref(),
+        lower.as_ref().transpose(),
+        1.0,
+        faer_backend::parallelism(),
+    );
+    matmul(
+        absolute_product.as_mut(),
+        Accum::Replace,
+        absolute_lower.as_ref(),
+        absolute_lower.as_ref().transpose(),
+        1.0,
+        faer_backend::parallelism(),
+    );
+    let residual_norm = (0..gram.rows)
+        .map(|row| {
+            (0..gram.columns)
+                .map(|column| (gram.get(row, column) - product[(row, column)]).abs())
+                .sum::<f64>()
+        })
+        .fold(0.0_f64, f64::max);
+    let gram_norm = (0..gram.rows)
+        .map(|row| {
+            (0..gram.columns)
+                .map(|column| gram.get(row, column).abs())
+                .sum::<f64>()
+        })
+        .fold(0.0_f64, f64::max);
+    let factor_norm = (0..gram.rows)
+        .map(|row| {
+            (0..gram.columns)
+                .map(|column| absolute_product[(row, column)].abs())
+                .sum::<f64>()
+        })
+        .fold(0.0_f64, f64::max);
+    residual_norm / (gram_norm + factor_norm)
+}
+
+fn quotient_field_energy_identity_error(gram: &DenseMatrix, lower: &DenseMatrix) -> f64 {
+    let lower = lower.to_faer();
+    let mut transformed = gram.to_faer();
+    solve_lower_triangular_in_place(
+        lower.as_ref(),
+        transformed.as_mut(),
+        faer_backend::parallelism(),
+    );
+    solve_lower_triangular_in_place(
+        lower.as_ref(),
+        transformed.as_mut().transpose_mut(),
+        faer_backend::parallelism(),
+    );
+    (0..gram.rows)
+        .flat_map(|row| {
+            let transformed = &transformed;
+            (0..gram.columns)
+                .map(move |column| (transformed[(row, column)] - f64::from(row == column)).abs())
+        })
+        .fold(0.0_f64, f64::max)
+}
+
+fn quotient_mode_risk_estimates(
+    reduced: &DenseMatrix,
+    basis: &EnergyOrthonormalQuotientBasis,
+    field_energy_scale: f64,
+) -> (f64, f64) {
+    if reduced.rows == 0 {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    let seed = (0..reduced.rows)
+        .map(|index| {
+            let magnitude = (index % 7 + 1) as f64;
+            if index % 2 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            }
+        })
+        .collect::<Vec<_>>();
+    let largest = fixed_iteration_rayleigh_estimate(reduced, seed.clone(), |vector| {
+        reduced.multiply_vector(vector)
+    });
+    let smallest = fixed_iteration_rayleigh_estimate(reduced, seed, |vector| {
+        basis
+            .solve_energy_gram(vector)
+            .into_iter()
+            .map(|value| field_energy_scale * value)
+            .collect()
+    });
+    let pivot_fallback = basis
+        .evidence
+        .pivot_intervals
+        .iter()
+        .map(|interval| interval.lower / field_energy_scale)
+        .fold(f64::INFINITY, f64::min);
+    (
+        largest.filter(|value| *value > 0.0).unwrap_or_else(|| {
+            (0..reduced.rows)
+                .map(|row| {
+                    (0..reduced.columns)
+                        .map(|column| reduced.get(row, column).abs())
+                        .sum::<f64>()
+                })
+                .fold(0.0_f64, f64::max)
+        }),
+        smallest
+            .filter(|value| *value > 0.0)
+            .unwrap_or(pivot_fallback),
+    )
+}
+
+fn fixed_iteration_rayleigh_estimate(
+    matrix: &DenseMatrix,
+    mut vector: Vec<f64>,
+    mut apply_iteration_operator: impl FnMut(&[f64]) -> Vec<f64>,
+) -> Option<f64> {
+    const ITERATIONS: usize = 12;
+    for _ in 0..ITERATIONS {
+        let mut next = apply_iteration_operator(&vector);
+        let scale = next.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+        if !scale.is_finite() || scale == 0.0 {
+            return None;
+        }
+        next.iter_mut().for_each(|value| *value /= scale);
+        vector = next;
+    }
+    let product = matrix.multiply_vector(&vector);
+    let denominator = dot_product(&vector, &vector);
+    let estimate = dot_product(&vector, &product) / denominator;
+    estimate.is_finite().then_some(estimate.abs())
+}
+
+fn next_up(value: f64) -> f64 {
+    if value.is_nan() || value == f64::INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    f64::from_bits(if value > 0.0 { bits + 1 } else { bits - 1 })
+}
+
+fn next_down(value: f64) -> f64 {
+    if value.is_nan() || value == f64::NEG_INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return -f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    f64::from_bits(if value > 0.0 { bits - 1 } else { bits + 1 })
 }
 
 fn affine_reproduction_error(
@@ -3712,6 +4274,89 @@ mod tests {
     }
 
     #[test]
+    fn energy_orthonormal_quotient_is_verified_without_regularization_or_spectrum_gate() {
+        let problem = canonical_problem(usages(), MANUFACTURED_TARGETS.to_vec());
+        let (representation, field_form) = CubicRepresentation::build(
+            canonical_fitting_uses(
+                &problem.equalities,
+                &problem.soft_equalities,
+                &problem.affine_inequalities,
+            ),
+            GlobalAnisotropyMetric::identity(),
+            FieldEnergyNormalization::all_hard(),
+        )
+        .expect("the manufactured quotient has a verified energy basis");
+        let factorization = &representation.evidence.quotient_factorization;
+
+        assert_eq!(factorization.quotient_dimension, 6);
+        assert_eq!(factorization.retained_modes, 6);
+        assert_eq!(factorization.truncated_modes, 0);
+        assert_eq!(factorization.unregularized_llt_count, 1);
+        assert_eq!(factorization.full_spectrum_analysis_count, 0);
+        assert!(factorization.normalized_backward_error <= 1.0e-11);
+        assert_eq!(factorization.pivot_intervals.len(), 6);
+        assert!(
+            factorization
+                .pivot_intervals
+                .iter()
+                .all(|interval| interval.lower > 0.0)
+        );
+        assert!(factorization.field_energy_identity_error <= 1.0e-11);
+        assert!(factorization.side_condition_error <= 1.0e-11);
+        assert!(factorization.recovery_round_trip_error <= 1.0e-11);
+        assert!(factorization.canonical_response_round_trip_error <= 1.0e-11);
+        assert!(!factorization.kernel_ridge_applied);
+        assert!(!factorization.gram_jitter_applied);
+        assert!(!factorization.mode_truncation_applied);
+
+        let solver_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
+            .expect("the canonical solver form consumes the energy basis");
+        let quotient_dimension = representation.null_space.reduced_dimension();
+        let quotient_field_energy = solver_form.field_energy(CubicFieldCoordinateLayout::Quotient);
+        assert_eq!(quotient_field_energy.len(), quotient_dimension.pow(2));
+        for row in 0..quotient_dimension {
+            for column in 0..quotient_dimension {
+                assert_eq!(
+                    quotient_field_energy[row * quotient_dimension + column],
+                    f64::from(row == column)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_ambiguous_pivot_is_reserved_for_precision_rescue() {
+        let next_after_one = f64::from_bits(1.0_f64.to_bits() + 1);
+        let gram = DenseMatrix::from_fn(2, 2, |row, column| match (row, column) {
+            (0, 0) | (0, 1) | (1, 0) => 1.0,
+            (1, 1) => next_after_one,
+            _ => unreachable!(),
+        });
+
+        let failure = EnergyOrthonormalQuotientBasis::factor(
+            &gram,
+            &DenseMatrix::from_fn(2, POLYNOMIAL_DIMENSION, |_, _| 0.0),
+            &gram,
+        )
+        .expect_err("a cancellation-scale pivot needs precision rescue evidence");
+        match failure {
+            RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+                quotient_dimension,
+                pivot_index,
+                interval: Some(interval),
+                execution,
+            } => {
+                assert_eq!(quotient_dimension, 2);
+                assert_eq!(pivot_index, 1);
+                assert!(interval.lower <= 0.0);
+                assert!(interval.upper > 0.0);
+                assert_eq!(execution, AnalysisExecutionEvidence::pre_backend());
+            }
+            other => panic!("unexpected factorization failure: {other:?}"),
+        }
+    }
+
+    #[test]
     fn solve_coordinates_are_deterministic_and_recover_physical_field_coefficients() {
         let representation = CubicRepresentation::new(usages(), GlobalAnisotropyMetric::identity())
             .expect("the manufactured representer span is Cubic-admissible");
@@ -4081,83 +4726,56 @@ mod tests {
     }
 
     #[test]
-    fn reduced_spd_fallback_distinguishes_negative_rank_and_gray_evidence() {
-        let negative = DenseMatrix::from_fn(2, 2, |row, column| {
+    fn verified_llt_retains_small_positive_modes_and_distinguishes_nonpositive_pivots() {
+        let trailing_polynomial = DenseMatrix::from_fn(2, POLYNOMIAL_DIMENSION, |_, _| 0.0);
+        let small_positive = DenseMatrix::from_fn(2, 2, |row, column| {
             if row == column {
-                if row == 0 { 1.0 } else { -1.0 }
+                if row == 0 { 1.0 } else { 1.0e-30 }
             } else {
                 0.0
             }
         });
-        match verify_reduced_pairing(&negative)
-            .expect_err("negative curvature must fail after the Cholesky-first path")
-        {
-            RepresentationFailure::ReducedPairingNotPositive {
-                classification,
-                rank,
-                negative_pivots,
-                ..
-            } => {
-                assert_eq!(
-                    classification,
-                    ReducedPairingFailureClassification::NegativeCurvature
-                );
-                assert_eq!(rank, 2);
-                assert_eq!(negative_pivots, 1);
-            }
-            other => panic!("unexpected negative-curvature failure: {other:?}"),
-        }
+        let basis = EnergyOrthonormalQuotientBasis::factor(
+            &small_positive,
+            &trailing_polynomial,
+            &small_positive,
+        )
+        .expect("a reliably positive mode is retained regardless of relative scale");
+        assert_eq!(basis.evidence.retained_modes, 2);
+        assert_eq!(basis.evidence.truncated_modes, 0);
+        assert_eq!(basis.evidence.full_spectrum_analysis_count, 0);
 
-        let two_by_two_pivot =
-            DenseMatrix::from_fn(2, 2, |row, column| if row != column { 1.0 } else { 0.0 });
-        match verify_reduced_pairing(&two_by_two_pivot)
-            .expect_err("an indefinite two-by-two pivot must retain its inertia")
-        {
-            RepresentationFailure::ReducedPairingNotPositive {
-                classification,
-                negative_pivots,
-                ..
-            } => {
-                assert_eq!(
-                    classification,
-                    ReducedPairingFailureClassification::NegativeCurvature
-                );
-                assert_eq!(negative_pivots, 1);
+        for (gram, expected_pivot) in [
+            (
+                DenseMatrix::from_fn(2, 2, |row, column| {
+                    if row == column {
+                        if row == 0 { 1.0 } else { -1.0 }
+                    } else {
+                        0.0
+                    }
+                }),
+                -1.0,
+            ),
+            (
+                DenseMatrix::from_fn(2, 2, |row, column| f64::from(row == column && row == 0)),
+                0.0,
+            ),
+        ] {
+            match EnergyOrthonormalQuotientBasis::factor(&gram, &trailing_polynomial, &gram) {
+                Err(RepresentationFailure::QuotientFactorizationNotPositive {
+                    quotient_dimension,
+                    pivot_index,
+                    interval,
+                    ..
+                }) => {
+                    assert_eq!(quotient_dimension, 2);
+                    assert_eq!(pivot_index, 1);
+                    assert_eq!(interval.lower, expected_pivot);
+                    assert_eq!(interval.upper, expected_pivot);
+                }
+                other => panic!("unexpected non-positive factorization result: {other:?}"),
             }
-            other => panic!("unexpected two-by-two inertia failure: {other:?}"),
         }
-
-        let rank_deficient =
-            DenseMatrix::from_fn(2, 2, |row, column| (row == column && row == 0) as u8 as f64);
-        match verify_reduced_pairing(&rank_deficient)
-            .expect_err("a zero reduced mode must be rank deficient")
-        {
-            RepresentationFailure::ReducedPairingNotPositive {
-                classification,
-                rank,
-                ..
-            } => {
-                assert_eq!(
-                    classification,
-                    ReducedPairingFailureClassification::RankDeficient
-                );
-                assert_eq!(rank, 1);
-            }
-            other => panic!("unexpected rank failure: {other:?}"),
-        }
-
-        let gray = DenseMatrix::from_fn(2, 2, |row, column| {
-            if row == column {
-                if row == 0 { 1.0 } else { 1.0e-13 }
-            } else {
-                0.0
-            }
-        });
-        assert_eq!(
-            verify_reduced_pairing(&gray)
-                .expect_err("a reduced mode inside the spectral band remains undecided"),
-            RepresentationFailure::ReducedPairingGrayZone(AnalysisExecutionEvidence::pre_backend())
-        );
     }
 
     #[test]
@@ -4441,17 +5059,16 @@ mod tests {
             CanonicalSoftLoss::QuadraticPenalty { weight: 2.0 },
         ));
         problem.soft_equalities.push(soft);
-        let mut representation = CubicRepresentation::new(
+        let (representation, field_form) = CubicRepresentation::build(
             canonical_fitting_uses(
                 &problem.equalities,
                 &problem.soft_equalities,
                 &problem.affine_inequalities,
             ),
             GlobalAnisotropyMetric::identity(),
+            problem.field_energy_normalization,
         )
         .expect("the mixed hard/soft representation is valid");
-        representation.set_field_energy_normalization(problem.field_energy_normalization);
-        let field_form = representation.solver_field_form();
         let solver_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
             .expect("the canonical solver form is valid");
         let (mut assembly, backend) = solve_standard_form(&solver_form)
@@ -4506,17 +5123,16 @@ mod tests {
                 },
             ));
         problem.soft_equalities = soft_equalities;
-        let mut representation = CubicRepresentation::new(
+        let (representation, field_form) = CubicRepresentation::build(
             canonical_fitting_uses(
                 &problem.equalities,
                 &problem.soft_equalities,
                 &problem.affine_inequalities,
             ),
             GlobalAnisotropyMetric::identity(),
+            problem.field_energy_normalization,
         )
         .expect("the mixed hard/soft representation is valid");
-        representation.set_field_energy_normalization(problem.field_energy_normalization);
-        let field_form = representation.solver_field_form();
         let mut solver_form =
             CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
                 .expect("the canonical solver form is valid");

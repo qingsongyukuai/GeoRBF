@@ -26,6 +26,11 @@ fn builder() -> ProblemBuilder {
     )
 }
 
+fn affine_value(location: Point3) -> f64 {
+    let [x, y, z] = location.components();
+    1.0 + x + 2.0 * y - 0.5 * z
+}
+
 #[test]
 fn checked_bound_constructors_reject_non_finite_and_empty_intervals() {
     let location = point(1.0, 2.0, 3.0);
@@ -61,6 +66,87 @@ fn checked_bound_constructors_reject_non_finite_and_empty_intervals() {
         FieldValueBound::try_interval(SourceId::new("closed"), location, -0.0, 0.0).unwrap();
     assert_eq!(interval.lower_bound(), Some(0.0));
     assert_eq!(interval.upper_bound(), Some(0.0));
+}
+
+#[test]
+fn close_support_positive_mode_is_retained_without_geometric_deduplication() {
+    let mut problem = builder();
+    let close_supports = [point(0.25, 0.5, 0.75), point(0.255, 0.5, 0.75)];
+    for (index, location) in [
+        point(0.0, 0.0, 0.0),
+        point(1.0, 0.0, 0.0),
+        point(0.0, 1.0, 0.0),
+        point(0.0, 0.0, 1.0),
+        close_supports[0],
+        close_supports[1],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        problem
+            .add(
+                FieldValueObservation::try_new(
+                    SourceId::new(format!("close-value-{index}")),
+                    location,
+                    affine_value(location),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    problem
+        .add(
+            FieldValueBound::try_lower(
+                SourceId::new("close-support-loose-bound"),
+                point(0.0, 0.0, 0.0),
+                -100.0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let success = problem
+        .build()
+        .unwrap()
+        .fit()
+        .expect("a reliably positive close-support quotient mode must be retained");
+    let analysis = success.report().cubic_analysis().unwrap();
+    assert_eq!(analysis.fitting_functional_count(), 6);
+    assert_eq!(analysis.quotient_construction().quotient_dimension(), 2);
+    let factorization = analysis.quotient_factorization();
+    assert_eq!(factorization.retained_modes(), 2);
+    assert_eq!(factorization.truncated_modes(), 0);
+    assert_eq!(factorization.unregularized_llt_count(), 1);
+    assert_eq!(factorization.full_spectrum_analysis_count(), 0);
+    assert!(
+        factorization
+            .pivot_intervals()
+            .iter()
+            .all(|interval| interval.lower_bound() > 0.0)
+    );
+    let minimum_pivot = factorization
+        .pivot_intervals()
+        .iter()
+        .map(|interval| interval.lower_bound())
+        .fold(f64::INFINITY, f64::min);
+    let maximum_pivot = factorization
+        .pivot_intervals()
+        .iter()
+        .map(|interval| interval.upper_bound())
+        .fold(0.0_f64, f64::max);
+    let pivot_ratio = minimum_pivot / maximum_pivot;
+    assert!(
+        pivot_ratio < 1.0e-3,
+        "the close-support mode should be small but certified positive: ratio={pivot_ratio:e}"
+    );
+    assert!(!factorization.kernel_ridge_applied());
+    assert!(!factorization.gram_jitter_applied());
+    assert!(!factorization.mode_truncation_applied());
+
+    for location in close_supports {
+        let sample = success.model().evaluate(location).unwrap();
+        assert!((sample.value() - affine_value(location)).abs() <= 1.0e-8);
+    }
 }
 
 #[test]

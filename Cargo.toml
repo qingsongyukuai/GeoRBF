@@ -37,6 +37,7 @@ include = [
     "/docs/implementation/35-convex-relations-verification-closure.md",
     "/docs/implementation/36-convex-relations-release.md",
     "/docs/implementation/39-implicit-householder-pi1-quotient.md",
+    "/docs/implementation/40-verified-energy-orthonormal-quotient.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/v0.1.0/**",
     "/validation/v0.2.0/**",

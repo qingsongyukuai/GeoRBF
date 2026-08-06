@@ -18,9 +18,8 @@ use crate::cubic_equality::{
     CanonicalSoftLoss, CanonicalSoftObjective, CanonicalSoftResidualBlockKind,
     CanonicalSoftResidualMemberKind, CanonicalViolationChannel, CanonicalViolationLoss,
     CpdEvidence, CubicCanonicalProblem, CubicEqualityFailure, CubicEqualitySolution,
-    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
-    ReducedPairingFailureClassification, RepresentationFailure, SemanticLatentCoefficient,
-    SemanticLatentDefinition,
+    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence, RepresentationFailure,
+    SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
     canonical_fitting_uses, preflight_polynomial_analysis_failure,
 };
@@ -36,14 +35,15 @@ use crate::diagnostics::{
     CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
     CapacityFailureKind, ConvexResidualEvidence as PublicConvexResidualEvidence,
     ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
-    CubicQuotientConstructionEvidence, CubicQuotientConstructionEvidenceParts,
-    DirectInputConflictEvidence, InertiaCounts, InertiaEvidence, InfeasibilityCertificateEvidence,
-    InfeasibilityCertificateEvidenceParts, InterpretableRankDeficiencyEvidence,
-    InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
-    RankDecision, RankDeficiencyConcept, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
-    RecessionRayEvidence, RecessionRayEvidenceParts, RecoveryVerificationEvidence,
-    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
-    ScalingFailureReason, ScalingSummary, SharedLevelSetConflictSourceEvidence,
+    CubicLltPivotInterval, CubicLltPivotIntervalParts, CubicQuotientConstructionEvidence,
+    CubicQuotientConstructionEvidenceParts, CubicQuotientFactorizationEvidence,
+    CubicQuotientFactorizationEvidenceParts, DirectInputConflictEvidence, InertiaCounts,
+    InertiaEvidence, InfeasibilityCertificateEvidence, InfeasibilityCertificateEvidenceParts,
+    InterpretableRankDeficiencyEvidence, InterpretableRankDeficiencyEvidenceParts,
+    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
+    RankEvidenceDomain, RankEvidenceParts, RecessionRayEvidence, RecessionRayEvidenceParts,
+    RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence,
+    ResidualDimension, ScalingFailureReason, ScalingSummary, SharedLevelSetConflictSourceEvidence,
     SharedLevelSetRelationConflictEvidence, SideConditionEvidence, SolveAttemptKind,
     SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
     SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
@@ -2688,7 +2688,11 @@ fn fit_snapshot_after_preflight_qp(
             let diagnosis = diagnose_qp(&failure);
             return Err(FitFailure {
                 diagnosis,
-                report: Box::new(qp_failure_report(base_report, &failure)),
+                report: Box::new(qp_failure_report(
+                    base_report,
+                    &failure,
+                    &lowering.source_relations,
+                )),
             });
         }
     };
@@ -6461,11 +6465,6 @@ fn retain_representation_failure(
     failure: &RepresentationFailure,
     source_relations: &[SourceHardRelation],
 ) {
-    let reduced_dimension = report
-        .problem_size
-        .canonical_hard_equalities
-        .expect("representation evidence implies canonical lowering completed")
-        .saturating_sub(4);
     match failure {
         RepresentationFailure::EmptyRepresenterSpan => {
             report.analysis_failure = Some(AnalysisFailureEvidence::EmptyRepresenterSpan);
@@ -6521,47 +6520,42 @@ fn retain_representation_failure(
                 backend_invoked: evidence.backend_invoked,
             }));
         }
-        RepresentationFailure::ReducedPairingGrayZone(execution) => {
-            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
-                domain: RankEvidenceDomain::CubicReducedPairing,
-                dimension: reduced_dimension,
-                rank: None,
-                exact_zero_index: None,
-                rrqr_ratio: None,
-                singular_values: Vec::new(),
-                svd_ratio: None,
-                reject_ratio: None,
-                accept_ratio: None,
-                decision: RankDecision::NumericalDecisionGrayZone,
-                backend_invoked: execution.solver_invoked,
-            }));
-        }
-        RepresentationFailure::ReducedPairingNotPositive {
-            classification,
-            rank,
+        RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+            quotient_dimension,
+            pivot_index,
+            interval,
             execution,
-            ..
         } => {
-            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
-                domain: RankEvidenceDomain::CubicReducedPairing,
-                dimension: reduced_dimension,
-                rank: Some(*rank),
-                exact_zero_index: None,
-                rrqr_ratio: None,
-                singular_values: Vec::new(),
-                svd_ratio: None,
-                reject_ratio: None,
-                accept_ratio: None,
-                decision: match classification {
-                    ReducedPairingFailureClassification::RankDeficient => {
-                        RankDecision::RankDeficient
-                    }
-                    ReducedPairingFailureClassification::NegativeCurvature => {
-                        RankDecision::FullRank
-                    }
+            report.analysis_failure = Some(
+                AnalysisFailureEvidence::QuotientPivotRequiresPrecisionRescue {
+                    quotient_dimension: *quotient_dimension,
+                    pivot_index: *pivot_index,
+                    interval: interval.map(|interval| {
+                        CubicLltPivotInterval::new(CubicLltPivotIntervalParts {
+                            lower: interval.lower,
+                            upper: interval.upper,
+                        })
+                    }),
+                    backend_invoked: execution.solver_invoked,
                 },
-                backend_invoked: execution.solver_invoked,
-            }));
+            );
+        }
+        RepresentationFailure::QuotientFactorizationNotPositive {
+            quotient_dimension,
+            pivot_index,
+            interval,
+            execution,
+        } => {
+            report.analysis_failure =
+                Some(AnalysisFailureEvidence::QuotientFactorizationNotPositive {
+                    quotient_dimension: *quotient_dimension,
+                    pivot_index: *pivot_index,
+                    interval: CubicLltPivotInterval::new(CubicLltPivotIntervalParts {
+                        lower: interval.lower,
+                        upper: interval.upper,
+                    }),
+                    backend_invoked: execution.solver_invoked,
+                });
         }
         RepresentationFailure::AlgebraicAnalysisFailure {
             stage,
@@ -6605,6 +6599,41 @@ fn retain_representation_failure(
         RepresentationFailure::CanonicalResponseRoundTripContract { observed, limit } => {
             report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
                 quantity: AnalysisContractQuantity::CanonicalResponseRoundTripError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::QuotientLltContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::QuotientLltBackwardError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::QuotientFieldEnergyIdentityContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::QuotientFieldEnergyIdentityError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::QuotientSideConditionContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::QuotientSideConditionError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::QuotientRecoveryRoundTripContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::QuotientRecoveryRoundTripError,
+                observed: *observed,
+                limit: *limit,
+            });
+        }
+        RepresentationFailure::QuotientResponseRoundTripContract { observed, limit } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::ContractThresholdExceeded {
+                quantity: AnalysisContractQuantity::QuotientBasisResponseRoundTripError,
                 observed: *observed,
                 limit: *limit,
             });
@@ -6779,8 +6808,6 @@ fn public_cubic_analysis_stage(stage: InternalCubicAnalysisStage) -> AnalysisFai
     match stage {
         InternalCubicAnalysisStage::PolynomialRank => AnalysisFailureStage::CubicPolynomialRank,
         InternalCubicAnalysisStage::ReducedCholesky => AnalysisFailureStage::CubicReducedCholesky,
-        InternalCubicAnalysisStage::ReducedInertia => AnalysisFailureStage::CubicReducedInertia,
-        InternalCubicAnalysisStage::ReducedSpectrum => AnalysisFailureStage::CubicReducedSpectrum,
     }
 }
 
@@ -7181,6 +7208,44 @@ fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
                     .canonical_response_round_trip_error,
             },
         ),
+        quotient_factorization: CubicQuotientFactorizationEvidence::new(
+            CubicQuotientFactorizationEvidenceParts {
+                quotient_dimension: evidence.quotient_factorization.quotient_dimension,
+                retained_modes: evidence.quotient_factorization.retained_modes,
+                truncated_modes: evidence.quotient_factorization.truncated_modes,
+                unregularized_llt_count: evidence.quotient_factorization.unregularized_llt_count,
+                full_spectrum_analysis_count: evidence
+                    .quotient_factorization
+                    .full_spectrum_analysis_count,
+                normalized_backward_error: evidence
+                    .quotient_factorization
+                    .normalized_backward_error,
+                pivot_intervals: evidence
+                    .quotient_factorization
+                    .pivot_intervals
+                    .iter()
+                    .map(|interval| {
+                        CubicLltPivotInterval::new(CubicLltPivotIntervalParts {
+                            lower: interval.lower,
+                            upper: interval.upper,
+                        })
+                    })
+                    .collect(),
+                field_energy_identity_error: evidence
+                    .quotient_factorization
+                    .field_energy_identity_error,
+                side_condition_error: evidence.quotient_factorization.side_condition_error,
+                recovery_round_trip_error: evidence
+                    .quotient_factorization
+                    .recovery_round_trip_error,
+                canonical_response_round_trip_error: evidence
+                    .quotient_factorization
+                    .canonical_response_round_trip_error,
+                kernel_ridge_applied: evidence.quotient_factorization.kernel_ridge_applied,
+                gram_jitter_applied: evidence.quotient_factorization.gram_jitter_applied,
+                mode_truncation_applied: evidence.quotient_factorization.mode_truncation_applied,
+            },
+        ),
         polynomial_singular_values: evidence.singular_values.clone(),
         polynomial_rrqr_ratio: evidence.polynomial_rrqr_ratio,
         polynomial_svd_ratio: evidence.polynomial_svd_ratio,
@@ -7340,15 +7405,22 @@ fn diagnose_qp(failure: &CubicExecutionFailure) -> ProblemDiagnosis {
     }
 }
 
-fn qp_failure_report(mut report: FitReport, failure: &CubicExecutionFailure) -> FitReport {
+fn qp_failure_report(
+    mut report: FitReport,
+    failure: &CubicExecutionFailure,
+    source_relations: &[SourceHardRelation],
+) -> FitReport {
     match failure {
         CubicExecutionFailure::Equality(failure) => {
-            report = failure_report(report, failure, &[]);
+            report = failure_report(report, failure, source_relations);
         }
         CubicExecutionFailure::Capacity(evidence) => {
             report.capacity = Some(public_capacity(evidence));
         }
-        CubicExecutionFailure::Representation(_) | CubicExecutionFailure::Assembly(_) => {}
+        CubicExecutionFailure::Representation(failure) => {
+            retain_representation_failure(&mut report, failure, source_relations);
+        }
+        CubicExecutionFailure::Assembly(_) => {}
         CubicExecutionFailure::BackendAdapter(_) => {
             report.execution_failure = Some(AttemptFailureEvidence::new(
                 AttemptFailureCategory::BackendDecompositionFailure,
@@ -7553,12 +7625,8 @@ fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis 
         RepresentationFailure::PolynomialRankDeficient { .. } => {
             ProblemDiagnosis::UnidentifiedFieldMode
         }
-        RepresentationFailure::PolynomialRankGrayZone { .. }
-        | RepresentationFailure::ReducedPairingGrayZone { .. } => {
+        RepresentationFailure::PolynomialRankGrayZone { .. } => {
             ProblemDiagnosis::NumericalDecisionGrayZone
-        }
-        RepresentationFailure::ReducedPairingNotPositive { .. } => {
-            ProblemDiagnosis::NumericalFailure
         }
         RepresentationFailure::AffineReproductionBackend(failure) => diagnose_kkt(failure),
         _ => ProblemDiagnosis::NumericalFailure,
@@ -8126,6 +8194,7 @@ mod tests {
                 conservative_problem_size(0, ScalarRelationCounts { hard: 0, soft: 0 }, 0, 0, 0, 0),
             ),
             &failure,
+            &[],
         );
         let ray = report
             .recession_ray()
@@ -8209,6 +8278,7 @@ mod tests {
                 conservative_problem_size(0, ScalarRelationCounts { hard: 0, soft: 0 }, 0, 0, 0, 0),
             ),
             &failure,
+            &[],
         );
         assert_eq!(
             report.execution_failure().unwrap().category(),
@@ -8286,10 +8356,13 @@ mod tests {
                 .is_none()
         );
 
-        let reduced_failure = RepresentationFailure::ReducedPairingNotPositive {
-            classification: ReducedPairingFailureClassification::RankDeficient,
-            rank: 1,
-            negative_pivots: 0,
+        let reduced_failure = RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+            quotient_dimension: 2,
+            pivot_index: 1,
+            interval: Some(crate::cubic_equality::OutwardRoundedInterval {
+                lower: -f64::from_bits(1),
+                upper: f64::from_bits(1),
+            }),
             execution: crate::cubic_equality::AnalysisExecutionEvidence {
                 solver_invoked: false,
                 hidden_regularization_applied: false,
@@ -8299,5 +8372,53 @@ mod tests {
             diagnose_representation(&reduced_failure),
             ProblemDiagnosis::NumericalFailure
         );
+
+        let snapshot = injectable_snapshot();
+        let problem_size =
+            conservative_problem_size(6, ScalarRelationCounts { hard: 6, soft: 0 }, 0, 0, 0, 0);
+        let mut report = empty_report(&snapshot, problem_size);
+        retain_representation_failure(&mut report, &reduced_failure, &[]);
+        assert!(report.rank_evidence().is_none());
+        match report.analysis_failure().unwrap() {
+            AnalysisFailureEvidence::QuotientPivotRequiresPrecisionRescue {
+                quotient_dimension,
+                pivot_index,
+                interval: Some(interval),
+                backend_invoked,
+            } => {
+                assert_eq!(*quotient_dimension, 2);
+                assert_eq!(*pivot_index, 1);
+                assert!(interval.lower_bound() < 0.0);
+                assert!(interval.upper_bound() > 0.0);
+                assert!(!*backend_invoked);
+            }
+            other => panic!("unexpected public quotient failure evidence: {other:?}"),
+        }
+
+        let nonpositive_failure = RepresentationFailure::QuotientFactorizationNotPositive {
+            quotient_dimension: 2,
+            pivot_index: 1,
+            interval: crate::cubic_equality::OutwardRoundedInterval {
+                lower: -1.0,
+                upper: -1.0,
+            },
+            execution: crate::cubic_equality::AnalysisExecutionEvidence {
+                solver_invoked: false,
+                hidden_regularization_applied: false,
+            },
+        };
+        assert_eq!(
+            diagnose_representation(&nonpositive_failure),
+            ProblemDiagnosis::NumericalFailure
+        );
+        retain_representation_failure(&mut report, &nonpositive_failure, &[]);
+        assert!(matches!(
+            report.analysis_failure(),
+            Some(AnalysisFailureEvidence::QuotientFactorizationNotPositive {
+                quotient_dimension: 2,
+                pivot_index: 1,
+                ..
+            })
+        ));
     }
 }

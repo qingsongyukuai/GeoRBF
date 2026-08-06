@@ -669,6 +669,164 @@ impl CubicQuotientConstructionEvidence {
     }
 }
 
+/// Outward-rounded certificate interval for one unregularized quotient LLT pivot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CubicLltPivotInterval {
+    lower: f64,
+    upper: f64,
+}
+
+pub(crate) struct CubicLltPivotIntervalParts {
+    pub(crate) lower: f64,
+    pub(crate) upper: f64,
+}
+
+impl CubicLltPivotInterval {
+    pub(crate) fn new(parts: CubicLltPivotIntervalParts) -> Self {
+        Self {
+            lower: parts.lower,
+            upper: parts.upper,
+        }
+    }
+
+    /// Returns the outward-rounded lower bound for this pivot.
+    pub fn lower_bound(self) -> f64 {
+        self.lower
+    }
+
+    /// Returns the outward-rounded upper bound for this pivot.
+    pub fn upper_bound(self) -> f64 {
+        self.upper
+    }
+}
+
+/// Evidence for the verified, unregularized quotient LLT and reversible energy basis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubicQuotientFactorizationEvidence {
+    quotient_dimension: usize,
+    retained_modes: usize,
+    truncated_modes: usize,
+    unregularized_llt_count: usize,
+    full_spectrum_analysis_count: usize,
+    normalized_backward_error: f64,
+    pivot_intervals: Box<[CubicLltPivotInterval]>,
+    field_energy_identity_error: f64,
+    side_condition_error: f64,
+    recovery_round_trip_error: f64,
+    canonical_response_round_trip_error: f64,
+    kernel_ridge_applied: bool,
+    gram_jitter_applied: bool,
+    mode_truncation_applied: bool,
+}
+
+pub(crate) struct CubicQuotientFactorizationEvidenceParts {
+    pub(crate) quotient_dimension: usize,
+    pub(crate) retained_modes: usize,
+    pub(crate) truncated_modes: usize,
+    pub(crate) unregularized_llt_count: usize,
+    pub(crate) full_spectrum_analysis_count: usize,
+    pub(crate) normalized_backward_error: f64,
+    pub(crate) pivot_intervals: Vec<CubicLltPivotInterval>,
+    pub(crate) field_energy_identity_error: f64,
+    pub(crate) side_condition_error: f64,
+    pub(crate) recovery_round_trip_error: f64,
+    pub(crate) canonical_response_round_trip_error: f64,
+    pub(crate) kernel_ridge_applied: bool,
+    pub(crate) gram_jitter_applied: bool,
+    pub(crate) mode_truncation_applied: bool,
+}
+
+impl CubicQuotientFactorizationEvidence {
+    pub(crate) fn new(parts: CubicQuotientFactorizationEvidenceParts) -> Self {
+        Self {
+            quotient_dimension: parts.quotient_dimension,
+            retained_modes: parts.retained_modes,
+            truncated_modes: parts.truncated_modes,
+            unregularized_llt_count: parts.unregularized_llt_count,
+            full_spectrum_analysis_count: parts.full_spectrum_analysis_count,
+            normalized_backward_error: parts.normalized_backward_error,
+            pivot_intervals: parts.pivot_intervals.into(),
+            field_energy_identity_error: parts.field_energy_identity_error,
+            side_condition_error: parts.side_condition_error,
+            recovery_round_trip_error: parts.recovery_round_trip_error,
+            canonical_response_round_trip_error: parts.canonical_response_round_trip_error,
+            kernel_ridge_applied: parts.kernel_ridge_applied,
+            gram_jitter_applied: parts.gram_jitter_applied,
+            mode_truncation_applied: parts.mode_truncation_applied,
+        }
+    }
+
+    /// Returns the full quotient dimension submitted to the LLT.
+    pub fn quotient_dimension(&self) -> usize {
+        self.quotient_dimension
+    }
+
+    /// Returns the number of positive effective field modes retained.
+    pub fn retained_modes(&self) -> usize {
+        self.retained_modes
+    }
+
+    /// Returns the number of quotient modes truncated from the representation.
+    pub fn truncated_modes(&self) -> usize {
+        self.truncated_modes
+    }
+
+    /// Returns the number of unregularized LLT calls on the complete quotient Gram matrix.
+    pub fn unregularized_llt_count(&self) -> usize {
+        self.unregularized_llt_count
+    }
+
+    /// Returns the number of full-spectrum analyses run after a successful LLT.
+    pub fn full_spectrum_analysis_count(&self) -> usize {
+        self.full_spectrum_analysis_count
+    }
+
+    /// Returns the scale-aware LLT backward certificate `eta_G`.
+    pub fn normalized_backward_error(&self) -> f64 {
+        self.normalized_backward_error
+    }
+
+    /// Returns every outward-rounded quotient pivot interval in factorization order.
+    pub fn pivot_intervals(&self) -> &[CubicLltPivotInterval] {
+        &self.pivot_intervals
+    }
+
+    /// Returns the recovered FieldEnergy-to-Euclidean identity defect.
+    pub fn field_energy_identity_error(&self) -> f64 {
+        self.field_energy_identity_error
+    }
+
+    /// Returns the complete-Pi1 side-condition defect after the energy change of basis.
+    pub fn side_condition_error(&self) -> f64 {
+        self.side_condition_error
+    }
+
+    /// Returns the solver-coordinate recovery round-trip defect.
+    pub fn recovery_round_trip_error(&self) -> f64 {
+        self.recovery_round_trip_error
+    }
+
+    /// Returns the canonical-response round-trip defect through energy coordinates.
+    pub fn canonical_response_round_trip_error(&self) -> f64 {
+        self.canonical_response_round_trip_error
+    }
+
+    /// Reports whether a kernel ridge altered the canonical pairing.
+    pub fn kernel_ridge_applied(&self) -> bool {
+        self.kernel_ridge_applied
+    }
+
+    /// Reports whether jitter altered the quotient Gram matrix.
+    pub fn gram_jitter_applied(&self) -> bool {
+        self.gram_jitter_applied
+    }
+
+    /// Reports whether any quotient mode was truncated.
+    pub fn mode_truncation_applied(&self) -> bool {
+        self.mode_truncation_applied
+    }
+}
+
 /// Complete Cubic representation analysis retained by a successful fit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CubicAnalysisEvidence {
@@ -676,6 +834,7 @@ pub struct CubicAnalysisEvidence {
     polynomial_dimension: usize,
     polynomial_rank: usize,
     quotient_construction: CubicQuotientConstructionEvidence,
+    quotient_factorization: CubicQuotientFactorizationEvidence,
     polynomial_singular_values: Box<[f64]>,
     polynomial_rrqr_ratio: f64,
     polynomial_svd_ratio: f64,
@@ -696,6 +855,7 @@ pub(crate) struct CubicAnalysisEvidenceParts {
     pub(crate) polynomial_dimension: usize,
     pub(crate) polynomial_rank: usize,
     pub(crate) quotient_construction: CubicQuotientConstructionEvidence,
+    pub(crate) quotient_factorization: CubicQuotientFactorizationEvidence,
     pub(crate) polynomial_singular_values: Vec<f64>,
     pub(crate) polynomial_rrqr_ratio: f64,
     pub(crate) polynomial_svd_ratio: f64,
@@ -718,6 +878,7 @@ impl CubicAnalysisEvidence {
             polynomial_dimension: parts.polynomial_dimension,
             polynomial_rank: parts.polynomial_rank,
             quotient_construction: parts.quotient_construction,
+            quotient_factorization: parts.quotient_factorization,
             polynomial_singular_values: parts.polynomial_singular_values.into(),
             polynomial_rrqr_ratio: parts.polynomial_rrqr_ratio,
             polynomial_svd_ratio: parts.polynomial_svd_ratio,
@@ -752,6 +913,11 @@ impl CubicAnalysisEvidence {
     /// Returns evidence for the implicit complete-Pi1 quotient construction.
     pub fn quotient_construction(&self) -> CubicQuotientConstructionEvidence {
         self.quotient_construction
+    }
+
+    /// Returns evidence for the verified energy-orthonormal quotient basis.
+    pub fn quotient_factorization(&self) -> &CubicQuotientFactorizationEvidence {
+        &self.quotient_factorization
     }
 
     /// Returns the polynomial-pairing singular values.
@@ -794,17 +960,20 @@ impl CubicAnalysisEvidence {
         self.reduced_symmetry_defect_limit
     }
 
-    /// Returns the reduced pairing's largest singular value.
+    /// Returns a non-normative fixed-iteration estimate of the reduced
+    /// pairing's largest singular value.
     pub fn reduced_largest_singular_value(&self) -> f64 {
         self.reduced_largest_singular_value
     }
 
-    /// Returns the reduced pairing's smallest singular value.
+    /// Returns a non-normative fixed-iteration estimate of the reduced
+    /// pairing's smallest singular value.
     pub fn reduced_smallest_singular_value(&self) -> f64 {
         self.reduced_smallest_singular_value
     }
 
-    /// Returns a largest-to-smallest condition estimate for the reduced pairing.
+    /// Returns a non-normative largest-to-smallest risk estimate for the
+    /// reduced pairing. This value never decides canonical rank.
     pub fn reduced_condition_estimate(&self) -> Option<f64> {
         let estimate = self.reduced_largest_singular_value / self.reduced_smallest_singular_value;
         estimate.is_finite().then_some(estimate)
@@ -1464,6 +1633,16 @@ pub enum AnalysisContractQuantity {
     HouseholderOrthogonalityError,
     /// Canonical response quotient-coordinate round-trip error.
     CanonicalResponseRoundTripError,
+    /// Unregularized quotient LLT backward certificate.
+    QuotientLltBackwardError,
+    /// FieldEnergy identity defect in solver-facing quotient coordinates.
+    QuotientFieldEnergyIdentityError,
+    /// Complete-Pi1 side-condition defect after energy orthonormalization.
+    QuotientSideConditionError,
+    /// Solver-to-canonical basis recovery round-trip error.
+    QuotientRecoveryRoundTripError,
+    /// Canonical response round-trip error through the energy basis.
+    QuotientBasisResponseRoundTripError,
     /// Reduced-pairing symmetry defect.
     ReducedSymmetryDefect,
     /// Complete-affine reproduction error.
@@ -1521,6 +1700,22 @@ pub enum AnalysisFailureEvidence {
     },
     /// Null-space construction workspace could not be allocated.
     NullSpaceWorkspaceAllocation,
+    /// An f64 quotient LLT pivot requires the bounded precision-rescue stage
+    /// before it can be classified.
+    QuotientPivotRequiresPrecisionRescue {
+        quotient_dimension: usize,
+        pivot_index: usize,
+        interval: Option<CubicLltPivotInterval>,
+        backend_invoked: bool,
+    },
+    /// A quotient LLT pivot was reliably non-positive in f64. This is a
+    /// numerical representation failure, not proof of canonical rank loss.
+    QuotientFactorizationNotPositive {
+        quotient_dimension: usize,
+        pivot_index: usize,
+        interval: CubicLltPivotInterval,
+        backend_invoked: bool,
+    },
     /// A quantified representation contract exceeded its policy limit.
     ContractThresholdExceeded {
         quantity: AnalysisContractQuantity,

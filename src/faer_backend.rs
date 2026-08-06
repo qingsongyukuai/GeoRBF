@@ -56,19 +56,17 @@ pub(crate) enum DecompositionFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CholeskyFailure {
     WorkspaceAllocation(WorkspaceAllocationFailure),
-    NonPositivePivot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BunchKaufmanInertia {
-    pub(crate) positive: usize,
-    pub(crate) negative: usize,
-    pub(crate) zero: usize,
+    NonPositivePivot { index: usize },
 }
 
 pub(crate) struct HouseholderQrFactors {
     pub(crate) basis: Mat<f64>,
     pub(crate) coefficients: Mat<f64>,
+}
+
+pub(crate) struct UnregularizedLltFactors {
+    pub(crate) lower: Mat<f64>,
+    pub(crate) dynamic_regularization_count: usize,
 }
 
 pub(crate) fn parallelism() -> Par {
@@ -252,12 +250,14 @@ pub(crate) fn householder_qr(
     })
 }
 
-pub(crate) fn cholesky_minimum_diagonal(matrix: MatRef<'_, f64>) -> Result<f64, CholeskyFailure> {
+pub(crate) fn unregularized_llt(
+    matrix: MatRef<'_, f64>,
+) -> Result<UnregularizedLltFactors, CholeskyFailure> {
     let dimension = matrix.nrows();
     let mut factors = Mat::from_fn(dimension, dimension, |row, column| matrix[(row, column)]);
     let requirement = llt_workspace_requirement(dimension);
     let mut memory = allocate(requirement).map_err(CholeskyFailure::WorkspaceAllocation)?;
-    llt::cholesky_in_place(
+    let info = llt::cholesky_in_place(
         factors.as_mut(),
         llt::LltRegularization {
             dynamic_regularization_delta: 0.0,
@@ -267,82 +267,13 @@ pub(crate) fn cholesky_minimum_diagonal(matrix: MatRef<'_, f64>) -> Result<f64, 
         MemStack::new(&mut memory),
         llt_params(),
     )
-    .map_err(|_| CholeskyFailure::NonPositivePivot)?;
-    Ok((0..dimension)
-        .map(|index| factors[(index, index)])
-        .fold(f64::INFINITY, f64::min))
-}
-
-pub(crate) fn bunch_kaufman_inertia(
-    matrix: MatRef<'_, f64>,
-) -> Result<BunchKaufmanInertia, DecompositionFailure> {
-    let dimension = matrix.nrows();
-    let mut factors = Mat::from_fn(dimension, dimension, |row, column| matrix[(row, column)]);
-    let mut subdiagonal = vec![0.0; dimension];
-    let mut permutation = vec![0usize; dimension];
-    let mut inverse_permutation = vec![0usize; dimension];
-    let requirement = factor_workspace_requirement(dimension);
-    let mut memory = allocate(requirement).map_err(DecompositionFailure::WorkspaceAllocation)?;
-    factor::cholesky_in_place(
-        factors.as_mut(),
-        DiagMut::from_slice_mut(&mut subdiagonal),
-        &mut permutation,
-        &mut inverse_permutation,
-        parallelism(),
-        MemStack::new(&mut memory),
-        lblt_params(),
-    );
-    let mut inertia = BunchKaufmanInertia {
-        positive: 0,
-        negative: 0,
-        zero: 0,
-    };
-    let mut index = 0;
-    while index < dimension {
-        if index + 1 < dimension && subdiagonal[index] != 0.0 {
-            let diagonal = [factors[(index, index)], factors[(index + 1, index + 1)]];
-            let off_diagonal = subdiagonal[index];
-            if diagonal
-                .into_iter()
-                .chain([off_diagonal])
-                .any(|value| !value.is_finite())
-            {
-                return Err(DecompositionFailure::NumericalError);
-            }
-            let scale = diagonal[0]
-                .abs()
-                .max(diagonal[1].abs())
-                .max(off_diagonal.abs());
-            if scale == 0.0 {
-                inertia.zero += 2;
-            } else {
-                let center = 0.5 * (diagonal[0] / scale + diagonal[1] / scale);
-                let radius =
-                    (0.5 * (diagonal[0] / scale - diagonal[1] / scale)).hypot(off_diagonal / scale);
-                record_sign(center - radius, &mut inertia);
-                record_sign(center + radius, &mut inertia);
-            }
-            index += 2;
-        } else {
-            let value = factors[(index, index)];
-            if !value.is_finite() {
-                return Err(DecompositionFailure::NumericalError);
-            }
-            record_sign(value, &mut inertia);
-            index += 1;
-        }
-    }
-    Ok(inertia)
-}
-
-fn record_sign(value: f64, inertia: &mut BunchKaufmanInertia) {
-    if value > 0.0 {
-        inertia.positive += 1;
-    } else if value < 0.0 {
-        inertia.negative += 1;
-    } else {
-        inertia.zero += 1;
-    }
+    .map_err(|failure| match failure {
+        llt::LltError::NonPositivePivot { index } => CholeskyFailure::NonPositivePivot { index },
+    })?;
+    Ok(UnregularizedLltFactors {
+        lower: factors,
+        dynamic_regularization_count: info.dynamic_regularization_count,
+    })
 }
 
 pub(crate) fn singular_values(matrix: MatRef<'_, f64>) -> Result<Vec<f64>, DecompositionFailure> {
