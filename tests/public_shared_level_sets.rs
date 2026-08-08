@@ -589,6 +589,52 @@ fn absolute_observations_close_group_cycles_without_redundant_kkt_rows() {
     assert_close(conflict.second_absolute_target(), 4.0);
     assert!(!conflict.backend_invoked());
     assert!(failure.report().attempts().is_empty());
+    let witness = failure
+        .report()
+        .conflict_witness()
+        .expect("the non-trivial canonical dependency has a common conflict witness");
+    assert_eq!(
+        witness.source_ids(),
+        &[
+            SourceId::new("conflict/member-left"),
+            SourceId::new("conflict/member-right"),
+            SourceId::new("conflict/value-left"),
+            SourceId::new("conflict/value-right"),
+        ]
+    );
+    assert_eq!(witness.canonical_residual(), 0.0);
+    assert_eq!(witness.separation_margin(), 1.0);
+    assert_eq!(
+        witness
+            .relations()
+            .iter()
+            .map(|relation| (
+                relation.source().source_id().as_str(),
+                relation.source().semantic_role().as_str(),
+                relation.multiplier(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "conflict/member-left",
+                "shared-level-set/member/value",
+                -1.0,
+            ),
+            (
+                "conflict/member-right",
+                "shared-level-set/member/value",
+                1.0,
+            ),
+            ("conflict/value-left", "field-value-observation/value", 1.0,),
+            (
+                "conflict/value-right",
+                "field-value-observation/value",
+                -1.0,
+            ),
+        ]
+    );
+    assert!(witness.provenance_verified());
+    assert!(!witness.backend_invoked());
 }
 
 #[test]

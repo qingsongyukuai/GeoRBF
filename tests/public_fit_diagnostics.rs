@@ -78,6 +78,8 @@ fn preflight_retains_all_evidence_and_selects_primary_diagnosis_stably() {
             "unresolved semantics outrank a Direct Input Conflict"
         );
         assert!(failure.report().attempts().is_empty());
+        assert!(failure.report().canonical_acceptance().is_none());
+        assert!(failure.report().hard_relations().is_empty());
         assert!(failure.report().problem_size().kkt_dimension().is_some());
         assert_eq!(
             failure
@@ -97,6 +99,33 @@ fn preflight_retains_all_evidence_and_selects_primary_diagnosis_stably() {
         assert_eq!(conflicts[0].second_source().as_str(), "conflict-b");
         assert_eq!(conflicts[0].first_target(), 1.0);
         assert_eq!(conflicts[0].second_target(), 2.0);
+
+        let witness = failure
+            .report()
+            .conflict_witness()
+            .expect("a direct conflict has a source-localized canonical witness");
+        assert_eq!(
+            witness
+                .sources()
+                .iter()
+                .map(|source| source.source_id().as_str())
+                .collect::<Vec<_>>(),
+            ["conflict-a", "conflict-b"]
+        );
+        assert_eq!(
+            witness
+                .relations()
+                .iter()
+                .map(|relation| relation.multiplier())
+                .collect::<Vec<_>>(),
+            [1.0, -1.0]
+        );
+        assert_eq!(witness.canonical_residual(), 0.0);
+        assert_eq!(witness.separation_margin(), 1.0);
+        assert!(witness.canonical_residual() <= witness.residual_limit());
+        assert!(witness.separation_margin() >= witness.separation_limit());
+        assert!(witness.provenance_verified());
+        assert!(!witness.backend_invoked());
     }
 
     assert_eq!(

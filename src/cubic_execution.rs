@@ -107,7 +107,14 @@ pub(crate) struct ValidatedInfeasibilityEvidence {
     pub(crate) separation_limit: f64,
     pub(crate) recovery_round_trip_error: f64,
     pub(crate) provenance_verified: bool,
-    pub(crate) sources: Vec<UsageProvenance>,
+    pub(crate) witness_relations: Vec<ValidatedConflictRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ValidatedConflictRelation {
+    pub(crate) provenance: UsageProvenance,
+    pub(crate) source_provenances: Vec<UsageProvenance>,
+    pub(crate) multiplier: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -551,6 +558,16 @@ fn solve_convex_qp(
             .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
     let canonical_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
         .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
+    if canonical_form.verifies_hard_conflict_witness() {
+        if let Some(evidence) = canonical_form.hard_recovery.conflict_witness.clone() {
+            return Err(CubicExecutionFailure::Equality(Box::new(
+                CubicEqualityFailure::DirectInputConflict {
+                    evidence,
+                    representation: Box::new(canonical_form.representation_evidence.clone()),
+                },
+            )));
+        }
+    }
     let constraints = canonical_form
         .solver_hard_rows()
         .count()
@@ -698,15 +715,24 @@ fn assemble_qp_form(
                 .coefficients(coordinate_layout, variable_layout),
             rhs: equality.row.target,
             violation_variable: None,
-            provenance_edges: vec![QpProvenanceEdge {
-                provenance: equality.row.provenance.clone(),
-                derived_block: equality.row.derived_block.clone(),
-                derived_row: equality.row.derived_row.clone(),
-                derived_column: equality.row.derived_column.clone(),
-                backend_row,
-                backend_column: None,
-                cone: QpConeRole::Zero,
-            }],
+            provenance_edges: equality
+                .row
+                .source_provenances
+                .iter()
+                .map(|provenance| QpProvenanceEdge {
+                    provenance: provenance.clone(),
+                    derived_block: DerivedBlockId::from_residual(provenance.residual()),
+                    derived_row: DerivedRowId::from_residual(provenance.residual()),
+                    derived_column: equality
+                        .row
+                        .response
+                        .as_ref()
+                        .map(|_| DerivedColumnId::from_residual(provenance.residual())),
+                    backend_row,
+                    backend_column: None,
+                    cone: QpConeRole::Zero,
+                })
+                .collect(),
         });
     }
     let mut affine_inequality_rows = Vec::with_capacity(canonical_form.affine_rows.len());
@@ -1464,7 +1490,7 @@ fn validate_primal_infeasibility_certificate(
             relative_error(recovered_value / factor, *scaled_value)
         })
         .fold(0.0_f64, f64::max);
-    let mut evidence = validate_primal_infeasibility_ray(
+    validate_primal_infeasibility_ray(
         form.variables,
         &form.constraints,
         &form.constraint_rhs,
@@ -1477,10 +1503,70 @@ fn validate_primal_infeasibility_certificate(
     {
         return None;
     }
+    let source_row_count = form
+        .constraint_rhs
+        .len()
+        .checked_sub(form.violation_nonnegative_rows.len())?;
+    let source_constraint_count = source_row_count.checked_mul(form.variables)?;
+    let source_ray = &recovered_ray[..source_row_count];
+    let mut evidence = validate_primal_infeasibility_ray(
+        form.variables,
+        &form.constraints[..source_constraint_count],
+        &form.constraint_rhs[..source_row_count],
+        form.equality_constraints,
+        source_ray,
+    )?;
     evidence.recovery_round_trip_error = recovery_round_trip_error;
     evidence.provenance_verified = provenance_verified;
-    evidence.sources = constraint_certificate_sources(form);
+    let ray_norm = source_ray
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    let normalized_ray = source_ray
+        .iter()
+        .map(|value| value / ray_norm)
+        .collect::<Vec<_>>();
+    evidence.witness_relations = constraint_conflict_relations(form, &normalized_ray);
     Some(evidence)
+}
+
+fn constraint_conflict_relations(
+    form: &ConvexQpForm,
+    recovered_ray: &[f64],
+) -> Vec<ValidatedConflictRelation> {
+    let mut relations = form
+        .hard_equality_rows
+        .iter()
+        .chain(&form.affine_inequality_rows)
+        .zip(recovered_ray)
+        .filter(|(_, multiplier)| **multiplier != 0.0)
+        .map(|(row, multiplier)| ValidatedConflictRelation {
+            provenance: row.provenance.clone(),
+            source_provenances: row
+                .provenance_edges
+                .iter()
+                .map(|edge| edge.provenance.clone())
+                .collect(),
+            multiplier: *multiplier,
+        })
+        .collect::<Vec<_>>();
+    relations.sort_by(|left, right| {
+        left.provenance
+            .source()
+            .cmp(right.provenance.source())
+            .then_with(|| {
+                left.provenance
+                    .semantic_role()
+                    .cmp(right.provenance.semantic_role())
+            })
+    });
+    relations.dedup_by(|left, right| {
+        left.provenance.source() == right.provenance.source()
+            && left.provenance.groups() == right.provenance.groups()
+            && left.provenance.semantic_role() == right.provenance.semantic_role()
+            && left.multiplier == right.multiplier
+    });
+    relations
 }
 
 fn constraint_certificate_sources(form: &ConvexQpForm) -> Vec<UsageProvenance> {
@@ -1596,8 +1682,7 @@ fn validate_primal_infeasibility_ray(
                 .sum::<f64>()
                 .abs()
         })
-        .fold(0.0_f64, f64::max)
-        / matrix_scale;
+        .fold(0.0_f64, f64::max);
     let dual_cone_violation = ray[equality_constraints..]
         .iter()
         .map(|value| (-value).max(0.0))
@@ -1606,7 +1691,7 @@ fn validate_primal_infeasibility_ray(
         .iter()
         .map(|value| value.abs())
         .fold(1.0_f64, f64::max);
-    let separation_margin = -dot_product(constraint_rhs, &ray) / rhs_scale;
+    let separation_margin = -dot_product(constraint_rhs, &ray);
     let evidence = ValidatedInfeasibilityEvidence {
         finite: normalized_ray_norm.is_finite()
             && stationarity_residual.is_finite()
@@ -1616,11 +1701,11 @@ fn validate_primal_infeasibility_ray(
         stationarity_residual,
         dual_cone_violation,
         separation_margin,
-        residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit,
-        separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit,
+        residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit * matrix_scale,
+        separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit * rhs_scale,
         recovery_round_trip_error: 0.0,
         provenance_verified: false,
-        sources: Vec::new(),
+        witness_relations: Vec::new(),
     };
     (evidence.finite
         && (evidence.normalized_ray_norm - 1.0).abs()
@@ -2440,15 +2525,24 @@ fn verifies_qp_form_provenance(
             || row.rhs != equality.row.target
             || row.violation_variable.is_some()
             || row.provenance_edges
-                != vec![QpProvenanceEdge {
-                    provenance: equality.row.provenance.clone(),
-                    derived_block: equality.row.derived_block.clone(),
-                    derived_row: equality.row.derived_row.clone(),
-                    derived_column: equality.row.derived_column.clone(),
-                    backend_row,
-                    backend_column: None,
-                    cone: QpConeRole::Zero,
-                }]
+                != equality
+                    .row
+                    .source_provenances
+                    .iter()
+                    .map(|provenance| QpProvenanceEdge {
+                        provenance: provenance.clone(),
+                        derived_block: DerivedBlockId::from_residual(provenance.residual()),
+                        derived_row: DerivedRowId::from_residual(provenance.residual()),
+                        derived_column: equality
+                            .row
+                            .response
+                            .as_ref()
+                            .map(|_| DerivedColumnId::from_residual(provenance.residual())),
+                        backend_row,
+                        backend_column: None,
+                        cone: QpConeRole::Zero,
+                    })
+                    .collect::<Vec<_>>()
         {
             return false;
         }

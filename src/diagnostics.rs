@@ -118,6 +118,168 @@ impl CanonicalEvidenceSource {
     }
 }
 
+/// One original canonical hard relation in a conflict witness.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictWitnessRelationEvidence {
+    source: CanonicalEvidenceSource,
+    multiplier: f64,
+}
+
+impl ConflictWitnessRelationEvidence {
+    pub(crate) fn new(source: CanonicalEvidenceSource, multiplier: f64) -> Self {
+        Self { source, multiplier }
+    }
+
+    /// Returns the original caller-owned relation provenance.
+    pub fn source(&self) -> &CanonicalEvidenceSource {
+        &self.source
+    }
+
+    /// Returns this relation's coefficient in the verified affine combination.
+    pub fn multiplier(&self) -> f64 {
+        self.multiplier
+    }
+}
+
+/// A source-localized proof that a set of canonical hard relations is inconsistent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictWitnessEvidence {
+    relations: Box<[ConflictWitnessRelationEvidence]>,
+    sources: Box<[CanonicalEvidenceSource]>,
+    source_ids: Box<[SourceId]>,
+    canonical_residual: f64,
+    separation_margin: f64,
+    residual_limit: f64,
+    separation_limit: f64,
+    provenance_verified: bool,
+    backend_invoked: bool,
+}
+
+pub(crate) struct ConflictWitnessEvidenceParts {
+    pub(crate) relations: Vec<ConflictWitnessRelationEvidence>,
+    pub(crate) sources: Vec<CanonicalEvidenceSource>,
+    pub(crate) canonical_residual: f64,
+    pub(crate) separation_margin: f64,
+    pub(crate) residual_limit: f64,
+    pub(crate) separation_limit: f64,
+    pub(crate) provenance_verified: bool,
+    pub(crate) backend_invoked: bool,
+}
+
+impl ConflictWitnessEvidence {
+    pub(crate) fn new(
+        relations: Vec<ConflictWitnessRelationEvidence>,
+        canonical_residual: f64,
+        separation_margin: f64,
+        residual_limit: f64,
+        separation_limit: f64,
+        provenance_verified: bool,
+        backend_invoked: bool,
+    ) -> Self {
+        let sources = relations
+            .iter()
+            .map(|relation| relation.source.clone())
+            .collect();
+        Self::new_with_sources(ConflictWitnessEvidenceParts {
+            relations,
+            sources,
+            canonical_residual,
+            separation_margin,
+            residual_limit,
+            separation_limit,
+            provenance_verified,
+            backend_invoked,
+        })
+    }
+
+    pub(crate) fn new_with_sources(parts: ConflictWitnessEvidenceParts) -> Self {
+        let ConflictWitnessEvidenceParts {
+            mut relations,
+            mut sources,
+            canonical_residual,
+            separation_margin,
+            residual_limit,
+            separation_limit,
+            provenance_verified,
+            backend_invoked,
+        } = parts;
+        relations.sort_by(|left, right| {
+            left.source
+                .source_id
+                .cmp(&right.source.source_id)
+                .then_with(|| left.source.semantic_role.cmp(&right.source.semantic_role))
+        });
+        sources.sort_by(|left, right| {
+            left.source_id
+                .cmp(&right.source_id)
+                .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+        });
+        sources.dedup();
+        let mut source_ids = sources
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect::<Vec<_>>();
+        source_ids.sort();
+        source_ids.dedup();
+        Self {
+            relations: relations.into(),
+            sources: sources.into(),
+            source_ids: source_ids.into(),
+            canonical_residual,
+            separation_margin,
+            residual_limit,
+            separation_limit,
+            provenance_verified,
+            backend_invoked,
+        }
+    }
+
+    /// Returns the original canonical relations and their proof multipliers.
+    pub fn relations(&self) -> &[ConflictWitnessRelationEvidence] {
+        &self.relations
+    }
+
+    /// Returns source provenance in stable SourceId order.
+    pub fn sources(&self) -> &[CanonicalEvidenceSource] {
+        &self.sources
+    }
+
+    /// Returns the distinct caller-owned SourceIds in stable order.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns the maximum residual of the recomputed canonical combination.
+    pub fn canonical_residual(&self) -> f64 {
+        self.canonical_residual
+    }
+
+    /// Returns the strict separation proved by the recomputed targets.
+    pub fn separation_margin(&self) -> f64 {
+        self.separation_margin
+    }
+
+    /// Returns the canonical-combination residual acceptance limit.
+    pub fn residual_limit(&self) -> f64 {
+        self.residual_limit
+    }
+
+    /// Returns the minimum accepted strict-separation margin.
+    pub fn separation_limit(&self) -> f64 {
+        self.separation_limit
+    }
+
+    /// Reports whether every witness relation was recovered to original provenance.
+    pub fn provenance_verified(&self) -> bool {
+        self.provenance_verified
+    }
+
+    /// Reports whether a backend supplied the candidate proof coefficients.
+    pub fn backend_invoked(&self) -> bool {
+        self.backend_invoked
+    }
+}
+
 /// Independently validated Farkas-ray evidence for convex infeasibility.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InfeasibilityCertificateEvidence {
@@ -373,38 +535,51 @@ impl UninformativeSharedLevelSetEvidence {
 /// Stable source and target evidence for a direct hard-input contradiction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DirectInputConflictEvidence {
-    first_source: SourceId,
-    second_source: SourceId,
+    first_source: CanonicalEvidenceSource,
+    second_source: CanonicalEvidenceSource,
     semantic_role: SemanticRolePath,
     first_target: f64,
     second_target: f64,
+    canonical_residual: f64,
+    separation_margin: f64,
+    provenance_verified: bool,
 }
 
 impl DirectInputConflictEvidence {
-    pub(crate) fn new(
-        first_source: SourceId,
-        second_source: SourceId,
-        semantic_role: SemanticRolePath,
+    pub(crate) fn new_verified_same_lhs(
+        first_source: CanonicalEvidenceSource,
+        second_source: CanonicalEvidenceSource,
         first_target: f64,
         second_target: f64,
     ) -> Self {
+        let semantic_role = second_source.semantic_role.clone();
+        let raw_margin = (second_target - first_target).abs();
+        let separation_margin = if raw_margin.is_finite() {
+            raw_margin
+        } else {
+            let scale = first_target.abs().max(second_target.abs());
+            (second_target / scale - first_target / scale).abs()
+        };
         Self {
             first_source,
             second_source,
             semantic_role,
             first_target,
             second_target,
+            canonical_residual: 0.0,
+            separation_margin,
+            provenance_verified: separation_margin > 0.0,
         }
     }
 
     /// Returns the first conflicting SourceId in stable order.
     pub fn first_source(&self) -> &SourceId {
-        &self.first_source
+        &self.first_source.source_id
     }
 
     /// Returns the second conflicting SourceId in stable order.
     pub fn second_source(&self) -> &SourceId {
-        &self.second_source
+        &self.second_source.source_id
     }
 
     /// Returns the conflicting scalar semantic component.
@@ -421,11 +596,32 @@ impl DirectInputConflictEvidence {
     pub fn second_target(&self) -> f64 {
         self.second_target
     }
+
+    pub(crate) fn first_canonical_source(&self) -> &CanonicalEvidenceSource {
+        &self.first_source
+    }
+
+    pub(crate) fn second_canonical_source(&self) -> &CanonicalEvidenceSource {
+        &self.second_source
+    }
+
+    pub(crate) fn canonical_residual(&self) -> f64 {
+        self.canonical_residual
+    }
+
+    pub(crate) fn separation_margin(&self) -> f64 {
+        self.separation_margin
+    }
+
+    pub(crate) fn provenance_verified(&self) -> bool {
+        self.provenance_verified
+    }
 }
 
 /// Complete provenance for a contradiction proved by a hard-relation graph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelationGraphConflictEvidence {
+    proof_relations: Box<[ConflictWitnessRelationEvidence]>,
     source_ids: Box<[SourceId]>,
     group_ids: Box<[GroupId]>,
     semantic_role: SemanticRolePath,
@@ -433,20 +629,45 @@ pub struct RelationGraphConflictEvidence {
     first_absolute_target: f64,
     second_absolute_source: SourceId,
     second_absolute_target: f64,
+    canonical_residual: f64,
+    separation_margin: f64,
+    provenance_verified: bool,
     backend_invoked: bool,
 }
 
+pub(crate) struct RelationGraphConflictEvidenceParts {
+    pub(crate) proof_relations: Vec<ConflictWitnessRelationEvidence>,
+    pub(crate) group_ids: Vec<GroupId>,
+    pub(crate) semantic_role: SemanticRolePath,
+    pub(crate) first_absolute_source: SourceId,
+    pub(crate) first_absolute_target: f64,
+    pub(crate) second_absolute_source: SourceId,
+    pub(crate) second_absolute_target: f64,
+    pub(crate) canonical_residual: f64,
+    pub(crate) separation_margin: f64,
+    pub(crate) provenance_verified: bool,
+}
+
 impl RelationGraphConflictEvidence {
-    pub(crate) fn new(
-        source_ids: Vec<SourceId>,
-        group_ids: Vec<GroupId>,
-        semantic_role: SemanticRolePath,
-        first_absolute_source: SourceId,
-        first_absolute_target: f64,
-        second_absolute_source: SourceId,
-        second_absolute_target: f64,
-    ) -> Self {
+    pub(crate) fn new(parts: RelationGraphConflictEvidenceParts) -> Self {
+        let RelationGraphConflictEvidenceParts {
+            proof_relations,
+            group_ids,
+            semantic_role,
+            first_absolute_source,
+            first_absolute_target,
+            second_absolute_source,
+            second_absolute_target,
+            canonical_residual,
+            separation_margin,
+            provenance_verified,
+        } = parts;
+        let source_ids: Vec<_> = proof_relations
+            .iter()
+            .map(|relation| relation.source().source_id().clone())
+            .collect();
         Self {
+            proof_relations: proof_relations.into(),
             source_ids: source_ids.into(),
             group_ids: group_ids.into(),
             semantic_role,
@@ -454,8 +675,27 @@ impl RelationGraphConflictEvidence {
             first_absolute_target,
             second_absolute_source,
             second_absolute_target,
+            canonical_residual,
+            separation_margin,
+            provenance_verified,
             backend_invoked: false,
         }
+    }
+
+    pub(crate) fn proof_relations(&self) -> &[ConflictWitnessRelationEvidence] {
+        &self.proof_relations
+    }
+
+    pub(crate) fn canonical_residual(&self) -> f64 {
+        self.canonical_residual
+    }
+
+    pub(crate) fn separation_margin(&self) -> f64 {
+        self.separation_margin
+    }
+
+    pub(crate) fn provenance_verified(&self) -> bool {
+        self.provenance_verified
     }
 
     /// Returns every caller-owned source on the contradictory graph cycle.
@@ -546,6 +786,10 @@ pub struct SharedLevelSetRelationConflictEvidence {
     group_ids: Box<[GroupId]>,
     semantic_roles: Box<[SemanticRolePath]>,
     backend_invoked: bool,
+    proof_multipliers: Option<Box<[f64]>>,
+    canonical_residual: Option<f64>,
+    separation_margin: Option<f64>,
+    provenance_verified: bool,
 }
 
 impl SharedLevelSetRelationConflictEvidence {
@@ -572,7 +816,60 @@ impl SharedLevelSetRelationConflictEvidence {
             group_ids: group_ids.into(),
             semantic_roles: semantic_roles.into(),
             backend_invoked: false,
+            proof_multipliers: None,
+            canonical_residual: None,
+            separation_margin: None,
+            provenance_verified: false,
         }
+    }
+
+    pub(crate) fn new_with_canonical_witness(
+        source_provenance: Vec<SharedLevelSetConflictSourceEvidence>,
+        separation_margin: f64,
+    ) -> Self {
+        Self::new_with_verified_source_multipliers(
+            source_provenance
+                .into_iter()
+                .map(|source| (source, 1.0))
+                .collect(),
+            separation_margin,
+            0.0,
+        )
+    }
+
+    pub(crate) fn new_with_verified_source_multipliers(
+        mut source_provenance: Vec<(SharedLevelSetConflictSourceEvidence, f64)>,
+        separation_margin: f64,
+        canonical_residual: f64,
+    ) -> Self {
+        source_provenance.sort_by(|left, right| left.0.source_id.cmp(&right.0.source_id));
+        let (sources, multipliers): (Vec<_>, Vec<_>) = source_provenance.into_iter().unzip();
+        let mut evidence = Self::new(sources);
+        evidence.provenance_verified = !multipliers.is_empty()
+            && multipliers.iter().all(|multiplier| multiplier.is_finite())
+            && canonical_residual == 0.0
+            && separation_margin.is_finite()
+            && separation_margin > 0.0;
+        evidence.proof_multipliers = Some(multipliers.into());
+        evidence.canonical_residual = Some(canonical_residual);
+        evidence.separation_margin = Some(separation_margin);
+        evidence
+    }
+
+    pub(crate) fn proof_multipliers(&self) -> Option<&[f64]> {
+        self.proof_multipliers.as_deref()
+    }
+
+    pub(crate) fn canonical_residual(&self) -> Option<f64> {
+        self.canonical_residual
+    }
+
+    pub(crate) fn separation_margin(&self) -> Option<f64> {
+        self.separation_margin
+    }
+
+    pub(crate) fn provenance_verified(&self) -> bool {
+        self.provenance_verified
     }
 
     /// Returns source/group/role associations for the complete proof.

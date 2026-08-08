@@ -520,6 +520,10 @@ fn provable_affine_level_set_graph_conflicts_stop_before_the_backend() {
         conflict.source_ids(),
         &[SourceId::new("a-to-b"), SourceId::new("b-to-a")]
     );
+    let witness = failure.report().conflict_witness().unwrap();
+    assert_eq!(witness.source_ids(), conflict.source_ids());
+    assert_eq!(witness.canonical_residual(), 0.0);
+    assert!(witness.separation_margin() >= witness.separation_limit());
 
     let mut point_problem = builder();
     point_problem
@@ -548,6 +552,10 @@ fn provable_affine_level_set_graph_conflicts_stop_before_the_backend() {
             SourceId::new("level/member")
         ]
     );
+    let witness = failure.report().conflict_witness().unwrap();
+    assert_eq!(witness.source_ids(), conflict.source_ids());
+    assert_eq!(witness.canonical_residual(), 0.0);
+    assert!(witness.separation_margin() >= witness.separation_limit());
 
     let mut signed_problem = builder();
     for (group, source, location) in [
@@ -583,6 +591,7 @@ fn provable_affine_level_set_graph_conflicts_stop_before_the_backend() {
             .source_ids(),
         &[SourceId::new("a-minus-b"), SourceId::new("b-minus-a")]
     );
+    assert!(failure.report().conflict_witness().is_some());
 
     let mut absolute_problem = builder();
     for (source, location) in [

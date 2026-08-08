@@ -146,6 +146,21 @@ pub(crate) struct CanonicalHardRecoveryGraph {
     pub(crate) retained_rows: Vec<usize>,
     rows: Vec<CanonicalHardRowRecovery>,
     pub(crate) relations: Vec<CanonicalHardRecoveryRelation>,
+    pub(crate) conflict_witness: Option<CanonicalHardConflictWitness>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalHardConflictRelation {
+    pub(crate) provenance: UsageProvenance,
+    pub(crate) multiplier: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalHardConflictWitness {
+    pub(crate) relations: Vec<CanonicalHardConflictRelation>,
+    pub(crate) sources: Vec<UsageProvenance>,
+    pub(crate) canonical_residual: f64,
+    pub(crate) separation_margin: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -236,6 +251,73 @@ impl CanonicalHardRecoveryGraph {
                 })
             })
     }
+
+    fn verifies_conflict_witness(&self, rows: &[SymbolicAffineRow]) -> bool {
+        let Some(witness) = &self.conflict_witness else {
+            return true;
+        };
+        if witness.relations.is_empty()
+            || witness.canonical_residual != 0.0
+            || !witness.separation_margin.is_finite()
+            || witness.separation_margin <= 0.0
+        {
+            return false;
+        }
+        let recovered = witness
+            .relations
+            .iter()
+            .filter_map(|relation| {
+                rows.iter().find_map(|row| {
+                    row.source_recoveries
+                        .iter()
+                        .find(|source| source.provenance == relation.provenance)
+                        .map(|source| (row, source, relation.multiplier))
+                })
+            })
+            .collect::<Vec<_>>();
+        if recovered.len() != witness.relations.len() {
+            return false;
+        }
+        let mut coefficients = BTreeMap::<usize, ExactBinaryProductSum>::new();
+        for (row, source, multiplier) in &recovered {
+            for (column, coefficient) in &row.coefficients {
+                let scaled_source =
+                    ExactBinaryProductSum::product(source.coefficient, *coefficient);
+                let product = scaled_source.multiply_by_f64(*multiplier);
+                let sum = coefficients
+                    .remove(column)
+                    .unwrap_or_else(ExactBinaryProductSum::zero)
+                    .add(&product);
+                if !sum.magnitude.is_empty() {
+                    coefficients.insert(*column, sum);
+                }
+            }
+        }
+        let recomputed_margin = conflict_separation_margin(
+            recovered
+                .iter()
+                .map(|(_, source, multiplier)| (*multiplier, source.target)),
+        );
+        let mut recovered_sources = recovered
+            .iter()
+            .flat_map(|(row, _, _)| {
+                row.source_recoveries
+                    .iter()
+                    .map(|source| source.provenance.clone())
+            })
+            .collect::<Vec<_>>();
+        normalize_conflict_sources(&mut recovered_sources);
+        coefficients.is_empty()
+            && !exact_linear_combination_equals(
+                recovered
+                    .iter()
+                    .map(|(_, source, multiplier)| (*multiplier, source.target)),
+                0.0,
+            )
+            && recomputed_margin
+                .is_some_and(|margin| margin.to_bits() == witness.separation_margin.to_bits())
+            && recovered_sources == witness.sources
+    }
 }
 
 #[derive(Debug)]
@@ -268,6 +350,14 @@ impl ExactBinaryProductSum {
         )
     }
 
+    fn multiply_by_f64(&self, factor: f64) -> Self {
+        let (factor_negative, factor_magnitude) = exact_binary64_magnitude(factor);
+        Self::normalized(
+            self.negative != factor_negative,
+            multiply_magnitudes(&self.magnitude, &factor_magnitude),
+        )
+    }
+
     fn add(&self, other: &Self) -> Self {
         if self.negative == other.negative {
             return Self::normalized(
@@ -295,6 +385,25 @@ impl ExactBinaryProductSum {
         Self {
             negative: negative && !magnitude.is_empty(),
             magnitude,
+        }
+    }
+
+    fn saturating_f64_magnitude(&self) -> f64 {
+        let Some((limb_index, highest_limb)) =
+            self.magnitude.iter().copied().enumerate().next_back()
+        else {
+            return 0.0;
+        };
+        let highest_bit = 63 - highest_limb.leading_zeros() as i32;
+        let exponent = limb_index as i32 * 64 + highest_bit - 2148;
+        let significand = highest_limb as f64 / 2.0_f64.powi(highest_bit);
+        let magnitude = significand * 2.0_f64.powi(exponent);
+        if magnitude.is_infinite() {
+            f64::MAX
+        } else if magnitude == 0.0 {
+            f64::from_bits(1)
+        } else {
+            magnitude
         }
     }
 }
@@ -473,6 +582,7 @@ fn build_hard_recovery_graph(rows: &[SymbolicAffineRow]) -> CanonicalHardRecover
     let mut row_recoveries = Vec::with_capacity(rows.len());
     let mut relations = Vec::new();
     let mut basis = BTreeMap::<usize, EliminationBasisRow>::new();
+    let mut conflict_witness = None;
 
     for (canonical_index, row) in rows.iter().enumerate() {
         let mut reduced = row.coefficients.clone();
@@ -508,6 +618,15 @@ fn build_hard_recovery_graph(rows: &[SymbolicAffineRow]) -> CanonicalHardRecover
             && exactly_reconstructs_coefficients(row, &proposed, &retained_rows, rows);
         let complete_affine_verified =
             left_is_exact_dependency && exactly_reconstructs(row, &proposed, &retained_rows, rows);
+        if left_is_exact_dependency && !complete_affine_verified && conflict_witness.is_none() {
+            conflict_witness = hard_dependency_conflict_witness(
+                canonical_index,
+                row,
+                &proposed,
+                &retained_rows,
+                rows,
+            );
+        }
         let (coefficients, retained) = if complete_affine_verified || !row.solver_constraint {
             (proposed.clone(), false)
         } else {
@@ -563,7 +682,104 @@ fn build_hard_recovery_graph(rows: &[SymbolicAffineRow]) -> CanonicalHardRecover
         retained_rows,
         rows: row_recoveries,
         relations,
+        conflict_witness,
     }
+}
+
+fn hard_dependency_conflict_witness(
+    canonical_index: usize,
+    row: &SymbolicAffineRow,
+    proposed: &[(usize, f64)],
+    retained_rows: &[usize],
+    rows: &[SymbolicAffineRow],
+) -> Option<CanonicalHardConflictWitness> {
+    if row.source_recoveries.first()?.coefficient == 0.0 {
+        return None;
+    }
+    let mut canonical_terms = proposed
+        .iter()
+        .map(|(solver_row, coefficient)| (retained_rows[*solver_row], -*coefficient))
+        .collect::<Vec<_>>();
+    canonical_terms.push((canonical_index, 1.0));
+    let multiplier_scale = canonical_terms
+        .iter()
+        .map(|(_, multiplier)| multiplier.abs())
+        .fold(0.0_f64, f64::max);
+    if !multiplier_scale.is_finite() || multiplier_scale == 0.0 {
+        return None;
+    }
+    for (_, multiplier) in &mut canonical_terms {
+        *multiplier /= multiplier_scale;
+    }
+    let mut relations = canonical_terms
+        .iter()
+        .filter_map(|(index, multiplier)| {
+            let source = rows[*index].source_recoveries.first()?;
+            (source.coefficient != 0.0).then(|| CanonicalHardConflictRelation {
+                provenance: source.provenance.clone(),
+                multiplier: *multiplier / source.coefficient,
+            })
+        })
+        .collect::<Vec<_>>();
+    relations.sort_by(|left, right| {
+        left.provenance
+            .source()
+            .cmp(right.provenance.source())
+            .then_with(|| {
+                left.provenance
+                    .semantic_role()
+                    .cmp(right.provenance.semantic_role())
+            })
+    });
+    let separation_margin = conflict_separation_margin(relations.iter().filter_map(|relation| {
+        rows.iter().find_map(|row| {
+            row.source_recoveries
+                .iter()
+                .find(|source| source.provenance == relation.provenance)
+                .map(|source| (relation.multiplier, source.target))
+        })
+    }))?;
+    let mut sources = canonical_terms
+        .iter()
+        .flat_map(|(index, _)| {
+            rows[*index]
+                .source_recoveries
+                .iter()
+                .map(|source| source.provenance.clone())
+        })
+        .collect::<Vec<_>>();
+    normalize_conflict_sources(&mut sources);
+    Some(CanonicalHardConflictWitness {
+        relations,
+        sources,
+        canonical_residual: 0.0,
+        separation_margin,
+    })
+}
+
+fn normalize_conflict_sources(sources: &mut Vec<UsageProvenance>) {
+    sources.sort_by(|left, right| {
+        left.source()
+            .cmp(right.source())
+            .then_with(|| left.semantic_role().cmp(right.semantic_role()))
+            .then_with(|| left.groups().cmp(right.groups()))
+    });
+    sources.dedup_by(|left, right| {
+        left.source() == right.source()
+            && left.semantic_role() == right.semantic_role()
+            && left.groups() == right.groups()
+    });
+}
+
+fn conflict_separation_margin(terms: impl IntoIterator<Item = (f64, f64)>) -> Option<f64> {
+    let exact = terms
+        .into_iter()
+        .map(|(multiplier, target)| ExactBinaryProductSum::product(multiplier, target))
+        .fold(ExactBinaryProductSum::zero(), |sum, product| {
+            sum.add(&product)
+        });
+    let margin = exact.saturating_f64_magnitude();
+    (margin > 0.0).then_some(margin)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1017,6 +1233,11 @@ impl CanonicalCubicSolverForm {
         self.hard_recovery.verifies(&self.symbolic_hard_rows)
     }
 
+    pub(crate) fn verifies_hard_conflict_witness(&self) -> bool {
+        self.hard_recovery
+            .verifies_conflict_witness(&self.symbolic_hard_rows)
+    }
+
     pub(crate) fn verifies_soft_recovery(&self) -> bool {
         self.soft_recovery
             .verifies(&self.soft_rows, &self.soft_objectives)
@@ -1152,6 +1373,82 @@ mod tests {
         assert_eq!(graph.relations[1].provenance, second);
         assert_eq!(graph.relations[1].target, -2.0);
         assert!(graph.verifies(&rows));
+    }
+
+    #[test]
+    fn hard_conflict_witness_recovers_aliases_and_recomputes_its_margin() {
+        let first = provenance("duplicate-a", "field-value-observation/value");
+        let alias = provenance("duplicate-b", "additive-field-gauge/point");
+        let incompatible = provenance("incompatible", "field-value-observation/value");
+        let rows = vec![
+            SymbolicAffineRow {
+                coefficients: BTreeMap::from([(0, 1.0)]),
+                target: 1.0,
+                source_recoveries: vec![
+                    CanonicalHardSourceRecovery {
+                        provenance: first,
+                        coefficient: 1.0,
+                        target: 1.0,
+                    },
+                    CanonicalHardSourceRecovery {
+                        provenance: alias,
+                        coefficient: -1.0,
+                        target: -1.0,
+                    },
+                ],
+                solver_constraint: true,
+            },
+            SymbolicAffineRow {
+                coefficients: BTreeMap::from([(0, 1.0)]),
+                target: 2.0,
+                source_recoveries: vec![CanonicalHardSourceRecovery {
+                    provenance: incompatible,
+                    coefficient: 1.0,
+                    target: 2.0,
+                }],
+                solver_constraint: true,
+            },
+        ];
+
+        let graph = build_hard_recovery_graph(&rows);
+        let witness = graph.conflict_witness.as_ref().unwrap();
+        assert_eq!(
+            witness
+                .sources
+                .iter()
+                .map(|source| source.source().as_str())
+                .collect::<Vec<_>>(),
+            ["duplicate-a", "duplicate-b", "incompatible"]
+        );
+        assert!(graph.verifies_conflict_witness(&rows));
+
+        let mut damaged = graph.clone();
+        damaged.conflict_witness.as_mut().unwrap().separation_margin *= 2.0;
+        assert!(!damaged.verifies_conflict_witness(&rows));
+    }
+
+    #[test]
+    fn exact_dependency_margin_survives_floating_target_cancellation() {
+        let mut rows = vec![
+            SymbolicAffineRow::new(vec![1.0, 0.0], 1.0e16),
+            SymbolicAffineRow::new(vec![0.0, 1.0], 1.0),
+            SymbolicAffineRow::new(vec![1.0, 1.0], 1.0e16),
+        ];
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.source_recoveries = vec![CanonicalHardSourceRecovery {
+                provenance: provenance(&format!("source-{index}"), "hard/value"),
+                coefficient: 1.0,
+                target: row.target,
+            }];
+        }
+
+        let graph = build_hard_recovery_graph(&rows);
+
+        assert_eq!(
+            graph.conflict_witness.as_ref().unwrap().separation_margin,
+            1.0
+        );
+        assert!(graph.verifies_conflict_witness(&rows));
     }
 
     #[test]

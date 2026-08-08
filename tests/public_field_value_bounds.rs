@@ -471,6 +471,23 @@ fn locally_provable_hard_bound_conflicts_stop_before_the_backend() {
     let evidence = failure.report().direct_input_conflict().unwrap();
     assert_eq!(evidence.first_source().as_str(), "equality");
     assert_eq!(evidence.second_source().as_str(), "lower");
+    assert_eq!(
+        failure
+            .report()
+            .conflict_witness()
+            .unwrap()
+            .relations()
+            .iter()
+            .map(|relation| (
+                relation.source().source_id().as_str(),
+                relation.source().semantic_role().as_str(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("equality", "field-value-observation/value"),
+            ("lower", "field-value-bound/lower"),
+        ]
+    );
 
     let mut empty_feasible_set = builder();
     empty_feasible_set
@@ -538,6 +555,9 @@ fn general_bound_infeasibility_requires_a_validated_farkas_certificate() {
     ] {
         level.add_member(SourceId::new(source), location).unwrap();
     }
+    level
+        .add_member(SourceId::new("level/origin-alias"), point(0.0, 0.0, 0.0))
+        .unwrap();
     let mut builder = builder();
     builder.add(level.build().unwrap()).unwrap();
     builder
@@ -550,6 +570,9 @@ fn general_bound_infeasibility_requires_a_validated_farkas_certificate() {
     let failure = builder.build().unwrap().fit().unwrap_err();
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::InfeasibleProblem);
     assert!(!failure.report().attempts().is_empty());
+    assert!(failure.report().canonical_acceptance().is_none());
+    assert!(failure.report().hard_relations().is_empty());
+    assert!(failure.report().field_value_bounds().is_empty());
     let certificate = failure
         .report()
         .infeasibility_certificate()
@@ -580,6 +603,31 @@ fn general_bound_infeasibility_requires_a_validated_farkas_certificate() {
             .attempts()
             .iter()
             .any(|attempt| attempt.certificate_present())
+    );
+
+    let witness = failure
+        .report()
+        .conflict_witness()
+        .expect("validated infeasibility is localized to original canonical sources");
+    assert!(witness.backend_invoked());
+    assert!(witness.provenance_verified());
+    assert!(witness.canonical_residual() <= witness.residual_limit());
+    assert!(witness.separation_margin() >= witness.separation_limit());
+    let witness_sources = witness
+        .sources()
+        .iter()
+        .map(|source| source.source_id().as_str())
+        .collect::<Vec<_>>();
+    assert!(witness_sources.contains(&"lower"));
+    assert!(witness_sources.contains(&"upper"));
+    assert!(witness_sources.contains(&"level/origin"));
+    assert!(witness_sources.contains(&"level/origin-alias"));
+    assert!(witness_sources.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(
+        witness
+            .relations()
+            .iter()
+            .all(|relation| relation.multiplier().is_finite() && relation.multiplier() != 0.0)
     );
 }
 

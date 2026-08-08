@@ -254,6 +254,15 @@ fn hard_self_reverse_and_strict_cycles_are_direct_input_conflicts() {
         assert!(!evidence.group_ids().is_empty());
         assert!(!evidence.backend_invoked());
         assert!(failure.report().attempts().is_empty());
+        let witness = failure
+            .report()
+            .conflict_witness()
+            .expect("a strict relation cycle has a canonical source witness");
+        assert_eq!(witness.source_ids(), evidence.source_ids());
+        assert_eq!(witness.canonical_residual(), 0.0);
+        assert!(witness.separation_margin() >= witness.separation_limit());
+        assert!(witness.provenance_verified());
+        assert!(!witness.backend_invoked());
     }
 }
 
@@ -666,6 +675,12 @@ fn accumulated_age_separation_conflicting_with_absolute_gauges_is_preflight_evid
         "additive-field-gauge/level-set"
     );
     assert!(failure.report().attempts().is_empty());
+    let witness = failure.report().conflict_witness().unwrap();
+    assert_eq!(witness.source_ids(), evidence.source_ids());
+    assert_eq!(witness.canonical_residual(), 0.0);
+    assert_eq!(witness.separation_margin(), 1.0);
+    assert!(witness.provenance_verified());
+    assert!(!witness.backend_invoked());
 }
 
 #[test]
@@ -733,6 +748,10 @@ fn absolute_field_value_conflict_retains_observation_and_member_roles() {
     );
     assert!(!evidence.backend_invoked());
     assert!(failure.report().attempts().is_empty());
+    let witness = failure.report().conflict_witness().unwrap();
+    assert_eq!(witness.source_ids(), evidence.source_ids());
+    assert_eq!(witness.canonical_residual(), 0.0);
+    assert_eq!(witness.separation_margin(), 1.0);
 }
 
 #[test]

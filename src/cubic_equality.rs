@@ -14,8 +14,8 @@ use std::cell::RefCell;
 use crate::capacity::{CapacityExceededEvidence, plan_equality_capacity};
 use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::cubic_solver_form::{
-    CanonicalCubicFieldForm, CanonicalCubicSolverForm, CanonicalHardRecoveryGraph,
-    CubicFieldCoordinateLayout,
+    CanonicalCubicFieldForm, CanonicalCubicSolverForm, CanonicalHardConflictWitness,
+    CanonicalHardRecoveryGraph, CubicFieldCoordinateLayout,
 };
 use crate::faer_backend;
 use crate::functional::{
@@ -3667,6 +3667,10 @@ pub(crate) enum CubicEqualityFailure {
         equality: usize,
     },
     Representation(Box<RepresentationFailure>),
+    DirectInputConflict {
+        evidence: CanonicalHardConflictWitness,
+        representation: Box<CpdEvidence>,
+    },
     Backend {
         failure: Box<KktFailure>,
         representation: Box<CpdEvidence>,
@@ -3792,6 +3796,14 @@ impl CubicEqualityCore {
                 .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
         let solver_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
             .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
+        if solver_form.verifies_hard_conflict_witness() {
+            if let Some(evidence) = solver_form.hard_recovery.conflict_witness.clone() {
+                return Err(CubicEqualityFailure::DirectInputConflict {
+                    evidence,
+                    representation: Box::new(solver_form.representation_evidence.clone()),
+                });
+            }
+        }
         let equality_constraints = solver_form
             .solver_hard_rows()
             .count()
@@ -5232,15 +5244,20 @@ mod tests {
             CubicEqualityCore::solve_canonical(inconsistent, GlobalAnisotropyMetric::identity())
                 .expect_err("an incompatible verification-only gauge must reject the candidate");
         match failure {
-            CubicEqualityFailure::RecoveryVerification { evidence, .. } => {
-                assert!(
+            CubicEqualityFailure::DirectInputConflict { evidence, .. } => {
+                assert_eq!(evidence.canonical_residual, 0.0);
+                assert!(evidence.separation_margin > 0.0);
+                assert_eq!(
                     evidence
-                        .reasons
-                        .contains(&RecoveryVerificationFailureReason::HardEqualityViolation)
+                        .relations
+                        .iter()
+                        .map(|relation| relation.provenance.source().as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "manufactured-conflicting-gauge",
+                        "manufactured-latent-gauge"
+                    ]
                 );
-                assert_eq!(evidence.hard_equalities.as_ref().unwrap().len(), 12);
-                assert_eq!(evidence.relation_tolerances.as_ref().unwrap().len(), 12);
-                assert!(evidence.no_model_produced);
             }
             other => panic!("unexpected failure: {other:?}"),
         }

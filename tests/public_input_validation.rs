@@ -186,6 +186,7 @@ fn finite_but_unscalable_coordinates_retain_their_typed_failure_reason() {
         .fit()
         .expect_err("cubing the characteristic solve length must fail closed");
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+    assert!(failure.report().conflict_witness().is_none());
     assert!(matches!(
         failure.report().analysis_failure(),
         Some(AnalysisFailureEvidence::InvalidSolveCoordinateTransform {

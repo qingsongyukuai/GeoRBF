@@ -33,7 +33,8 @@ use crate::diagnostics::{
     AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
     BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
     CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
-    CapacityFailureKind, ConvexResidualEvidence as PublicConvexResidualEvidence,
+    CapacityFailureKind, ConflictWitnessEvidence, ConflictWitnessEvidenceParts,
+    ConflictWitnessRelationEvidence, ConvexResidualEvidence as PublicConvexResidualEvidence,
     ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
     CubicLltPivotInterval, CubicLltPivotIntervalParts, CubicPrecisionRescueEvidence,
     CubicQuotientConstructionEvidence, CubicQuotientConstructionEvidenceParts,
@@ -43,11 +44,11 @@ use crate::diagnostics::{
     InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
     RankDecision, RankDeficiencyConcept, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
     RecessionRayEvidence, RecessionRayEvidenceParts, RecoveryVerificationEvidence,
-    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
-    ScalingFailureReason, ScalingSummary, SharedLevelSetConflictSourceEvidence,
-    SharedLevelSetRelationConflictEvidence, SideConditionEvidence, SolveAttemptKind,
-    SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
-    SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
+    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence,
+    RelationGraphConflictEvidenceParts, ResidualDimension, ScalingFailureReason, ScalingSummary,
+    SharedLevelSetConflictSourceEvidence, SharedLevelSetRelationConflictEvidence,
+    SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts,
+    SolveAttemptTermination, SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence, UnresolvedAxialNormalEvidence,
 };
 use crate::functional::{
@@ -1404,6 +1405,7 @@ pub struct FitReport {
     attempts: Vec<SolveAttemptRecord>,
     recovery_verification: Option<RecoveryVerificationEvidence>,
     direct_input_conflicts: Vec<DirectInputConflictEvidence>,
+    conflict_witness: Option<ConflictWitnessEvidence>,
     relation_graph_conflicts: Vec<RelationGraphConflictEvidence>,
     shared_level_set_relation_conflicts: Vec<SharedLevelSetRelationConflictEvidence>,
     execution_failure: Option<AttemptFailureEvidence>,
@@ -1540,6 +1542,11 @@ impl FitReport {
     /// Returns every direct hard-input conflict in stable semantic/source order.
     pub fn direct_input_conflicts(&self) -> &[DirectInputConflictEvidence] {
         &self.direct_input_conflicts
+    }
+
+    /// Returns a source-localized proof that canonical hard relations conflict.
+    pub fn conflict_witness(&self) -> Option<&ConflictWitnessEvidence> {
+        self.conflict_witness.as_ref()
     }
 
     /// Returns complete path provenance for a hard relation-graph conflict.
@@ -1849,6 +1856,10 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         .shared_level_set_relation_conflicts
         .is_empty()
     {
+        preflight_report.conflict_witness = preflight_report
+            .shared_level_set_relation_conflicts
+            .first()
+            .and_then(shared_level_conflict_witness);
         return Err(FitFailure {
             diagnosis: primary_preflight_diagnosis(&preflight_report)
                 .expect("a shared-level-set conflict always supplies a diagnosis"),
@@ -1877,6 +1888,10 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
                     .cmp(right.source_ids())
                     .then_with(|| left.group_ids().cmp(right.group_ids()))
             });
+        preflight_report.conflict_witness = preflight_report
+            .shared_level_set_relation_conflicts
+            .first()
+            .and_then(shared_level_conflict_witness);
         return Err(FitFailure {
             diagnosis: primary_preflight_diagnosis(&preflight_report)
                 .expect("a canonical affine cycle conflict always supplies a diagnosis"),
@@ -1920,6 +1935,22 @@ pub(crate) fn fit_snapshot(snapshot: &ProblemSnapshot) -> Result<FitSuccess, Fit
         preflight_report.problem_size = problem_size;
     }
     preflight_report.direct_input_conflicts = lowering.direct_input_conflicts.clone();
+    preflight_report.conflict_witness = lowering
+        .direct_input_conflicts
+        .first()
+        .map(direct_conflict_witness)
+        .or_else(|| {
+            lowering
+                .relation_graph_conflicts
+                .first()
+                .map(relation_graph_conflict_witness)
+        })
+        .or_else(|| {
+            preflight_report
+                .shared_level_set_relation_conflicts
+                .first()
+                .and_then(shared_level_conflict_witness)
+        });
     preflight_report.relation_graph_conflicts = lowering.relation_graph_conflicts.clone();
     let capacity_failure = match source_lifecycle_capacity {
         Ok(()) if lowering.canonical_affine_inequalities.is_empty() => plan_snapshot_capacity(
@@ -1980,6 +2011,132 @@ fn primary_preflight_diagnosis(report: &FitReport) -> Option<ProblemDiagnosis> {
         .then_some(ProblemDiagnosis::CapacityExceeded)
 }
 
+fn direct_conflict_witness(conflict: &DirectInputConflictEvidence) -> ConflictWitnessEvidence {
+    let first = conflict.first_canonical_source().clone();
+    let second = conflict.second_canonical_source().clone();
+    let separation_margin =
+        exact_target_separation(conflict.first_target(), conflict.second_target());
+    ConflictWitnessEvidence::new(
+        vec![
+            ConflictWitnessRelationEvidence::new(first, 1.0),
+            ConflictWitnessRelationEvidence::new(second, -1.0),
+        ],
+        conflict.canonical_residual(),
+        conflict.separation_margin(),
+        0.0,
+        0.0,
+        conflict.provenance_verified()
+            && separation_margin.to_bits() == conflict.separation_margin().to_bits(),
+        false,
+    )
+}
+
+fn relation_graph_conflict_witness(
+    conflict: &RelationGraphConflictEvidence,
+) -> ConflictWitnessEvidence {
+    let relations = conflict.proof_relations().to_vec();
+    let separation_margin = exact_target_separation(
+        conflict.first_absolute_target(),
+        conflict.second_absolute_target(),
+    );
+    let endpoints_verified = relations.first().is_some_and(|relation| {
+        relation.source().source_id() == conflict.first_absolute_source()
+            && relation.multiplier() == 1.0
+    }) && relations.last().is_some_and(|relation| {
+        relation.source().source_id() == conflict.second_absolute_source()
+            && relation.multiplier() == -1.0
+    });
+    ConflictWitnessEvidence::new(
+        relations,
+        conflict.canonical_residual(),
+        conflict.separation_margin(),
+        0.0,
+        0.0,
+        conflict.provenance_verified()
+            && endpoints_verified
+            && separation_margin.to_bits() == conflict.separation_margin().to_bits(),
+        false,
+    )
+}
+
+fn shared_level_conflict_witness(
+    conflict: &SharedLevelSetRelationConflictEvidence,
+) -> Option<ConflictWitnessEvidence> {
+    let multipliers = conflict.proof_multipliers()?;
+    let canonical_residual = conflict.canonical_residual()?;
+    let separation_margin = conflict.separation_margin()?;
+    if multipliers.len() != conflict.source_provenance().len() {
+        return None;
+    }
+    let relations = conflict
+        .source_provenance()
+        .iter()
+        .zip(multipliers)
+        .map(|(source, multiplier)| {
+            ConflictWitnessRelationEvidence::new(
+                CanonicalEvidenceSource::new(
+                    source.source_id().clone(),
+                    source.group_ids().to_vec(),
+                    source.semantic_role().clone(),
+                ),
+                *multiplier,
+            )
+        })
+        .collect();
+    Some(ConflictWitnessEvidence::new(
+        relations,
+        canonical_residual,
+        separation_margin,
+        0.0,
+        0.0,
+        conflict.provenance_verified(),
+        false,
+    ))
+}
+
+fn exact_target_separation(first: f64, second: f64) -> f64 {
+    let raw_margin = (second - first).abs();
+    if raw_margin.is_finite() {
+        raw_margin
+    } else {
+        let scale = first.abs().max(second.abs());
+        (second / scale - first / scale).abs()
+    }
+}
+
+fn verify_canonical_value_proof(relations: &[CanonicalValueProofRelation]) -> (f64, f64, bool) {
+    let mut combined = BTreeMap::<usize, f64>::new();
+    for relation in relations {
+        for (node, coefficient) in &relation.coefficients {
+            *combined.entry(*node).or_default() += relation.multiplier * coefficient;
+        }
+    }
+    let canonical_residual = combined
+        .values()
+        .map(|coefficient| coefficient.abs())
+        .fold(0.0_f64, f64::max);
+    let target_scale = relations
+        .iter()
+        .map(|relation| relation.target.abs())
+        .fold(1.0_f64, f64::max);
+    let normalized_separation = relations
+        .iter()
+        .map(|relation| relation.multiplier * (relation.target / target_scale))
+        .sum::<f64>()
+        .abs();
+    let raw_separation = normalized_separation * target_scale;
+    let separation_margin = if raw_separation.is_finite() {
+        raw_separation
+    } else {
+        normalized_separation
+    };
+    let provenance_verified = !relations.is_empty()
+        && canonical_residual == 0.0
+        && separation_margin.is_finite()
+        && separation_margin > 0.0;
+    (canonical_residual, separation_margin, provenance_verified)
+}
+
 fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitReport {
     FitReport {
         problem_size,
@@ -2005,6 +2162,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         attempts: Vec::new(),
         recovery_verification: None,
         direct_input_conflicts: Vec::new(),
+        conflict_witness: None,
         relation_graph_conflicts: Vec::new(),
         shared_level_set_relation_conflicts: Vec::new(),
         execution_failure: None,
@@ -3156,14 +3314,14 @@ impl EqualityLowering {
             if let Some((index, first_target)) = self.canonical_index_by_key.get(&key).copied() {
                 if first_target != normalized_target {
                     let first = &self.canonical_equalities[index];
-                    self.direct_input_conflicts
-                        .push(DirectInputConflictEvidence::new(
-                            first.provenance().source().clone(),
-                            equality.provenance().source().clone(),
-                            equality.provenance().semantic_role().clone(),
+                    self.direct_input_conflicts.push(
+                        DirectInputConflictEvidence::new_verified_same_lhs(
+                            public_canonical_evidence_source(first.provenance()),
+                            public_canonical_evidence_source(equality.provenance()),
                             first.target(),
                             equality.target(),
-                        ));
+                        ),
+                    );
                     self.direct_input_conflicts.sort_by(|left, right| {
                         left.semantic_role()
                             .cmp(right.semantic_role())
@@ -3251,7 +3409,7 @@ impl EqualityLowering {
         semantic_role: &SemanticRolePath,
     ) {
         let CanonicalValueEdgeOutcome::Conflict {
-            proof_source_ids,
+            proof_relations,
             proof_group_ids,
             first_absolute,
             second_absolute,
@@ -3259,15 +3417,34 @@ impl EqualityLowering {
         else {
             return;
         };
+        let (canonical_residual, separation_margin, provenance_verified) =
+            verify_canonical_value_proof(proof_relations);
         self.relation_graph_conflicts
             .push(RelationGraphConflictEvidence::new(
-                proof_source_ids.clone(),
-                proof_group_ids.clone(),
-                semantic_role.clone(),
-                first_absolute.source_id.clone(),
-                first_absolute.target,
-                second_absolute.source_id.clone(),
-                second_absolute.target,
+                RelationGraphConflictEvidenceParts {
+                    proof_relations: proof_relations
+                        .iter()
+                        .map(|relation| {
+                            ConflictWitnessRelationEvidence::new(
+                                CanonicalEvidenceSource::new(
+                                    relation.source.source_id.clone(),
+                                    relation.source.group_ids.clone(),
+                                    relation.source.semantic_role.clone(),
+                                ),
+                                relation.multiplier,
+                            )
+                        })
+                        .collect(),
+                    group_ids: proof_group_ids.clone(),
+                    semantic_role: semantic_role.clone(),
+                    first_absolute_source: first_absolute.source.source_id.clone(),
+                    first_absolute_target: first_absolute.target,
+                    second_absolute_source: second_absolute.source.source_id.clone(),
+                    second_absolute_target: second_absolute.target,
+                    canonical_residual,
+                    separation_margin,
+                    provenance_verified,
+                },
             ));
         self.relation_graph_conflicts.sort_by(|left, right| {
             left.semantic_role()
@@ -3303,14 +3480,22 @@ impl EqualityLowering {
                         } else {
                             (right, left)
                         };
-                        self.direct_input_conflicts
-                            .push(DirectInputConflictEvidence::new(
-                                first.source_id.clone(),
-                                second.source_id.clone(),
-                                second.semantic_role.clone(),
+                        self.direct_input_conflicts.push(
+                            DirectInputConflictEvidence::new_verified_same_lhs(
+                                CanonicalEvidenceSource::new(
+                                    first.source_id.clone(),
+                                    Vec::new(),
+                                    first.semantic_role.clone(),
+                                ),
+                                CanonicalEvidenceSource::new(
+                                    second.source_id.clone(),
+                                    Vec::new(),
+                                    second.semantic_role.clone(),
+                                ),
                                 first.bound,
                                 second.bound,
-                            ));
+                            ),
+                        );
                     }
                 }
             }
@@ -3327,30 +3512,37 @@ impl EqualityLowering {
                     };
                     if incompatible {
                         let equality_source = source_relation.equality.provenance().source();
+                        let equality_evidence =
+                            public_canonical_evidence_source(source_relation.equality.provenance());
+                        let fact_evidence = CanonicalEvidenceSource::new(
+                            fact.source_id.clone(),
+                            Vec::new(),
+                            fact.semantic_role.clone(),
+                        );
                         let (first_source, first_target, second_source, second_target) =
                             if equality_source <= &fact.source_id {
                                 (
-                                    equality_source.clone(),
+                                    equality_evidence,
                                     equality_target,
-                                    fact.source_id.clone(),
+                                    fact_evidence,
                                     fact.bound,
                                 )
                             } else {
                                 (
-                                    fact.source_id.clone(),
+                                    fact_evidence,
                                     fact.bound,
-                                    equality_source.clone(),
+                                    equality_evidence,
                                     equality_target,
                                 )
                             };
-                        self.direct_input_conflicts
-                            .push(DirectInputConflictEvidence::new(
+                        self.direct_input_conflicts.push(
+                            DirectInputConflictEvidence::new_verified_same_lhs(
                                 first_source,
                                 second_source,
-                                fact.semantic_role.clone(),
                                 first_target,
                                 second_target,
-                            ));
+                            ),
+                        );
                     }
                 }
             }
@@ -3398,7 +3590,22 @@ enum CanonicalValueNode {
 #[derive(Debug, Clone, PartialEq)]
 struct ComponentAbsoluteTarget {
     node: usize,
+    source: CanonicalValueRelationSource,
+    target: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CanonicalValueRelationSource {
     source_id: SourceId,
+    group_ids: Vec<GroupId>,
+    semantic_role: SemanticRolePath,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CanonicalValueProofRelation {
+    source: CanonicalValueRelationSource,
+    multiplier: f64,
+    coefficients: Vec<(usize, f64)>,
     target: f64,
 }
 
@@ -3406,6 +3613,7 @@ struct ComponentAbsoluteTarget {
 struct AbsoluteGroupProof {
     target: f64,
     source_ids: Vec<SourceId>,
+    source_multipliers: Vec<(SourceId, f64)>,
 }
 
 #[derive(Debug, Default)]
@@ -3415,7 +3623,7 @@ struct CanonicalValueConstraintForest {
     nodes: Vec<CanonicalValueNode>,
     parent: Vec<usize>,
     absolute_target: Vec<Option<ComponentAbsoluteTarget>>,
-    adjacency: Vec<Vec<(usize, SourceId)>>,
+    adjacency: Vec<Vec<(usize, CanonicalValueRelationSource)>>,
 }
 
 impl CanonicalValueConstraintForest {
@@ -3434,11 +3642,34 @@ impl CanonicalValueConstraintForest {
             .get(&CanonicalValueNode::Group(group_id.clone()))?;
         let root = self.root(node);
         let absolute = self.absolute_target[root].clone()?;
-        let mut source_ids = self.proof_source_ids(node, absolute.node);
-        source_ids.push(absolute.source_id);
+        let path = self.proof_path(node, absolute.node);
+        let mut source_multipliers = path
+            .windows(2)
+            .map(|nodes| {
+                let source = self.adjacency[nodes[0]]
+                    .iter()
+                    .find(|(neighbor, _)| *neighbor == nodes[1])
+                    .expect("the recovered proof path retains every edge source")
+                    .1
+                    .source_id
+                    .clone();
+                let multiplier = match (&self.nodes[nodes[0]], &self.nodes[nodes[1]]) {
+                    (CanonicalValueNode::Group(_), CanonicalValueNode::Support(_)) => -1.0,
+                    (CanonicalValueNode::Support(_), CanonicalValueNode::Group(_)) => 1.0,
+                    _ => return None,
+                };
+                Some((source, multiplier))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        source_multipliers.push((absolute.source.source_id.clone(), 1.0));
+        let source_ids = source_multipliers
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>();
         Some(AbsoluteGroupProof {
             target: absolute.target,
             source_ids,
+            source_multipliers,
         })
     }
 
@@ -3451,7 +3682,11 @@ impl CanonicalValueConstraintForest {
         self.add_equality_edge(
             CanonicalValueNode::Group(group_id.clone()),
             CanonicalValueNode::Support(canonical_support_bits(support)),
-            source_id,
+            CanonicalValueRelationSource {
+                source_id: source_id.clone(),
+                group_ids: vec![group_id.clone()],
+                semantic_role: SemanticRolePath::new("shared-level-set/member/value"),
+            },
         )
     }
 
@@ -3460,11 +3695,17 @@ impl CanonicalValueConstraintForest {
         support: [f64; 3],
         value: f64,
         source_id: &SourceId,
+        group_ids: Vec<GroupId>,
+        semantic_role: SemanticRolePath,
     ) -> CanonicalValueEdgeOutcome {
         self.add_absolute_target(
             CanonicalValueNode::Support(canonical_support_bits(support)),
             value,
-            source_id,
+            CanonicalValueRelationSource {
+                source_id: source_id.clone(),
+                group_ids,
+                semantic_role,
+            },
         )
     }
 
@@ -3473,11 +3714,16 @@ impl CanonicalValueConstraintForest {
         group_id: &GroupId,
         value: f64,
         source_id: &SourceId,
+        semantic_role: SemanticRolePath,
     ) -> CanonicalValueEdgeOutcome {
         self.add_absolute_target(
             CanonicalValueNode::Group(group_id.clone()),
             value,
-            source_id,
+            CanonicalValueRelationSource {
+                source_id: source_id.clone(),
+                group_ids: vec![group_id.clone()],
+                semantic_role,
+            },
         )
     }
 
@@ -3485,7 +3731,7 @@ impl CanonicalValueConstraintForest {
         &mut self,
         left: CanonicalValueNode,
         right: CanonicalValueNode,
-        source_id: &SourceId,
+        source: CanonicalValueRelationSource,
     ) -> CanonicalValueEdgeOutcome {
         let left = self.intern(left);
         let right = self.intern(right);
@@ -3499,20 +3745,14 @@ impl CanonicalValueConstraintForest {
         let both_sides_anchored = left_absolute.is_some() && right_absolute.is_some();
         if let (Some(left_absolute), Some(right_absolute)) = (&left_absolute, &right_absolute) {
             if left_absolute.target != right_absolute.target {
-                return self.equality_conflict(
-                    left,
-                    right,
-                    source_id,
-                    left_absolute,
-                    right_absolute,
-                );
+                return self.equality_conflict(left, right, &source, left_absolute, right_absolute);
             }
         }
         self.parent[right_root] = left_root;
         self.absolute_target[left_root] = left_absolute.or(right_absolute);
         self.absolute_target[right_root] = None;
-        self.adjacency[left].push((right, source_id.clone()));
-        self.adjacency[right].push((left, source_id.clone()));
+        self.adjacency[left].push((right, source.clone()));
+        self.adjacency[right].push((left, source));
         if both_sides_anchored {
             CanonicalValueEdgeOutcome::Redundant
         } else {
@@ -3524,7 +3764,7 @@ impl CanonicalValueConstraintForest {
         &mut self,
         node: CanonicalValueNode,
         target: f64,
-        source_id: &SourceId,
+        source: CanonicalValueRelationSource,
     ) -> CanonicalValueEdgeOutcome {
         let node = self.intern(node);
         let root = self.root(node);
@@ -3535,12 +3775,12 @@ impl CanonicalValueConstraintForest {
                 let first_absolute = existing.clone();
                 let second_absolute = ComponentAbsoluteTarget {
                     node,
-                    source_id: source_id.clone(),
+                    source,
                     target,
                 };
                 CanonicalValueEdgeOutcome::Conflict {
-                    proof_source_ids: self
-                        .absolute_conflict_source_ids(&first_absolute, &second_absolute),
+                    proof_relations: self
+                        .absolute_conflict_relations(&first_absolute, &second_absolute),
                     proof_group_ids: self.proof_group_ids(first_absolute.node, node),
                     first_absolute,
                     second_absolute,
@@ -3549,7 +3789,7 @@ impl CanonicalValueConstraintForest {
         }
         self.absolute_target[root] = Some(ComponentAbsoluteTarget {
             node,
-            source_id: source_id.clone(),
+            source,
             target,
         });
         CanonicalValueEdgeOutcome::Independent
@@ -3578,52 +3818,106 @@ impl CanonicalValueConstraintForest {
         root
     }
 
-    fn proof_source_ids(&self, start: usize, end: usize) -> Vec<SourceId> {
+    fn proof_relations(&self, start: usize, end: usize) -> Vec<CanonicalValueProofRelation> {
         let path = self.proof_path(start, end);
         path.windows(2)
             .map(|nodes| {
-                self.adjacency[nodes[0]]
+                let source = self.adjacency[nodes[0]]
                     .iter()
                     .find(|(neighbor, _)| *neighbor == nodes[1])
                     .expect("the recovered proof path retains every edge source")
                     .1
-                    .clone()
+                    .clone();
+                let path_multiplier = match (&self.nodes[nodes[0]], &self.nodes[nodes[1]]) {
+                    (CanonicalValueNode::Group(_), CanonicalValueNode::Support(_)) => -1.0,
+                    (CanonicalValueNode::Support(_), CanonicalValueNode::Group(_)) => 1.0,
+                    _ => unreachable!("value graph edges connect groups and supports"),
+                };
+                let multiplier = -path_multiplier;
+                CanonicalValueProofRelation {
+                    source,
+                    multiplier,
+                    coefficients: self.edge_coefficients(nodes[0], nodes[1]),
+                    target: 0.0,
+                }
             })
             .collect()
     }
 
-    fn absolute_conflict_source_ids(
+    fn absolute_conflict_relations(
         &self,
         first: &ComponentAbsoluteTarget,
         second: &ComponentAbsoluteTarget,
-    ) -> Vec<SourceId> {
-        let mut sources = vec![first.source_id.clone()];
-        sources.extend(self.proof_source_ids(first.node, second.node));
-        sources.push(second.source_id.clone());
-        sources
+    ) -> Vec<CanonicalValueProofRelation> {
+        let mut relations = vec![CanonicalValueProofRelation {
+            source: first.source.clone(),
+            multiplier: 1.0,
+            coefficients: vec![(first.node, 1.0)],
+            target: first.target,
+        }];
+        relations.extend(self.proof_relations(first.node, second.node));
+        relations.push(CanonicalValueProofRelation {
+            source: second.source.clone(),
+            multiplier: -1.0,
+            coefficients: vec![(second.node, 1.0)],
+            target: second.target,
+        });
+        relations
     }
 
     fn equality_conflict(
         &self,
         left: usize,
         right: usize,
-        closing_source: &SourceId,
+        closing_source: &CanonicalValueRelationSource,
         left_absolute: &ComponentAbsoluteTarget,
         right_absolute: &ComponentAbsoluteTarget,
     ) -> CanonicalValueEdgeOutcome {
-        let mut proof_source_ids = vec![left_absolute.source_id.clone()];
-        proof_source_ids.extend(self.proof_source_ids(left_absolute.node, left));
-        proof_source_ids.push(closing_source.clone());
-        proof_source_ids.extend(self.proof_source_ids(right, right_absolute.node));
-        proof_source_ids.push(right_absolute.source_id.clone());
+        let mut proof_relations = vec![CanonicalValueProofRelation {
+            source: left_absolute.source.clone(),
+            multiplier: 1.0,
+            coefficients: vec![(left_absolute.node, 1.0)],
+            target: left_absolute.target,
+        }];
+        proof_relations.extend(self.proof_relations(left_absolute.node, left));
+        let closing_path_multiplier = match (&self.nodes[left], &self.nodes[right]) {
+            (CanonicalValueNode::Group(_), CanonicalValueNode::Support(_)) => -1.0,
+            (CanonicalValueNode::Support(_), CanonicalValueNode::Group(_)) => 1.0,
+            _ => unreachable!("value graph edges connect groups and supports"),
+        };
+        proof_relations.push(CanonicalValueProofRelation {
+            source: closing_source.clone(),
+            multiplier: -closing_path_multiplier,
+            coefficients: self.edge_coefficients(left, right),
+            target: 0.0,
+        });
+        proof_relations.extend(self.proof_relations(right, right_absolute.node));
+        proof_relations.push(CanonicalValueProofRelation {
+            source: right_absolute.source.clone(),
+            multiplier: -1.0,
+            coefficients: vec![(right_absolute.node, 1.0)],
+            target: right_absolute.target,
+        });
 
         let mut proof_nodes = self.proof_path(left_absolute.node, left);
         proof_nodes.extend(self.proof_path(right, right_absolute.node));
         CanonicalValueEdgeOutcome::Conflict {
-            proof_source_ids,
+            proof_relations,
             proof_group_ids: self.group_ids(proof_nodes),
             first_absolute: left_absolute.clone(),
             second_absolute: right_absolute.clone(),
+        }
+    }
+
+    fn edge_coefficients(&self, left: usize, right: usize) -> Vec<(usize, f64)> {
+        match (&self.nodes[left], &self.nodes[right]) {
+            (CanonicalValueNode::Group(_), CanonicalValueNode::Support(_)) => {
+                vec![(left, -1.0), (right, 1.0)]
+            }
+            (CanonicalValueNode::Support(_), CanonicalValueNode::Group(_)) => {
+                vec![(left, 1.0), (right, -1.0)]
+            }
+            _ => unreachable!("value graph edges connect groups and supports"),
         }
     }
 
@@ -3675,7 +3969,7 @@ enum CanonicalValueEdgeOutcome {
     Independent,
     Redundant,
     Conflict {
-        proof_source_ids: Vec<SourceId>,
+        proof_relations: Vec<CanonicalValueProofRelation>,
         proof_group_ids: Vec<GroupId>,
         first_absolute: ComponentAbsoluteTarget,
         second_absolute: ComponentAbsoluteTarget,
@@ -3897,9 +4191,16 @@ fn shared_level_set_relation_conflicts(
         if !seen.insert(source_ids.clone()) {
             continue;
         }
-        conflicts.push(SharedLevelSetRelationConflictEvidence::new(
-            source_provenance,
-        ));
+        let separation_margin = proof
+            .iter()
+            .map(|index| edges[*index].minimum_difference)
+            .sum();
+        conflicts.push(
+            SharedLevelSetRelationConflictEvidence::new_with_canonical_witness(
+                source_provenance,
+                separation_margin,
+            ),
+        );
     }
     conflicts.sort_by(|left, right| {
         left.source_ids()
@@ -3945,8 +4246,8 @@ fn absolute_shared_level_set_relation_conflicts(
                 continue;
             }
             let mut source_ids = lower_absolute.source_ids.clone();
-            for edge_index in edge_path {
-                let edge = &edges[edge_index];
+            for edge_index in &edge_path {
+                let edge = &edges[*edge_index];
                 source_ids.push(edge.source_id.clone());
             }
             source_ids.extend(upper_absolute.source_ids.iter().cloned());
@@ -3955,18 +4256,43 @@ fn absolute_shared_level_set_relation_conflicts(
             if !seen.insert(source_ids.clone()) {
                 continue;
             }
-            let source_provenance = source_ids
-                .iter()
-                .map(|source_id| {
-                    provenance_by_source
-                        .get(source_id)
-                        .cloned()
-                        .expect("every absolute relation proof source retains original provenance")
+            let mut multipliers = BTreeMap::<SourceId, f64>::new();
+            for (source, multiplier) in &lower_absolute.source_multipliers {
+                *multipliers.entry(source.clone()).or_default() -= multiplier;
+            }
+            for edge_index in &edge_path {
+                *multipliers
+                    .entry(edges[*edge_index].source_id.clone())
+                    .or_default() += 1.0;
+            }
+            for (source, multiplier) in &upper_absolute.source_multipliers {
+                *multipliers.entry(source.clone()).or_default() += multiplier;
+            }
+            let source_provenance = multipliers
+                .into_iter()
+                .filter(|(_, multiplier)| *multiplier != 0.0)
+                .map(|(source_id, multiplier)| {
+                    (
+                        provenance_by_source.get(&source_id).cloned().expect(
+                            "every absolute relation proof source retains original provenance",
+                        ),
+                        multiplier,
+                    )
                 })
                 .collect();
-            conflicts.push(SharedLevelSetRelationConflictEvidence::new(
-                source_provenance,
-            ));
+            let raw_margin = minimum_difference - (upper_absolute.target - lower_absolute.target);
+            let separation_margin = if raw_margin.is_finite() {
+                raw_margin
+            } else {
+                f64::MAX
+            };
+            conflicts.push(
+                SharedLevelSetRelationConflictEvidence::new_with_verified_source_multipliers(
+                    source_provenance,
+                    separation_margin,
+                    0.0,
+                ),
+            );
         }
     }
     conflicts.sort_by(|left, right| {
@@ -4063,6 +4389,8 @@ fn preflight_shared_level_set_relation_conflicts(
                     observation.support,
                     observation.target,
                     &observation.source_id,
+                    observation.group_id.iter().cloned().collect(),
+                    observation.semantic_role.clone(),
                 );
             }
         }
@@ -4083,10 +4411,17 @@ fn preflight_shared_level_set_relation_conflicts(
                     point.components(),
                     gauge.value(),
                     gauge.source_id(),
+                    Vec::new(),
+                    SemanticRolePath::new("additive-field-gauge/point"),
                 );
             }
             AdditiveFieldGaugeReference::LevelSet(group_id) => {
-                value_constraints.add_absolute_group(group_id, gauge.value(), gauge.source_id());
+                value_constraints.add_absolute_group(
+                    group_id,
+                    gauge.value(),
+                    gauge.source_id(),
+                    SemanticRolePath::new("additive-field-gauge/level-set"),
+                );
             }
         }
     }
@@ -4116,6 +4451,7 @@ struct HardAffineValueEdge {
     from: AffineValueNode,
     to: AffineValueNode,
     minimum_difference: ExactDyadic,
+    canonical_multiplier: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4202,6 +4538,25 @@ impl ExactDyadic {
         !self.negative && !self.magnitude.is_empty()
     }
 
+    fn saturating_f64_magnitude(&self) -> f64 {
+        let Some((limb_index, highest_limb)) =
+            self.magnitude.iter().copied().enumerate().next_back()
+        else {
+            return 0.0;
+        };
+        let highest_bit = 63 - highest_limb.leading_zeros() as i32;
+        let exponent = limb_index as i32 * 64 + highest_bit - 1074;
+        let significand = highest_limb as f64 / 2.0_f64.powi(highest_bit);
+        let magnitude = significand * 2.0_f64.powi(exponent);
+        if magnitude.is_infinite() {
+            f64::MAX
+        } else if magnitude == 0.0 {
+            f64::from_bits(1)
+        } else {
+            magnitude
+        }
+    }
+
     fn normalized(negative: bool, mut magnitude: Vec<u64>) -> Self {
         while magnitude.last() == Some(&0) {
             magnitude.pop();
@@ -4282,6 +4637,7 @@ fn canonical_affine_value_cycle_conflict(
                 from: edge.to.clone(),
                 to: edge.from.clone(),
                 minimum_difference: edge.minimum_difference.negated(),
+                canonical_multiplier: -edge.canonical_multiplier,
             };
             [edge, reverse]
         })
@@ -4312,20 +4668,40 @@ fn canonical_affine_value_cycle_conflict(
         .into_iter()
         .collect::<Vec<_>>();
     let proof_edges = positive_canonical_affine_cycle(&edges, &nodes, &issue_33_sources)?;
-    let source_provenance = proof_edges
-        .into_iter()
-        .map(|edge_index| {
-            let edge = &edges[edge_index];
-            SharedLevelSetConflictSourceEvidence::new(
-                edge.provenance.source().clone(),
-                edge.provenance.groups().to_vec(),
-                edge.provenance.semantic_role().clone(),
+    let mut multipliers = BTreeMap::<SourceId, (UsageProvenance, f64)>::new();
+    let exact_separation = proof_edges
+        .iter()
+        .map(|edge_index| &edges[*edge_index].minimum_difference)
+        .fold(ExactDyadic::zero(), |sum, difference| sum.add(difference));
+    let separation_margin = exact_separation.saturating_f64_magnitude();
+    for edge_index in proof_edges {
+        let edge = &edges[edge_index];
+        let entry = multipliers
+            .entry(edge.provenance.source().clone())
+            .or_insert_with(|| (edge.provenance.clone(), 0.0));
+        entry.1 += edge.canonical_multiplier;
+    }
+    let source_provenance = multipliers
+        .into_values()
+        .filter(|(_, multiplier)| *multiplier != 0.0)
+        .map(|(provenance, multiplier)| {
+            (
+                SharedLevelSetConflictSourceEvidence::new(
+                    provenance.source().clone(),
+                    provenance.groups().to_vec(),
+                    provenance.semantic_role().clone(),
+                ),
+                multiplier,
             )
         })
         .collect();
-    Some(SharedLevelSetRelationConflictEvidence::new(
-        source_provenance,
-    ))
+    Some(
+        SharedLevelSetRelationConflictEvidence::new_with_verified_source_multipliers(
+            source_provenance,
+            separation_margin,
+            0.0,
+        ),
+    )
 }
 
 fn canonical_exact_value_edge(
@@ -4346,6 +4722,7 @@ fn canonical_exact_value_edge(
         from,
         to,
         minimum_difference: ExactDyadic::from_f64(equality.target()),
+        canonical_multiplier: -1.0,
     })
 }
 
@@ -4373,6 +4750,7 @@ fn canonical_affine_value_edge(
         from,
         to,
         minimum_difference: ExactDyadic::from_f64(multiplier * inequality.bound()),
+        canonical_multiplier: -multiplier,
     })
 }
 
@@ -4643,6 +5021,8 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                         observation.support,
                         observation.target,
                         &observation.source_id,
+                        observation.group_id.iter().cloned().collect(),
+                        observation.semantic_role.clone(),
                     )
                 });
             if let Some(edge) = &edge {
@@ -5116,6 +5496,8 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     point.components(),
                     gauge.value(),
                     gauge.source_id(),
+                    Vec::new(),
+                    role.clone(),
                 );
                 lowering.record_graph_conflict(&edge, &role);
                 let participation = if participation
@@ -5144,6 +5526,7 @@ fn lower_snapshot(snapshot: &ProblemSnapshot) -> EqualityLowering {
                     group_id,
                     gauge.value(),
                     gauge.source_id(),
+                    role.clone(),
                 );
                 lowering.record_graph_conflict(&edge, &role);
                 let participation = if participation
@@ -5244,31 +5627,40 @@ fn record_direct_bound_conflicts(
                     CanonicalInequalitySense::Upper => absolute.target > fact.bound,
                 };
                 if incompatible {
+                    let absolute_evidence = CanonicalEvidenceSource::new(
+                        absolute.source.source_id.clone(),
+                        absolute.source.group_ids.clone(),
+                        absolute.source.semantic_role.clone(),
+                    );
+                    let fact_evidence = CanonicalEvidenceSource::new(
+                        fact.source_id.clone(),
+                        Vec::new(),
+                        fact.semantic_role.clone(),
+                    );
                     let (first_source, first_target, second_source, second_target) =
-                        if absolute.source_id <= fact.source_id {
+                        if absolute.source.source_id <= fact.source_id {
                             (
-                                absolute.source_id.clone(),
+                                absolute_evidence,
                                 absolute.target,
-                                fact.source_id.clone(),
+                                fact_evidence,
                                 fact.bound,
                             )
                         } else {
                             (
-                                fact.source_id.clone(),
+                                fact_evidence,
                                 fact.bound,
-                                absolute.source_id.clone(),
+                                absolute_evidence,
                                 absolute.target,
                             )
                         };
-                    lowering
-                        .direct_input_conflicts
-                        .push(DirectInputConflictEvidence::new(
+                    lowering.direct_input_conflicts.push(
+                        DirectInputConflictEvidence::new_verified_same_lhs(
                             first_source,
                             second_source,
-                            fact.semantic_role.clone(),
                             first_target,
                             second_target,
-                        ));
+                        ),
+                    );
                 }
             }
         }
@@ -5293,10 +5685,17 @@ fn push_direct_bound_conflict(
     };
     lowering
         .direct_input_conflicts
-        .push(DirectInputConflictEvidence::new(
-            first.source_id.clone(),
-            second.source_id.clone(),
-            second.semantic_role.clone(),
+        .push(DirectInputConflictEvidence::new_verified_same_lhs(
+            CanonicalEvidenceSource::new(
+                first.source_id.clone(),
+                Vec::new(),
+                first.semantic_role.clone(),
+            ),
+            CanonicalEvidenceSource::new(
+                second.source_id.clone(),
+                Vec::new(),
+                second.semantic_role.clone(),
+            ),
             first.bound,
             second.bound,
         ));
@@ -5704,6 +6103,7 @@ fn success_report_qp(
         attempts: public_qp_attempts(&qp.attempts),
         recovery_verification: None,
         direct_input_conflicts: Vec::new(),
+        conflict_witness: None,
         relation_graph_conflicts: Vec::new(),
         shared_level_set_relation_conflicts: Vec::new(),
         execution_failure: None,
@@ -6097,6 +6497,7 @@ fn success_report(
         attempts,
         recovery_verification: None,
         direct_input_conflicts: Vec::new(),
+        conflict_witness: None,
         relation_graph_conflicts: Vec::new(),
         shared_level_set_relation_conflicts: Vec::new(),
         execution_failure: None,
@@ -6390,6 +6791,13 @@ fn failure_report(
     source_relations: &[SourceHardRelation],
 ) -> FitReport {
     match failure {
+        CubicEqualityFailure::DirectInputConflict {
+            evidence,
+            representation,
+        } => {
+            report.cubic_analysis = Some(public_cubic_analysis(representation));
+            report.conflict_witness = Some(public_hard_conflict_witness(evidence));
+        }
         CubicEqualityFailure::Backend {
             failure,
             representation,
@@ -7473,6 +7881,7 @@ fn diagnose(failure: &CubicEqualityFailure) -> ProblemDiagnosis {
         | CubicEqualityFailure::AffineInequalityRequiresConvexQp
         | CubicEqualityFailure::NonFiniteTarget { .. } => ProblemDiagnosis::InvalidProblem,
         CubicEqualityFailure::Representation(failure) => diagnose_representation(failure),
+        CubicEqualityFailure::DirectInputConflict { .. } => ProblemDiagnosis::DirectInputConflict,
         CubicEqualityFailure::Backend { failure, .. } => diagnose_kkt(failure),
         CubicEqualityFailure::RecoveryVerification { .. } => {
             ProblemDiagnosis::RecoveryVerificationFailure
@@ -7574,6 +7983,7 @@ fn qp_failure_report(
         }
         CubicExecutionFailure::ValidatedInfeasible { evidence, attempts } => {
             report.infeasibility_certificate = Some(public_infeasibility_certificate(evidence));
+            report.conflict_witness = Some(public_infeasibility_witness(evidence));
             report.attempts = public_qp_attempts(attempts);
             if let Some(last) = attempts.last() {
                 report.backend_fingerprint = Some(public_qp_backend_fingerprint(&last.backend));
@@ -7678,11 +8088,69 @@ fn public_infeasibility_certificate(
         recovery_round_trip_error: evidence.recovery_round_trip_error,
         provenance_verified: evidence.provenance_verified,
         sources: evidence
+            .witness_relations
+            .iter()
+            .flat_map(|relation| relation.source_provenances.iter())
+            .map(public_canonical_evidence_source)
+            .collect(),
+        backend_invoked: true,
+    })
+}
+
+fn public_infeasibility_witness(
+    evidence: &ValidatedInfeasibilityEvidence,
+) -> ConflictWitnessEvidence {
+    ConflictWitnessEvidence::new_with_sources(ConflictWitnessEvidenceParts {
+        relations: evidence
+            .witness_relations
+            .iter()
+            .map(|relation| {
+                ConflictWitnessRelationEvidence::new(
+                    public_canonical_evidence_source(&relation.provenance),
+                    relation.multiplier,
+                )
+            })
+            .collect(),
+        sources: evidence
+            .witness_relations
+            .iter()
+            .flat_map(|relation| relation.source_provenances.iter())
+            .map(public_canonical_evidence_source)
+            .collect(),
+        canonical_residual: evidence.stationarity_residual,
+        separation_margin: evidence.separation_margin,
+        residual_limit: evidence.residual_limit,
+        separation_limit: evidence.separation_limit,
+        provenance_verified: evidence.provenance_verified,
+        backend_invoked: true,
+    })
+}
+
+fn public_hard_conflict_witness(
+    evidence: &crate::cubic_solver_form::CanonicalHardConflictWitness,
+) -> ConflictWitnessEvidence {
+    ConflictWitnessEvidence::new_with_sources(ConflictWitnessEvidenceParts {
+        relations: evidence
+            .relations
+            .iter()
+            .map(|relation| {
+                ConflictWitnessRelationEvidence::new(
+                    public_canonical_evidence_source(&relation.provenance),
+                    relation.multiplier,
+                )
+            })
+            .collect(),
+        sources: evidence
             .sources
             .iter()
             .map(public_canonical_evidence_source)
             .collect(),
-        backend_invoked: true,
+        canonical_residual: evidence.canonical_residual,
+        separation_margin: evidence.separation_margin,
+        residual_limit: 0.0,
+        separation_limit: 0.0,
+        provenance_verified: true,
+        backend_invoked: false,
     })
 }
 
@@ -7770,6 +8238,17 @@ mod tests {
         SharedLevelSetBuilder, StratigraphicFieldDirection, YoungerThan,
     };
     use crate::{Point3, ProblemBuilder};
+
+    #[test]
+    fn exact_affine_cycle_margin_survives_floating_cancellation() {
+        let exact = [1.0e16, 1.0, -1.0e16]
+            .into_iter()
+            .map(ExactDyadic::from_f64)
+            .fold(ExactDyadic::zero(), |sum, value| sum.add(&value));
+
+        assert!(exact.is_positive());
+        assert_eq!(exact.saturating_f64_magnitude(), 1.0);
+    }
 
     fn injectable_snapshot() -> ProblemSnapshot {
         let mut builder = ProblemBuilder::new(
@@ -8246,6 +8725,7 @@ mod tests {
 
         assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
         assert!(failure.report().infeasibility_certificate().is_none());
+        assert!(failure.report().conflict_witness().is_none());
         assert_eq!(failure.report().attempts().len(), 2);
         assert!(failure.report().attempts().iter().all(|attempt| {
             attempt.certificate_present()
@@ -8264,6 +8744,7 @@ mod tests {
 
         assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
         assert!(failure.report().infeasibility_certificate().is_none());
+        assert!(failure.report().conflict_witness().is_none());
         assert_eq!(failure.report().attempts().len(), 2);
         assert!(failure.report().attempts().iter().all(|attempt| {
             attempt.certificate_present()
@@ -8365,6 +8846,7 @@ mod tests {
         assert!(failure.report().canonical_acceptance().is_none());
         assert!(failure.report().infeasibility_certificate().is_none());
         assert!(failure.report().recession_ray().is_none());
+        assert!(failure.report().conflict_witness().is_none());
         assert_eq!(failure.report().attempts().len(), 2);
         assert!(failure.report().attempts().iter().all(|attempt| {
             attempt.termination() == SolveAttemptTermination::LimitReached
