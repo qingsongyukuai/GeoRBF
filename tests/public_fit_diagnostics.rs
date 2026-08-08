@@ -1,6 +1,6 @@
 use georbf::diagnostics::{
-    ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidenceDomain,
-    SolveAttemptTermination,
+    CubicPrecisionRescueConclusion, ProblemDiagnosis, RankDecision, RankDeficiencyConcept,
+    RankEvidenceDomain, SolveAttemptTermination,
 };
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
 use georbf::observation::{
@@ -198,6 +198,54 @@ fn solve_attempt_termination_does_not_encode_canonical_acceptance() {
         attempt.termination() == SolveAttemptTermination::CandidateProduced
             && attempt.failure_reason().is_none()
     }));
+}
+
+#[test]
+fn public_fit_rescues_a_small_positive_pi1_mode_and_recovers_every_source() {
+    let mut builder = problem_builder();
+    let observations = [
+        ("origin", point(0.0, 0.0, 0.0), 1.0),
+        ("east", point(1.0, 0.0, 0.0), 2.0),
+        ("north", point(0.0, 1.0, 0.0), 3.0),
+        ("thin-up", point(0.0, 0.0, 2.0e-13), 1.0 + 6.0e-13),
+    ];
+    for (source, location, value) in observations {
+        builder
+            .add(FieldValueObservation::try_new(SourceId::new(source), location, value).unwrap())
+            .unwrap();
+    }
+
+    let success = builder
+        .build()
+        .unwrap()
+        .fit()
+        .expect("bounded precision rescue proves the thin positive Pi1 mode");
+    let analysis = success
+        .report()
+        .cubic_analysis()
+        .expect("a successful Cubic fit publishes representation evidence");
+    let rescue = analysis
+        .polynomial_precision_rescue()
+        .expect("the actual Pi1 upgrade is recorded");
+    assert_eq!(rescue.first_mode(), 0);
+    assert_eq!(rescue.mode_count(), 4);
+    assert_eq!(rescue.precision_bits(), 106);
+    assert_eq!(
+        rescue.conclusion(),
+        CubicPrecisionRescueConclusion::Positive
+    );
+    assert_eq!(success.report().hard_relations().len(), observations.len());
+    assert!(
+        success
+            .report()
+            .hard_relations()
+            .iter()
+            .all(|relation| { relation.residual().abs() <= relation.tolerance() })
+    );
+
+    let query = point(0.25, 0.25, 0.5e-13);
+    let sample = success.model().evaluate(query).unwrap();
+    assert!((sample.value() - (1.0 + 0.25 + 0.5 + 1.5e-13)).abs() <= 1.0e-9);
 }
 
 #[test]

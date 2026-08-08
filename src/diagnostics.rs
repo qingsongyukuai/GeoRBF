@@ -717,6 +717,7 @@ pub struct CubicQuotientFactorizationEvidence {
     kernel_ridge_applied: bool,
     gram_jitter_applied: bool,
     mode_truncation_applied: bool,
+    precision_rescue: Option<CubicPrecisionRescueEvidence>,
 }
 
 pub(crate) struct CubicQuotientFactorizationEvidenceParts {
@@ -734,6 +735,7 @@ pub(crate) struct CubicQuotientFactorizationEvidenceParts {
     pub(crate) kernel_ridge_applied: bool,
     pub(crate) gram_jitter_applied: bool,
     pub(crate) mode_truncation_applied: bool,
+    pub(crate) precision_rescue: Option<CubicPrecisionRescueEvidence>,
 }
 
 impl CubicQuotientFactorizationEvidence {
@@ -753,6 +755,7 @@ impl CubicQuotientFactorizationEvidence {
             kernel_ridge_applied: parts.kernel_ridge_applied,
             gram_jitter_applied: parts.gram_jitter_applied,
             mode_truncation_applied: parts.mode_truncation_applied,
+            precision_rescue: parts.precision_rescue,
         }
     }
 
@@ -825,6 +828,92 @@ impl CubicQuotientFactorizationEvidence {
     pub fn mode_truncation_applied(&self) -> bool {
         self.mode_truncation_applied
     }
+
+    /// Returns the bounded upgrade performed for an ambiguous Schur block.
+    pub fn precision_rescue(&self) -> Option<CubicPrecisionRescueEvidence> {
+        self.precision_rescue
+    }
+}
+
+/// Outcome of a bounded approximately 106-bit representation rescue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CubicPrecisionRescueConclusion {
+    /// Every upgraded mode was proved strictly positive.
+    Positive,
+    /// A reconstructible canonical algebraic zero was proved.
+    AlgebraicZero,
+    /// The upgraded Schur block contained negative curvature.
+    NegativeCurvature,
+    /// The upgraded interval still could not be separated from zero.
+    NumericalDecisionGrayZone,
+    /// More than the policy's 64-mode bound required upgrading.
+    CapacityExceeded,
+}
+
+impl From<crate::precision_rescue::PrecisionRescueConclusion> for CubicPrecisionRescueConclusion {
+    fn from(conclusion: crate::precision_rescue::PrecisionRescueConclusion) -> Self {
+        match conclusion {
+            crate::precision_rescue::PrecisionRescueConclusion::Positive => Self::Positive,
+            crate::precision_rescue::PrecisionRescueConclusion::AlgebraicZero => {
+                Self::AlgebraicZero
+            }
+            crate::precision_rescue::PrecisionRescueConclusion::NegativeCurvature => {
+                Self::NegativeCurvature
+            }
+            crate::precision_rescue::PrecisionRescueConclusion::GrayZone => {
+                Self::NumericalDecisionGrayZone
+            }
+            crate::precision_rescue::PrecisionRescueConclusion::CapacityExceeded => {
+                Self::CapacityExceeded
+            }
+        }
+    }
+}
+
+/// Auditable range, precision, and conclusion of one bounded rescue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CubicPrecisionRescueEvidence {
+    first_mode: usize,
+    mode_count: usize,
+    precision_bits: u32,
+    conclusion: CubicPrecisionRescueConclusion,
+}
+
+impl CubicPrecisionRescueEvidence {
+    pub(crate) fn new(
+        first_mode: usize,
+        mode_count: usize,
+        precision_bits: u32,
+        conclusion: CubicPrecisionRescueConclusion,
+    ) -> Self {
+        Self {
+            first_mode,
+            mode_count,
+            precision_bits,
+            conclusion,
+        }
+    }
+
+    /// Returns the first factorization-order mode in the upgraded block.
+    pub fn first_mode(self) -> usize {
+        self.first_mode
+    }
+
+    /// Returns the complete number of modes submitted to rescue.
+    pub fn mode_count(self) -> usize {
+        self.mode_count
+    }
+
+    /// Returns the arithmetic precision used by the bounded rescue.
+    pub fn precision_bits(self) -> u32 {
+        self.precision_bits
+    }
+
+    /// Returns the semantic conclusion reached after upgrading.
+    pub fn conclusion(self) -> CubicPrecisionRescueConclusion {
+        self.conclusion
+    }
 }
 
 /// Complete Cubic representation analysis retained by a successful fit.
@@ -840,6 +929,7 @@ pub struct CubicAnalysisEvidence {
     polynomial_svd_ratio: f64,
     polynomial_rank_reject_ratio: f64,
     polynomial_rank_accept_ratio: f64,
+    polynomial_precision_rescue: Option<CubicPrecisionRescueEvidence>,
     null_space_defect: f64,
     reduced_symmetry_defect: f64,
     reduced_symmetry_defect_limit: f64,
@@ -861,6 +951,7 @@ pub(crate) struct CubicAnalysisEvidenceParts {
     pub(crate) polynomial_svd_ratio: f64,
     pub(crate) polynomial_rank_reject_ratio: f64,
     pub(crate) polynomial_rank_accept_ratio: f64,
+    pub(crate) polynomial_precision_rescue: Option<CubicPrecisionRescueEvidence>,
     pub(crate) null_space_defect: f64,
     pub(crate) reduced_symmetry_defect: f64,
     pub(crate) reduced_symmetry_defect_limit: f64,
@@ -884,6 +975,7 @@ impl CubicAnalysisEvidence {
             polynomial_svd_ratio: parts.polynomial_svd_ratio,
             polynomial_rank_reject_ratio: parts.polynomial_rank_reject_ratio,
             polynomial_rank_accept_ratio: parts.polynomial_rank_accept_ratio,
+            polynomial_precision_rescue: parts.polynomial_precision_rescue,
             null_space_defect: parts.null_space_defect,
             reduced_symmetry_defect: parts.reduced_symmetry_defect,
             reduced_symmetry_defect_limit: parts.reduced_symmetry_defect_limit,
@@ -943,6 +1035,11 @@ impl CubicAnalysisEvidence {
     /// Returns the rank-acceptance ratio boundary.
     pub fn polynomial_rank_accept_ratio(&self) -> f64 {
         self.polynomial_rank_accept_ratio
+    }
+
+    /// Returns the bounded upgrade used to classify the complete Pi1 pairing.
+    pub fn polynomial_precision_rescue(&self) -> Option<CubicPrecisionRescueEvidence> {
+        self.polynomial_precision_rescue
     }
 
     /// Returns the null-space reconstruction defect.
@@ -1013,6 +1110,8 @@ pub enum RankEvidenceDomain {
 pub enum RankDeficiencyConcept {
     /// A mode in Cubic's complete affine polynomial space was not identified.
     CubicPi1FieldMode,
+    /// A canonical Cubic quotient field mode had algebraically zero energy.
+    CubicQuotientFieldMode,
 }
 
 /// Proof that a rank loss was interpreted in canonical field semantics.
@@ -1700,12 +1799,23 @@ pub enum AnalysisFailureEvidence {
     },
     /// Null-space construction workspace could not be allocated.
     NullSpaceWorkspaceAllocation,
+    /// Complete-Pi1 classification remained unresolved after bounded rescue.
+    PolynomialPrecisionRescue {
+        rescue: CubicPrecisionRescueEvidence,
+        backend_invoked: bool,
+    },
     /// An f64 quotient LLT pivot requires the bounded precision-rescue stage
     /// before it can be classified.
     QuotientPivotRequiresPrecisionRescue {
         quotient_dimension: usize,
         pivot_index: usize,
         interval: Option<CubicLltPivotInterval>,
+        backend_invoked: bool,
+    },
+    /// Bounded double-double rescue completed without a positive or algebraic-zero proof.
+    QuotientPrecisionRescue {
+        quotient_dimension: usize,
+        rescue: CubicPrecisionRescueEvidence,
         backend_invoked: bool,
     },
     /// A quotient LLT pivot was reliably non-positive in f64. This is a

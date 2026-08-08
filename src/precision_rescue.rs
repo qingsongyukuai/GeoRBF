@@ -42,6 +42,10 @@ impl DoubleDouble {
         self.high < 0.0 || (self.high == 0.0 && self.low < 0.0)
     }
 
+    pub(crate) fn to_f64(self) -> f64 {
+        self.high + self.low
+    }
+
     pub(crate) fn sqrt(self) -> Self {
         if self.is_zero() {
             return Self::from(0.0);
@@ -183,6 +187,40 @@ pub(crate) fn cubic_pairing_dd(
     pairing
 }
 
+pub(crate) fn cubic_pairing_dd_certified(
+    left: &CanonicalFunctional,
+    right: &CanonicalFunctional,
+    metric: &GlobalAnisotropyMetric,
+) -> CertifiedDoubleDouble {
+    let mut pairing = DoubleDouble::from(0.0);
+    let mut absolute_scale = 0.0;
+    let mut operations = 0;
+    for left_term in left.terms() {
+        for right_term in right.terms() {
+            let jet = cubic_jet_dd(left_term.support(), right_term.support(), metric.matrix());
+            let left_value = DoubleDouble::from(left_term.value_coefficient());
+            let right_value = DoubleDouble::from(right_term.value_coefficient());
+            let left_gradient = left_term.gradient_coefficient().map(DoubleDouble::from);
+            let right_gradient = right_term.gradient_coefficient().map(DoubleDouble::from);
+            let contributions = [
+                left_value * right_value * jet.value,
+                left_value * dot_dd(right_gradient, jet.gradient_y),
+                right_value * dot_dd(left_gradient, jet.gradient_x),
+                dot_dd(
+                    left_gradient,
+                    matrix_vector_dd(jet.mixed_xy, right_gradient),
+                ),
+            ];
+            for contribution in contributions {
+                pairing += contribution;
+                absolute_scale += contribution.to_f64().abs();
+                operations += 8;
+            }
+        }
+    }
+    CertifiedDoubleDouble::new(pairing, absolute_scale, operations)
+}
+
 fn cubic_jet_dd(x: [f64; 3], y: [f64; 3], metric: [[f64; 3]; 3]) -> DoubleDoubleCubicJet {
     let delta =
         std::array::from_fn(|axis| DoubleDouble::from(x[axis]) - DoubleDouble::from(y[axis]));
@@ -253,6 +291,219 @@ pub(crate) fn symmetric_schur_entry(
         .fold(pairing, |entry, (left, right)| entry - left * right)
 }
 
+pub(crate) const MAX_RESCUED_MODES: usize = 64;
+pub(crate) const DOUBLE_DOUBLE_PRECISION_BITS: u32 = 106;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrecisionRescueConclusion {
+    Positive,
+    AlgebraicZero,
+    NegativeCurvature,
+    GrayZone,
+    CapacityExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SymmetricRescueResult {
+    pub(crate) rescued_modes: usize,
+    pub(crate) conclusion: PrecisionRescueConclusion,
+    pub(crate) permutation: Vec<usize>,
+    pub(crate) lower: Vec<DoubleDouble>,
+    pub(crate) pivot_lower_bounds: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CertifiedDoubleDouble {
+    pub(crate) value: DoubleDouble,
+    pub(crate) error: f64,
+}
+
+impl CertifiedDoubleDouble {
+    pub(crate) fn new(value: DoubleDouble, absolute_scale: f64, operations: usize) -> Self {
+        Self {
+            value,
+            error: 8.0 * operations.max(1) as f64 * f64::EPSILON * f64::EPSILON * absolute_scale,
+        }
+    }
+
+    fn sqrt(self) -> Self {
+        let value = self.value.sqrt();
+        let magnitude = value.to_f64().abs();
+        Self {
+            value,
+            error: self.error / (2.0 * magnitude) + 8.0 * f64::EPSILON * f64::EPSILON * magnitude,
+        }
+    }
+
+    fn div(self, right: Self) -> Self {
+        let value = self.value / right.value;
+        let denominator = right.value.to_f64().abs();
+        let magnitude = value.to_f64().abs();
+        Self {
+            value,
+            error: (self.error + magnitude * right.error) / denominator
+                + 8.0 * f64::EPSILON * f64::EPSILON * magnitude,
+        }
+    }
+
+    fn subtract_product(self, left: Self, right: Self) -> Self {
+        let value = self.value - left.value * right.value;
+        let product_scale = left.value.to_f64().abs() * right.value.to_f64().abs();
+        Self {
+            value,
+            error: self.error
+                + left.value.to_f64().abs() * right.error
+                + right.value.to_f64().abs() * left.error
+                + left.error * right.error
+                + 8.0 * f64::EPSILON * f64::EPSILON * product_scale,
+        }
+    }
+}
+
+/// Classifies and factors a small symmetric Schur block with deterministic
+/// diagonal pivoting. The matrix is row-major and is expected to have been
+/// rebuilt from canonical inputs rather than promoted from rounded f64 Gram
+/// entries.
+pub(crate) fn classify_symmetric_schur(
+    matrix: &[CertifiedDoubleDouble],
+    dimension: usize,
+    algebraic_zero: impl Fn(&[DoubleDouble]) -> bool,
+) -> SymmetricRescueResult {
+    assert_eq!(matrix.len(), dimension * dimension);
+    if dimension > MAX_RESCUED_MODES {
+        return SymmetricRescueResult {
+            rescued_modes: dimension,
+            conclusion: PrecisionRescueConclusion::CapacityExceeded,
+            permutation: (0..dimension).collect(),
+            lower: Vec::new(),
+            pivot_lower_bounds: Vec::new(),
+        };
+    }
+
+    let mut schur = matrix.to_vec();
+    let mut permutation = (0..dimension).collect::<Vec<_>>();
+    let mut lower = vec![
+        CertifiedDoubleDouble {
+            value: DoubleDouble::from(0.0),
+            error: 0.0,
+        };
+        dimension * dimension
+    ];
+    let mut pivot_lower_bounds = Vec::with_capacity(dimension);
+    for pivot in 0..dimension {
+        let selected = (pivot..dimension)
+            .max_by(|left, right| {
+                schur[*left * dimension + *left]
+                    .value
+                    .to_f64()
+                    .total_cmp(&schur[*right * dimension + *right].value.to_f64())
+            })
+            .expect("the remaining symmetric block is nonempty");
+        if selected != pivot {
+            for column in 0..dimension {
+                schur.swap(pivot * dimension + column, selected * dimension + column);
+            }
+            for row in 0..dimension {
+                schur.swap(row * dimension + pivot, row * dimension + selected);
+            }
+            for column in 0..pivot {
+                lower.swap(pivot * dimension + column, selected * dimension + column);
+            }
+            permutation.swap(pivot, selected);
+        }
+
+        let diagonal = schur[pivot * dimension + pivot];
+        let lower_bound = next_down(diagonal.value.to_f64() - diagonal.error);
+        let upper_bound = next_up(diagonal.value.to_f64() + diagonal.error);
+        if upper_bound < 0.0 {
+            return SymmetricRescueResult {
+                rescued_modes: dimension,
+                conclusion: PrecisionRescueConclusion::NegativeCurvature,
+                permutation,
+                lower: lower.into_iter().map(|entry| entry.value).collect(),
+                pivot_lower_bounds,
+            };
+        }
+        if lower_bound <= 0.0 {
+            let null_mode = schur_null_mode(&lower, &permutation, dimension, pivot);
+            let conclusion = if diagonal.value.is_zero() && algebraic_zero(&null_mode) {
+                PrecisionRescueConclusion::AlgebraicZero
+            } else {
+                PrecisionRescueConclusion::GrayZone
+            };
+            return SymmetricRescueResult {
+                rescued_modes: dimension,
+                conclusion,
+                permutation,
+                lower: lower.into_iter().map(|entry| entry.value).collect(),
+                pivot_lower_bounds,
+            };
+        }
+
+        pivot_lower_bounds.push(lower_bound);
+        let root = diagonal.sqrt();
+        lower[pivot * dimension + pivot] = root;
+        for row in (pivot + 1)..dimension {
+            let coordinate = schur[row * dimension + pivot].div(root);
+            lower[row * dimension + pivot] = coordinate;
+        }
+        for row in (pivot + 1)..dimension {
+            for column in row..dimension {
+                let updated = schur[column * dimension + row].subtract_product(
+                    lower[column * dimension + pivot],
+                    lower[row * dimension + pivot],
+                );
+                schur[column * dimension + row] = updated;
+                schur[row * dimension + column] = updated;
+            }
+        }
+    }
+    SymmetricRescueResult {
+        rescued_modes: dimension,
+        conclusion: PrecisionRescueConclusion::Positive,
+        permutation,
+        lower: lower.into_iter().map(|entry| entry.value).collect(),
+        pivot_lower_bounds,
+    }
+}
+
+fn next_up(value: f64) -> f64 {
+    if value.is_nan() || value == f64::INFINITY {
+        value
+    } else if value == 0.0 {
+        f64::from_bits(1)
+    } else if value > 0.0 {
+        f64::from_bits(value.to_bits() + 1)
+    } else {
+        f64::from_bits(value.to_bits() - 1)
+    }
+}
+
+fn next_down(value: f64) -> f64 {
+    -next_up(-value)
+}
+
+fn schur_null_mode(
+    lower: &[CertifiedDoubleDouble],
+    permutation: &[usize],
+    dimension: usize,
+    pivot: usize,
+) -> Vec<DoubleDouble> {
+    let mut factor_mode = vec![DoubleDouble::from(0.0); dimension];
+    factor_mode[pivot] = DoubleDouble::from(1.0);
+    for row in (0..pivot).rev() {
+        let tail = ((row + 1)..=pivot).fold(DoubleDouble::from(0.0), |sum, column| {
+            sum + lower[column * dimension + row].value * factor_mode[column]
+        });
+        factor_mode[row] = -tail / lower[row * dimension + row].value;
+    }
+    let mut original_mode = vec![DoubleDouble::from(0.0); dimension];
+    for (factor_index, original_index) in permutation.iter().copied().enumerate() {
+        original_mode[original_index] = factor_mode[factor_index];
+    }
+    original_mode
+}
+
 #[cfg(test)]
 mod tests {
     use crate::cubic::GlobalAnisotropyMetric;
@@ -260,6 +511,11 @@ mod tests {
     use crate::oracle_fixture::{hex_values, verify_artifact_identity};
 
     use super::{DoubleDouble, cubic_pairing_dd, symmetric_schur_entry};
+
+    use super::{
+        CertifiedDoubleDouble, MAX_RESCUED_MODES, PrecisionRescueConclusion,
+        classify_symmetric_schur,
+    };
 
     const CASES: &str =
         include_str!("../validation/oracle/precision-rescue-v1/cases/precision-rescue.json");
@@ -440,5 +696,80 @@ mod tests {
 
         assert_oracle_dd(symmetric_schur_entry(diagonal, &left, &right), oracle);
         assert_oracle_dd(symmetric_schur_entry(diagonal, &right, &left), oracle);
+    }
+
+    #[test]
+    fn bounded_symmetric_rescue_matches_the_independent_schur_conclusions() {
+        let one = DoubleDouble::from(1.0);
+        let small_positive = DoubleDouble::from_components(1.0, 2.0_f64.powi(-100));
+        let small_negative = DoubleDouble::from_components(1.0, -2.0_f64.powi(-100));
+        let factors = [one];
+        let positive = symmetric_schur_entry(small_positive, &factors, &factors);
+        let zero = symmetric_schur_entry(one, &factors, &factors);
+        let negative = symmetric_schur_entry(small_negative, &factors, &factors);
+
+        assert_eq!(
+            classify_symmetric_schur(&[CertifiedDoubleDouble::new(positive, 1.0, 1)], 1, |_| {
+                false
+            })
+            .conclusion,
+            PrecisionRescueConclusion::Positive,
+        );
+        assert_eq!(
+            classify_symmetric_schur(&[CertifiedDoubleDouble::new(zero, 1.0, 1)], 1, |_| true)
+                .conclusion,
+            PrecisionRescueConclusion::AlgebraicZero,
+        );
+        assert_eq!(
+            classify_symmetric_schur(&[CertifiedDoubleDouble::new(negative, 1.0, 1)], 1, |_| {
+                false
+            })
+            .conclusion,
+            PrecisionRescueConclusion::NegativeCurvature,
+        );
+    }
+
+    #[test]
+    fn bounded_symmetric_rescue_accepts_64_modes_and_never_truncates_65() {
+        let diagonal = |dimension: usize| {
+            (0..dimension)
+                .flat_map(|row| {
+                    (0..dimension).map(move |column| {
+                        CertifiedDoubleDouble::new(
+                            DoubleDouble::from(f64::from(row == column)),
+                            f64::from(row == column),
+                            1,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let accepted =
+            classify_symmetric_schur(&diagonal(MAX_RESCUED_MODES), MAX_RESCUED_MODES, |_| false);
+        assert_eq!(accepted.rescued_modes, MAX_RESCUED_MODES);
+        assert_eq!(accepted.conclusion, PrecisionRescueConclusion::Positive);
+
+        let rejected = classify_symmetric_schur(
+            &diagonal(MAX_RESCUED_MODES + 1),
+            MAX_RESCUED_MODES + 1,
+            |_| false,
+        );
+        assert_eq!(rejected.rescued_modes, MAX_RESCUED_MODES + 1);
+        assert_eq!(
+            rejected.conclusion,
+            PrecisionRescueConclusion::CapacityExceeded,
+        );
+    }
+
+    #[test]
+    fn certified_rescue_returns_gray_when_the_propagated_interval_spans_zero() {
+        let residual = DoubleDouble::from(2.0_f64.powi(-100));
+        let unresolved = CertifiedDoubleDouble::new(residual, 1.0, 3);
+
+        assert_eq!(
+            classify_symmetric_schur(&[unresolved], 1, |_| false).conclusion,
+            PrecisionRescueConclusion::GrayZone,
+        );
     }
 }

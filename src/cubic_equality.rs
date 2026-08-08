@@ -29,6 +29,10 @@ use crate::math::dot3;
 use crate::numerical::{
     EQUALITY_KKT_POLICY_V1, SpectralAnalysisFailure, SpectralRankDecision, analyze_spectral_rank,
 };
+use crate::precision_rescue::{
+    CertifiedDoubleDouble, DOUBLE_DOUBLE_PRECISION_BITS, DoubleDouble, PrecisionRescueConclusion,
+    classify_symmetric_schur, cubic_pairing_dd_certified,
+};
 
 pub(crate) const POLYNOMIAL_DIMENSION: usize = 4;
 
@@ -295,6 +299,7 @@ pub(crate) struct CpdEvidence {
     pub(crate) polynomial_svd_ratio: f64,
     pub(crate) polynomial_rank_reject_ratio: f64,
     pub(crate) polynomial_rank_accept_ratio: f64,
+    pub(crate) polynomial_precision_rescue: Option<PrecisionRescueEvidence>,
     pub(crate) reduced_symmetry_defect: f64,
     pub(crate) symmetry_defect_limit: f64,
     pub(crate) reduced_largest_singular_value: f64,
@@ -312,6 +317,7 @@ pub(crate) struct PolynomialRankEvidence {
     pub(crate) reject_ratio: f64,
     pub(crate) accept_ratio: f64,
     pub(crate) backend_invoked: bool,
+    pub(crate) precision_rescue: Option<PrecisionRescueEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -333,6 +339,7 @@ impl AnalysisExecutionEvidence {
 pub(crate) struct VerifiedCanonicalMode {
     pub(crate) residual: f64,
     pub(crate) execution: AnalysisExecutionEvidence,
+    pub(crate) precision_rescue: Option<PrecisionRescueEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,6 +356,9 @@ pub(crate) enum RepresentationFailure {
     },
     PolynomialRankGrayZone {
         evidence: PolynomialRankEvidence,
+    },
+    PolynomialNegativeCurvature {
+        evidence: PrecisionRescueEvidence,
     },
     AlgebraicAnalysisFailure {
         stage: AlgebraicAnalysisStage,
@@ -377,6 +387,21 @@ pub(crate) enum RepresentationFailure {
         quotient_dimension: usize,
         pivot_index: usize,
         interval: Option<OutwardRoundedInterval>,
+        execution: AnalysisExecutionEvidence,
+    },
+    QuotientPrecisionRescueGrayZone {
+        quotient_dimension: usize,
+        evidence: PrecisionRescueEvidence,
+        execution: AnalysisExecutionEvidence,
+    },
+    QuotientRankDeficient {
+        quotient_dimension: usize,
+        evidence: PrecisionRescueEvidence,
+        mode: VerifiedCanonicalMode,
+    },
+    QuotientNegativeCurvature {
+        quotient_dimension: usize,
+        evidence: PrecisionRescueEvidence,
         execution: AnalysisExecutionEvidence,
     },
     QuotientFactorizationNotPositive {
@@ -561,10 +586,17 @@ impl CubicRepresentation {
             DenseMatrix::from_fn(reduced.rows, reduced.columns, |row, column| {
                 field_energy_scale * reduced.get(row, column)
             });
+        let rescue_source = CanonicalPrecisionRescueSource {
+            functionals: &standard_functionals,
+            metric: &metric,
+            null_space: &null_space,
+            field_energy_scale,
+        };
         let energy_basis = EnergyOrthonormalQuotientBasis::factor(
             &quotient_energy_gram,
             &trailing_polynomial,
             &canonical_responses,
+            Some(&rescue_source),
         )?;
         let quotient_factorization = energy_basis.evidence.clone();
         let (reduced_largest_singular_value, reduced_smallest_singular_value) =
@@ -595,6 +627,7 @@ impl CubicRepresentation {
                 polynomial_svd_ratio: polynomial_rank_evidence.svd_ratio,
                 polynomial_rank_reject_ratio: polynomial_rank_evidence.reject_ratio,
                 polynomial_rank_accept_ratio: polynomial_rank_evidence.accept_ratio,
+                polynomial_precision_rescue: polynomial_rank_evidence.precision_rescue,
                 reduced_symmetry_defect,
                 symmetry_defect_limit,
                 reduced_largest_singular_value,
@@ -1070,15 +1103,67 @@ fn verify_polynomial_rank(
             );
         }
         SpectralRankDecision::GrayZone => {
-            return Err(RepresentationFailure::PolynomialRankGrayZone {
-                evidence: PolynomialRankEvidence {
-                    rrqr_ratio: analysis.rrqr_ratio,
-                    svd_ratio: analysis.svd_ratio,
-                    reject_ratio: analysis.reject_ratio,
-                    accept_ratio: analysis.accept_ratio,
-                    backend_invoked: false,
-                },
-            });
+            if functionals.len() != polynomial.rows {
+                return Err(RepresentationFailure::PolynomialRankGrayZone {
+                    evidence: PolynomialRankEvidence {
+                        rrqr_ratio: analysis.rrqr_ratio,
+                        svd_ratio: analysis.svd_ratio,
+                        reject_ratio: analysis.reject_ratio,
+                        accept_ratio: analysis.accept_ratio,
+                        backend_invoked: false,
+                        precision_rescue: None,
+                    },
+                });
+            }
+            let rescue = rescue_polynomial_rank(functionals, coordinates)?;
+            let rescue_evidence = PrecisionRescueEvidence {
+                first_mode: 0,
+                mode_count: POLYNOMIAL_DIMENSION,
+                precision_bits: DOUBLE_DOUBLE_PRECISION_BITS,
+                conclusion: rescue.conclusion,
+            };
+            match rescue.conclusion {
+                PrecisionRescueConclusion::Positive => {}
+                PrecisionRescueConclusion::AlgebraicZero => {
+                    let standard_mode = smallest_right_mode(
+                        matrix.as_ref(),
+                        AlgebraicAnalysisStage::PolynomialRank,
+                    )?;
+                    let mut failure = polynomial_rank_failure(
+                        Some(analysis.rank),
+                        functionals,
+                        coordinates,
+                        standard_mode
+                            .try_into()
+                            .expect("the Cubic polynomial pairing has exactly four columns"),
+                    )
+                    .expect_err("an algebraic zero is a rank deficiency");
+                    if let RepresentationFailure::PolynomialRankDeficient { mode, .. } =
+                        &mut failure
+                    {
+                        mode.precision_rescue = Some(rescue_evidence);
+                    }
+                    return Err(failure);
+                }
+                PrecisionRescueConclusion::NegativeCurvature => {
+                    return Err(RepresentationFailure::PolynomialNegativeCurvature {
+                        evidence: rescue_evidence,
+                    });
+                }
+                PrecisionRescueConclusion::GrayZone
+                | PrecisionRescueConclusion::CapacityExceeded => {
+                    return Err(RepresentationFailure::PolynomialRankGrayZone {
+                        evidence: PolynomialRankEvidence {
+                            rrqr_ratio: analysis.rrqr_ratio,
+                            svd_ratio: analysis.svd_ratio,
+                            reject_ratio: analysis.reject_ratio,
+                            accept_ratio: analysis.accept_ratio,
+                            backend_invoked: false,
+                            precision_rescue: Some(rescue_evidence),
+                        },
+                    });
+                }
+            }
         }
         SpectralRankDecision::Accept => {}
     }
@@ -1091,8 +1176,87 @@ fn verify_polynomial_rank(
             reject_ratio: analysis.reject_ratio,
             accept_ratio: analysis.accept_ratio,
             backend_invoked: false,
+            precision_rescue: (analysis.decision == SpectralRankDecision::GrayZone).then_some(
+                PrecisionRescueEvidence {
+                    first_mode: 0,
+                    mode_count: POLYNOMIAL_DIMENSION,
+                    precision_bits: DOUBLE_DOUBLE_PRECISION_BITS,
+                    conclusion: PrecisionRescueConclusion::Positive,
+                },
+            ),
         },
     ))
+}
+
+fn rescue_polynomial_rank(
+    functionals: &[CanonicalFunctional],
+    coordinates: &CubicSolveCoordinateTransform,
+) -> Result<crate::precision_rescue::SymmetricRescueResult, RepresentationFailure> {
+    let standard_functionals = functionals
+        .iter()
+        .map(|functional| coordinates.to_standard_functional(functional))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut responses = Vec::with_capacity(standard_functionals.len() * POLYNOMIAL_DIMENSION);
+    for functional in &standard_functionals {
+        for column in 0..POLYNOMIAL_DIMENSION {
+            responses.push(affine_response_dd(functional, column));
+        }
+    }
+    let functional_count = standard_functionals.len();
+    let gram = (0..POLYNOMIAL_DIMENSION)
+        .flat_map(|row| {
+            let responses = &responses;
+            (0..POLYNOMIAL_DIMENSION).map(move |column| {
+                let mut value = DoubleDouble::from(0.0);
+                let mut absolute_scale = 0.0;
+                let mut propagated_error = 0.0;
+                for index in 0..functional_count {
+                    let left = responses[index * POLYNOMIAL_DIMENSION + row];
+                    let right = responses[index * POLYNOMIAL_DIMENSION + column];
+                    let contribution = left.value * right.value;
+                    value += contribution;
+                    absolute_scale += contribution.to_f64().abs();
+                    propagated_error += left.value.to_f64().abs() * right.error
+                        + right.value.to_f64().abs() * left.error
+                        + left.error * right.error;
+                }
+                let mut certified =
+                    CertifiedDoubleDouble::new(value, absolute_scale, functional_count * 2);
+                certified.error += propagated_error;
+                certified
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(classify_symmetric_schur(
+        &gram,
+        POLYNOMIAL_DIMENSION,
+        |mode| {
+            standard_functionals.iter().all(|functional| {
+                (0..POLYNOMIAL_DIMENSION)
+                    .fold(DoubleDouble::from(0.0), |sum, column| {
+                        sum + affine_response_dd(functional, column).value * mode[column]
+                    })
+                    .is_zero()
+            })
+        },
+    ))
+}
+
+fn affine_response_dd(functional: &CanonicalFunctional, column: usize) -> CertifiedDoubleDouble {
+    let mut value = DoubleDouble::from(0.0);
+    let mut absolute_scale = 0.0;
+    for term in functional.terms() {
+        let contribution = if column == 0 {
+            DoubleDouble::from(term.value_coefficient())
+        } else {
+            DoubleDouble::from(term.value_coefficient())
+                * DoubleDouble::from(term.support()[column - 1])
+                + DoubleDouble::from(term.gradient_coefficient()[column - 1])
+        };
+        value += contribution;
+        absolute_scale += contribution.to_f64().abs();
+    }
+    CertifiedDoubleDouble::new(value, absolute_scale, functional.terms().len() * 3)
 }
 
 fn polynomial_rank_failure(
@@ -1106,6 +1270,7 @@ fn polynomial_rank_failure(
         mode: VerifiedCanonicalMode {
             residual: canonical_polynomial_mode_residual(functionals, coordinates, standard_mode)?,
             execution: AnalysisExecutionEvidence::pre_backend(),
+            precision_rescue: None,
         },
     })
 }
@@ -1373,12 +1538,151 @@ pub(crate) struct QuotientFactorizationEvidence {
     pub(crate) kernel_ridge_applied: bool,
     pub(crate) gram_jitter_applied: bool,
     pub(crate) mode_truncation_applied: bool,
+    pub(crate) precision_rescue: Option<PrecisionRescueEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrecisionRescueEvidence {
+    pub(crate) first_mode: usize,
+    pub(crate) mode_count: usize,
+    pub(crate) precision_bits: u32,
+    pub(crate) conclusion: PrecisionRescueConclusion,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct EnergyOrthonormalQuotientBasis {
     lower: DenseMatrix,
+    permutation: Vec<usize>,
     evidence: QuotientFactorizationEvidence,
+}
+
+trait PrecisionRescueSource {
+    fn pairing_modes(&self, left: &[f64], right: &[f64]) -> CertifiedDoubleDouble;
+
+    fn algebraic_zero(&self, _mode: &[DoubleDouble]) -> bool {
+        false
+    }
+}
+
+struct DirectPrecisionRescueSource {
+    gram: DenseMatrix,
+    algebraic_zero: bool,
+}
+
+impl DirectPrecisionRescueSource {
+    #[cfg(test)]
+    fn from_gram(gram: &DenseMatrix) -> Self {
+        Self {
+            gram: gram.clone(),
+            algebraic_zero: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_algebraic_zero(gram: &DenseMatrix) -> Self {
+        Self {
+            gram: gram.clone(),
+            algebraic_zero: true,
+        }
+    }
+}
+
+impl PrecisionRescueSource for DirectPrecisionRescueSource {
+    fn pairing_modes(&self, left: &[f64], right: &[f64]) -> CertifiedDoubleDouble {
+        let mut value = DoubleDouble::from(0.0);
+        let mut absolute_scale = 0.0;
+        for (row, left) in left.iter().copied().enumerate() {
+            for (column, right) in right.iter().copied().enumerate() {
+                let contribution = DoubleDouble::from(left)
+                    * DoubleDouble::from(self.gram.get(row, column))
+                    * DoubleDouble::from(right);
+                value += contribution;
+                absolute_scale += contribution.to_f64().abs();
+            }
+        }
+        CertifiedDoubleDouble::new(value, absolute_scale, left.len() * right.len() * 3)
+    }
+
+    fn algebraic_zero(&self, _mode: &[DoubleDouble]) -> bool {
+        self.algebraic_zero
+    }
+}
+
+struct CanonicalPrecisionRescueSource<'a> {
+    functionals: &'a [CanonicalFunctional],
+    metric: &'a GlobalAnisotropyMetric,
+    null_space: &'a HouseholderNullSpace,
+    field_energy_scale: f64,
+}
+
+impl PrecisionRescueSource for CanonicalPrecisionRescueSource<'_> {
+    fn pairing_modes(&self, left: &[f64], right: &[f64]) -> CertifiedDoubleDouble {
+        let row_weights = self
+            .null_space
+            .expand(left)
+            .expect("an analyzed Householder basis remains expandable");
+        let column_weights = self
+            .null_space
+            .expand(right)
+            .expect("an analyzed Householder basis remains expandable");
+        let mut pairing = DoubleDouble::from(0.0);
+        let mut propagated_error = 0.0;
+        let mut absolute_scale = 0.0;
+        let mut operations = 0;
+        for (left, left_weight) in self.functionals.iter().zip(row_weights) {
+            if left_weight == 0.0 {
+                continue;
+            }
+            for (right, right_weight) in self.functionals.iter().zip(&column_weights) {
+                if *right_weight != 0.0 {
+                    let canonical = cubic_pairing_dd_certified(left, right, self.metric);
+                    let weight =
+                        DoubleDouble::from(left_weight) * DoubleDouble::from(*right_weight);
+                    let contribution = weight * canonical.value;
+                    pairing += contribution;
+                    propagated_error += weight.to_f64().abs() * canonical.error;
+                    absolute_scale += contribution.to_f64().abs();
+                    operations += 3;
+                }
+            }
+        }
+        let mut certified = CertifiedDoubleDouble::new(
+            DoubleDouble::from(self.field_energy_scale) * pairing,
+            self.field_energy_scale.abs() * absolute_scale,
+            operations,
+        );
+        certified.error += self.field_energy_scale.abs() * propagated_error;
+        certified
+    }
+
+    fn algebraic_zero(&self, mode: &[DoubleDouble]) -> bool {
+        let quotient_mode = mode.iter().map(|value| value.to_f64()).collect::<Vec<_>>();
+        let ambient = self
+            .null_space
+            .expand(&quotient_mode)
+            .expect("an analyzed Householder basis remains expandable");
+        let mut combined = Vec::<([f64; 3], [DoubleDouble; 4])>::new();
+        for (functional, weight) in self.functionals.iter().zip(ambient) {
+            for term in functional.terms() {
+                let index = combined
+                    .iter()
+                    .position(|(support, _)| *support == term.support())
+                    .unwrap_or_else(|| {
+                        combined.push((term.support(), [DoubleDouble::from(0.0); 4]));
+                        combined.len() - 1
+                    });
+                combined[index].1[0] +=
+                    DoubleDouble::from(weight) * DoubleDouble::from(term.value_coefficient());
+                for axis in 0..3 {
+                    combined[index].1[axis + 1] += DoubleDouble::from(weight)
+                        * DoubleDouble::from(term.gradient_coefficient()[axis]);
+                }
+            }
+        }
+        combined
+            .iter()
+            .all(|(_, coefficients)| coefficients.iter().all(|value| value.is_zero()))
+    }
 }
 
 impl EnergyOrthonormalQuotientBasis {
@@ -1386,6 +1690,7 @@ impl EnergyOrthonormalQuotientBasis {
         gram: &DenseMatrix,
         trailing_polynomial: &DenseMatrix,
         canonical_responses: &DenseMatrix,
+        rescue_source: Option<&dyn PrecisionRescueSource>,
     ) -> Result<Self, RepresentationFailure> {
         debug_assert_eq!(gram.rows, gram.columns);
         debug_assert_eq!(trailing_polynomial.rows, gram.rows);
@@ -1394,6 +1699,7 @@ impl EnergyOrthonormalQuotientBasis {
         if dimension == 0 {
             return Ok(Self {
                 lower: DenseMatrix::from_fn(0, 0, |_, _| unreachable!()),
+                permutation: Vec::new(),
                 evidence: QuotientFactorizationEvidence {
                     quotient_dimension: 0,
                     retained_modes: 0,
@@ -1409,12 +1715,47 @@ impl EnergyOrthonormalQuotientBasis {
                     kernel_ridge_applied: false,
                     gram_jitter_applied: false,
                     mode_truncation_applied: false,
+                    precision_rescue: None,
                 },
             });
         }
 
-        let factors = match faer_backend::unregularized_llt(gram.to_faer().as_ref()) {
-            Ok(factors) => factors,
+        let factorization = match faer_backend::unregularized_llt(gram.to_faer().as_ref()) {
+            Ok(factors) => {
+                if factors.dynamic_regularization_count != 0 {
+                    return Err(RepresentationFailure::QuotientLltContract {
+                        observed: f64::INFINITY,
+                        limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                    });
+                }
+                let lower = retained_lower_triangle(factors.lower.as_ref());
+                let pivot_intervals = (0..dimension)
+                    .map(|index| outward_rounded_pivot_interval(gram, &lower, index))
+                    .collect::<Vec<_>>();
+                if let Some((pivot_index, interval)) = pivot_intervals
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, interval)| interval.lower <= 0.0)
+                {
+                    if interval.upper <= 0.0 && rescue_source.is_none() {
+                        return Err(RepresentationFailure::QuotientFactorizationNotPositive {
+                            quotient_dimension: dimension,
+                            pivot_index,
+                            interval,
+                            execution: AnalysisExecutionEvidence::pre_backend(),
+                        });
+                    }
+                    rescue_quotient_factor(gram, &lower, pivot_index, rescue_source)?
+                } else {
+                    RescuedFactorization {
+                        lower,
+                        permutation: (0..dimension).collect(),
+                        pivot_intervals,
+                        precision_rescue: None,
+                    }
+                }
+            }
             Err(faer_backend::CholeskyFailure::WorkspaceAllocation(failure)) => {
                 return Err(
                     RepresentationFailure::AlgebraicAnalysisWorkspaceAllocation {
@@ -1426,8 +1767,9 @@ impl EnergyOrthonormalQuotientBasis {
                 );
             }
             Err(faer_backend::CholeskyFailure::NonPositivePivot { index }) => {
-                let interval = recomputed_failed_pivot_interval(gram, index)?;
-                if interval.upper <= 0.0 {
+                let lower = recomputed_lower_for_rescue(gram, index)?;
+                let interval = outward_rounded_pivot_interval(gram, &lower, index);
+                if interval.upper <= 0.0 && rescue_source.is_none() {
                     return Err(RepresentationFailure::QuotientFactorizationNotPositive {
                         quotient_dimension: dimension,
                         pivot_index: index,
@@ -1435,57 +1777,18 @@ impl EnergyOrthonormalQuotientBasis {
                         execution: AnalysisExecutionEvidence::pre_backend(),
                     });
                 }
-                if interval.lower <= 0.0 {
-                    return Err(
-                        RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
-                            quotient_dimension: dimension,
-                            pivot_index: index,
-                            interval: Some(interval),
-                            execution: AnalysisExecutionEvidence::pre_backend(),
-                        },
-                    );
-                }
-                return Err(RepresentationFailure::QuotientLltContract {
-                    observed: f64::INFINITY,
-                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
-                });
+                rescue_quotient_factor(gram, &lower, index, rescue_source)?
             }
         };
-        if factors.dynamic_regularization_count != 0 {
-            return Err(RepresentationFailure::QuotientLltContract {
-                observed: f64::INFINITY,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
-            });
-        }
-        let lower = retained_lower_triangle(factors.lower.as_ref());
-        let pivot_intervals = (0..dimension)
-            .map(|index| outward_rounded_pivot_interval(gram, &lower, index))
-            .collect::<Vec<_>>();
-        if let Some((pivot_index, interval)) = pivot_intervals
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, interval)| interval.lower <= 0.0)
-        {
-            if interval.upper <= 0.0 {
-                return Err(RepresentationFailure::QuotientFactorizationNotPositive {
-                    quotient_dimension: dimension,
-                    pivot_index,
-                    interval,
-                    execution: AnalysisExecutionEvidence::pre_backend(),
-                });
-            }
-            return Err(
-                RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
-                    quotient_dimension: dimension,
-                    pivot_index,
-                    interval: Some(interval),
-                    execution: AnalysisExecutionEvidence::pre_backend(),
-                },
-            );
-        }
+        let RescuedFactorization {
+            lower,
+            permutation,
+            pivot_intervals,
+            precision_rescue,
+        } = factorization;
 
-        let normalized_backward_error = normalized_llt_backward_error(gram, &lower);
+        let permuted_gram = permute_symmetric(gram, &permutation);
+        let normalized_backward_error = normalized_llt_backward_error(&permuted_gram, &lower);
         if !normalized_backward_error.is_finite()
             || normalized_backward_error > EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit
         {
@@ -1497,6 +1800,7 @@ impl EnergyOrthonormalQuotientBasis {
 
         let provisional = Self {
             lower,
+            permutation,
             evidence: QuotientFactorizationEvidence {
                 quotient_dimension: dimension,
                 retained_modes: dimension,
@@ -1512,6 +1816,7 @@ impl EnergyOrthonormalQuotientBasis {
                 kernel_ridge_applied: false,
                 gram_jitter_applied: false,
                 mode_truncation_applied: false,
+                precision_rescue,
             },
         };
 
@@ -1538,7 +1843,7 @@ impl EnergyOrthonormalQuotientBasis {
         }
 
         let field_energy_identity_error =
-            quotient_field_energy_identity_error(gram, &provisional.lower);
+            quotient_field_energy_identity_error(&permuted_gram, &provisional.lower);
         if field_energy_identity_error > EQUALITY_KKT_POLICY_V1.quotient_field_energy_identity_limit
         {
             return Err(RepresentationFailure::QuotientFieldEnergyIdentityContract {
@@ -1553,7 +1858,8 @@ impl EnergyOrthonormalQuotientBasis {
                     .map(|row| trailing_polynomial.get(row, column))
                     .collect::<Vec<_>>();
                 provisional
-                    .solve_lower(&response)
+                    .response(&response)
+                    .expect("a verified basis produces finite polynomial responses")
                     .into_iter()
                     .map(f64::abs)
                     .fold(0.0_f64, f64::max)
@@ -1572,7 +1878,8 @@ impl EnergyOrthonormalQuotientBasis {
                     .map(|row| canonical_responses.get(row, column))
                     .collect::<Vec<_>>();
                 let energy_response = provisional.response(&quotient_response)?;
-                let recovered_response = provisional.multiply_lower(&energy_response);
+                let recovered_response = provisional
+                    .unpermute_from_factor(&provisional.multiply_lower(&energy_response));
                 Ok(relative_slice_error(
                     &recovered_response,
                     &quotient_response,
@@ -1603,7 +1910,7 @@ impl EnergyOrthonormalQuotientBasis {
     }
 
     fn response(&self, quotient_response: &[f64]) -> Result<Vec<f64>, RepresentationFailure> {
-        let response = self.solve_lower(quotient_response);
+        let response = self.solve_lower(&self.permute_to_factor(quotient_response));
         finite_basis_coordinates(response)
     }
 
@@ -1612,14 +1919,16 @@ impl EnergyOrthonormalQuotientBasis {
         solver_coordinates: &[f64],
     ) -> Result<Vec<f64>, RepresentationFailure> {
         let coordinates = self.solve_lower_transpose(solver_coordinates);
-        finite_basis_coordinates(coordinates)
+        finite_basis_coordinates(self.unpermute_from_factor(&coordinates))
     }
 
     fn to_solver_coordinates(
         &self,
         householder_coordinates: &[f64],
     ) -> Result<Vec<f64>, RepresentationFailure> {
-        finite_basis_coordinates(self.multiply_lower_transpose(householder_coordinates))
+        finite_basis_coordinates(
+            self.multiply_lower_transpose(&self.permute_to_factor(householder_coordinates)),
+        )
     }
 
     fn solve_lower(&self, right_hand_side: &[f64]) -> Vec<f64> {
@@ -1649,8 +1958,23 @@ impl EnergyOrthonormalQuotientBasis {
     }
 
     fn solve_energy_gram(&self, right_hand_side: &[f64]) -> Vec<f64> {
-        let lower_solution = self.solve_lower(right_hand_side);
-        self.solve_lower_transpose(&lower_solution)
+        let lower_solution = self.solve_lower(&self.permute_to_factor(right_hand_side));
+        self.unpermute_from_factor(&self.solve_lower_transpose(&lower_solution))
+    }
+
+    fn permute_to_factor(&self, vector: &[f64]) -> Vec<f64> {
+        self.permutation
+            .iter()
+            .map(|index| vector[*index])
+            .collect()
+    }
+
+    fn unpermute_from_factor(&self, vector: &[f64]) -> Vec<f64> {
+        let mut original = vec![0.0; vector.len()];
+        for (factor_index, original_index) in self.permutation.iter().copied().enumerate() {
+            original[original_index] = vector[factor_index];
+        }
+        original
     }
 
     fn multiply_lower(&self, vector: &[f64]) -> Vec<f64> {
@@ -1676,28 +2000,251 @@ impl EnergyOrthonormalQuotientBasis {
     }
 }
 
-fn retained_lower_triangle(matrix: faer::MatRef<'_, f64>) -> DenseMatrix {
-    DenseMatrix::from_fn(matrix.nrows(), matrix.ncols(), |row, column| {
-        if column <= row {
-            matrix[(row, column)]
-        } else {
-            0.0
+struct RescuedFactorization {
+    lower: DenseMatrix,
+    permutation: Vec<usize>,
+    pivot_intervals: Vec<OutwardRoundedInterval>,
+    precision_rescue: Option<PrecisionRescueEvidence>,
+}
+
+fn rescue_quotient_factor(
+    gram: &DenseMatrix,
+    prefix_lower: &DenseMatrix,
+    first_mode: usize,
+    source: Option<&dyn PrecisionRescueSource>,
+) -> Result<RescuedFactorization, RepresentationFailure> {
+    let dimension = gram.rows;
+    let Some(source) = source else {
+        return Err(
+            RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+                quotient_dimension: dimension,
+                pivot_index: first_mode,
+                interval: Some(outward_rounded_pivot_interval(
+                    gram,
+                    prefix_lower,
+                    first_mode,
+                )),
+                execution: AnalysisExecutionEvidence::pre_backend(),
+            },
+        );
+    };
+    let (mut lower, mut permutation, first_mode, stable_intervals) =
+        isolate_symmetric_stable_prefix(gram);
+    let mode_count = dimension - first_mode;
+    if mode_count == 0 {
+        return Ok(RescuedFactorization {
+            lower,
+            permutation,
+            pivot_intervals: stable_intervals,
+            precision_rescue: None,
+        });
+    }
+
+    let ambiguity_modes = (first_mode..dimension)
+        .map(|factor_mode| {
+            let mut mode = vec![0.0; dimension];
+            mode[permutation[factor_mode]] = 1.0;
+            for row in (0..first_mode).rev() {
+                let tail = (first_mode..dimension)
+                    .map(|column| lower.get(column, row) * mode[permutation[column]])
+                    .sum::<f64>();
+                mode[permutation[row]] = -tail / lower.get(row, row);
+            }
+            mode
+        })
+        .collect::<Vec<_>>();
+    let mut schur =
+        vec![CertifiedDoubleDouble::new(DoubleDouble::from(0.0), 0.0, 1); mode_count * mode_count];
+    for row in 0..mode_count {
+        for column in row..mode_count {
+            let entry = source.pairing_modes(&ambiguity_modes[row], &ambiguity_modes[column]);
+            schur[row * mode_count + column] = entry;
+            schur[column * mode_count + row] = entry;
         }
+    }
+    let rescue = classify_symmetric_schur(&schur, mode_count, |local_mode| {
+        let mut full_mode = vec![DoubleDouble::from(0.0); dimension];
+        for (mode, coefficient) in ambiguity_modes.iter().zip(local_mode) {
+            for (combined, component) in full_mode.iter_mut().zip(mode) {
+                *combined += *coefficient * DoubleDouble::from(*component);
+            }
+        }
+        source.algebraic_zero(&full_mode)
+    });
+    let evidence = PrecisionRescueEvidence {
+        first_mode,
+        mode_count,
+        precision_bits: DOUBLE_DOUBLE_PRECISION_BITS,
+        conclusion: rescue.conclusion,
+    };
+    match rescue.conclusion {
+        PrecisionRescueConclusion::Positive => {}
+        PrecisionRescueConclusion::AlgebraicZero => {
+            return Err(RepresentationFailure::QuotientRankDeficient {
+                quotient_dimension: dimension,
+                evidence,
+                mode: VerifiedCanonicalMode {
+                    residual: 0.0,
+                    execution: AnalysisExecutionEvidence::pre_backend(),
+                    precision_rescue: Some(evidence),
+                },
+            });
+        }
+        PrecisionRescueConclusion::NegativeCurvature => {
+            return Err(RepresentationFailure::QuotientNegativeCurvature {
+                quotient_dimension: dimension,
+                evidence,
+                execution: AnalysisExecutionEvidence::pre_backend(),
+            });
+        }
+        PrecisionRescueConclusion::GrayZone | PrecisionRescueConclusion::CapacityExceeded => {
+            return Err(RepresentationFailure::QuotientPrecisionRescueGrayZone {
+                quotient_dimension: dimension,
+                evidence,
+                execution: AnalysisExecutionEvidence::pre_backend(),
+            });
+        }
+    }
+
+    if (0..dimension).all(|index| prefix_lower.get(index, index) > 0.0) {
+        let mut intervals = (0..dimension)
+            .map(|index| outward_rounded_pivot_interval(gram, prefix_lower, index))
+            .collect::<Vec<_>>();
+        let rescued_lower = rescue
+            .pivot_lower_bounds
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        for interval in &mut intervals {
+            if interval.lower <= 0.0 {
+                *interval = OutwardRoundedInterval {
+                    lower: rescued_lower,
+                    upper: next_up(rescued_lower),
+                };
+            }
+        }
+        return Ok(RescuedFactorization {
+            lower: prefix_lower.clone(),
+            permutation: (0..dimension).collect(),
+            pivot_intervals: intervals,
+            precision_rescue: Some(evidence),
+        });
+    }
+
+    let old_permutation = permutation.clone();
+    let old_lower = lower.clone();
+    for (local_factor, local_original) in rescue.permutation.iter().copied().enumerate() {
+        permutation[first_mode + local_factor] = old_permutation[first_mode + local_original];
+    }
+    for local_factor in 0..mode_count {
+        let local_original = rescue.permutation[local_factor];
+        for column in 0..first_mode {
+            lower.set(
+                first_mode + local_factor,
+                column,
+                old_lower.get(first_mode + local_original, column),
+            );
+        }
+    }
+    for row in 0..mode_count {
+        for column in 0..=row {
+            lower.set(
+                first_mode + row,
+                first_mode + column,
+                rescue.lower[row * mode_count + column].to_f64(),
+            );
+        }
+    }
+    let mut intervals = stable_intervals;
+    intervals.extend(
+        rescue
+            .pivot_lower_bounds
+            .iter()
+            .map(|lower| OutwardRoundedInterval {
+                lower: *lower,
+                upper: next_up(*lower),
+            }),
+    );
+    Ok(RescuedFactorization {
+        lower,
+        permutation,
+        pivot_intervals: intervals,
+        precision_rescue: Some(evidence),
     })
 }
 
-fn recomputed_failed_pivot_interval(
+fn isolate_symmetric_stable_prefix(
     gram: &DenseMatrix,
-    failed_pivot: usize,
-) -> Result<OutwardRoundedInterval, RepresentationFailure> {
+) -> (DenseMatrix, Vec<usize>, usize, Vec<OutwardRoundedInterval>) {
+    let dimension = gram.rows;
+    let mut permutation = (0..dimension).collect::<Vec<_>>();
+    let mut lower = DenseMatrix::from_fn(dimension, dimension, |_, _| 0.0);
+    let mut intervals = Vec::new();
+    for pivot in 0..dimension {
+        let selected = (pivot..dimension)
+            .max_by(|left, right| {
+                let diagonal = |factor_index: usize| {
+                    let original = permutation[factor_index];
+                    gram.get(original, original)
+                        - (0..pivot)
+                            .map(|column| lower.get(factor_index, column).powi(2))
+                            .sum::<f64>()
+                };
+                diagonal(*left).total_cmp(&diagonal(*right))
+            })
+            .expect("the remaining symmetric block is nonempty");
+        if selected != pivot {
+            permutation.swap(pivot, selected);
+            for column in 0..pivot {
+                let value = lower.get(pivot, column);
+                lower.set(pivot, column, lower.get(selected, column));
+                lower.set(selected, column, value);
+            }
+        }
+        let permuted_gram = permute_symmetric(gram, &permutation);
+        let interval = outward_rounded_pivot_interval(&permuted_gram, &lower, pivot);
+        if interval.lower <= 0.0 {
+            return (lower, permutation, pivot, intervals);
+        }
+        intervals.push(interval);
+        let pivot_value = permuted_gram.get(pivot, pivot)
+            - (0..pivot)
+                .map(|column| lower.get(pivot, column).powi(2))
+                .sum::<f64>();
+        lower.set(pivot, pivot, pivot_value.sqrt());
+        for row in (pivot + 1)..dimension {
+            let residual = permuted_gram.get(row, pivot)
+                - (0..pivot)
+                    .map(|column| lower.get(row, column) * lower.get(pivot, column))
+                    .sum::<f64>();
+            lower.set(row, pivot, residual / lower.get(pivot, pivot));
+        }
+    }
+    (lower, permutation, dimension, intervals)
+}
+
+fn recomputed_lower_for_rescue(
+    gram: &DenseMatrix,
+    first_mode: usize,
+) -> Result<DenseMatrix, RepresentationFailure> {
     let mut lower = DenseMatrix::from_fn(gram.rows, gram.columns, |_, _| 0.0);
-    for row in 0..=failed_pivot {
-        for column in 0..row {
+    for column in 0..first_mode {
+        for row in column..gram.rows {
             let residual = gram.get(row, column)
                 - (0..column)
                     .map(|index| lower.get(row, index) * lower.get(column, index))
                     .sum::<f64>();
-            let coordinate = residual / lower.get(column, column);
+            let coordinate = if row == column {
+                if residual <= 0.0 || !residual.is_finite() {
+                    return Err(RepresentationFailure::QuotientLltContract {
+                        observed: f64::INFINITY,
+                        limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                    });
+                }
+                residual.sqrt()
+            } else {
+                residual / lower.get(column, column)
+            };
             if !coordinate.is_finite() {
                 return Err(RepresentationFailure::QuotientLltContract {
                     observed: f64::INFINITY,
@@ -1706,28 +2253,24 @@ fn recomputed_failed_pivot_interval(
             }
             lower.set(row, column, coordinate);
         }
-        if row < failed_pivot {
-            let interval = outward_rounded_pivot_interval(gram, &lower, row);
-            if interval.lower <= 0.0 {
-                return Err(RepresentationFailure::QuotientLltContract {
-                    observed: f64::INFINITY,
-                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
-                });
-            }
-            let pivot_value = gram.get(row, row)
-                - (0..row)
-                    .map(|column| lower.get(row, column).powi(2))
-                    .sum::<f64>();
-            if !pivot_value.is_finite() || pivot_value <= 0.0 {
-                return Err(RepresentationFailure::QuotientLltContract {
-                    observed: f64::INFINITY,
-                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
-                });
-            }
-            lower.set(row, row, pivot_value.sqrt());
-        }
     }
-    Ok(outward_rounded_pivot_interval(gram, &lower, failed_pivot))
+    Ok(lower)
+}
+
+fn permute_symmetric(matrix: &DenseMatrix, permutation: &[usize]) -> DenseMatrix {
+    DenseMatrix::from_fn(matrix.rows, matrix.columns, |row, column| {
+        matrix.get(permutation[row], permutation[column])
+    })
+}
+
+fn retained_lower_triangle(matrix: faer::MatRef<'_, f64>) -> DenseMatrix {
+    DenseMatrix::from_fn(matrix.nrows(), matrix.ncols(), |row, column| {
+        if column <= row {
+            matrix[(row, column)]
+        } else {
+            0.0
+        }
+    })
 }
 
 fn finite_basis_coordinates(coordinates: Vec<f64>) -> Result<Vec<f64>, RepresentationFailure> {
@@ -4325,7 +4868,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_ambiguous_pivot_is_reserved_for_precision_rescue() {
+    fn cancellation_ambiguous_pivot_is_rescued_and_reattached() {
         let next_after_one = f64::from_bits(1.0_f64.to_bits() + 1);
         let gram = DenseMatrix::from_fn(2, 2, |row, column| match (row, column) {
             (0, 0) | (0, 1) | (1, 0) => 1.0,
@@ -4333,26 +4876,100 @@ mod tests {
             _ => unreachable!(),
         });
 
-        let failure = EnergyOrthonormalQuotientBasis::factor(
+        let basis = EnergyOrthonormalQuotientBasis::factor(
             &gram,
             &DenseMatrix::from_fn(2, POLYNOMIAL_DIMENSION, |_, _| 0.0),
             &gram,
+            Some(&DirectPrecisionRescueSource::from_gram(&gram)),
         )
-        .expect_err("a cancellation-scale pivot needs precision rescue evidence");
+        .expect("double-double proves and reattaches the cancellation-scale mode");
+        let rescue = basis
+            .evidence
+            .precision_rescue
+            .expect("the actual upgraded range is recorded");
+        assert_eq!(rescue.first_mode, 1);
+        assert_eq!(rescue.mode_count, 1);
+        assert_eq!(rescue.precision_bits, 106);
+        assert_eq!(rescue.conclusion, PrecisionRescueConclusion::Positive);
+        assert_eq!(basis.evidence.retained_modes, 2);
+        assert!(basis.evidence.pivot_intervals[1].lower > 0.0);
+        assert!(basis.evidence.field_energy_identity_error <= 1.0e-11);
+        assert!(basis.evidence.side_condition_error <= 1.0e-11);
+        assert!(basis.evidence.recovery_round_trip_error <= 1.0e-11);
+        assert!(basis.evidence.canonical_response_round_trip_error <= 1.0e-11);
+    }
+
+    #[test]
+    fn quotient_rescue_keeps_zero_negative_and_gray_conclusions_distinct() {
+        let trailing = DenseMatrix::from_fn(1, POLYNOMIAL_DIMENSION, |_, _| 0.0);
+        let zero = DenseMatrix::from_fn(1, 1, |_, _| 0.0);
+
+        let algebraic = DirectPrecisionRescueSource::with_algebraic_zero(&zero);
+        assert!(matches!(
+            EnergyOrthonormalQuotientBasis::factor(&zero, &trailing, &zero, Some(&algebraic)),
+            Err(RepresentationFailure::QuotientRankDeficient {
+                evidence: PrecisionRescueEvidence {
+                    conclusion: PrecisionRescueConclusion::AlgebraicZero,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let unresolved = DirectPrecisionRescueSource::from_gram(&zero);
+        assert!(matches!(
+            EnergyOrthonormalQuotientBasis::factor(&zero, &trailing, &zero, Some(&unresolved)),
+            Err(RepresentationFailure::QuotientPrecisionRescueGrayZone {
+                evidence: PrecisionRescueEvidence {
+                    conclusion: PrecisionRescueConclusion::GrayZone,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let negative = DenseMatrix::from_fn(1, 1, |_, _| -1.0);
+        let corrupted = DirectPrecisionRescueSource::from_gram(&negative);
+        assert!(matches!(
+            EnergyOrthonormalQuotientBasis::factor(
+                &negative,
+                &trailing,
+                &negative,
+                Some(&corrupted),
+            ),
+            Err(RepresentationFailure::QuotientNegativeCurvature { .. })
+        ));
+    }
+
+    #[test]
+    fn quotient_rescue_rejects_all_65_ambiguous_modes_without_truncation() {
+        let dimension = 65;
+        let zero = DenseMatrix::from_fn(dimension, dimension, |_, _| 0.0);
+        let source = DirectPrecisionRescueSource::from_gram(&zero);
+        let failure = EnergyOrthonormalQuotientBasis::factor(
+            &zero,
+            &DenseMatrix::from_fn(dimension, POLYNOMIAL_DIMENSION, |_, _| 0.0),
+            &zero,
+            Some(&source),
+        )
+        .expect_err("65 unresolved modes exceed the bounded rescue policy");
         match failure {
-            RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
+            RepresentationFailure::QuotientPrecisionRescueGrayZone {
                 quotient_dimension,
-                pivot_index,
-                interval: Some(interval),
+                evidence,
                 execution,
             } => {
-                assert_eq!(quotient_dimension, 2);
-                assert_eq!(pivot_index, 1);
-                assert!(interval.lower <= 0.0);
-                assert!(interval.upper > 0.0);
+                assert_eq!(quotient_dimension, dimension);
+                assert_eq!(evidence.first_mode, 0);
+                assert_eq!(evidence.mode_count, dimension);
+                assert_eq!(evidence.precision_bits, 106);
+                assert_eq!(
+                    evidence.conclusion,
+                    PrecisionRescueConclusion::CapacityExceeded,
+                );
                 assert_eq!(execution, AnalysisExecutionEvidence::pre_backend());
             }
-            other => panic!("unexpected factorization failure: {other:?}"),
+            other => panic!("unexpected bounded-rescue result: {other:?}"),
         }
     }
 
@@ -4630,6 +5247,7 @@ mod tests {
                 mode: VerifiedCanonicalMode {
                     residual: 0.0,
                     execution: AnalysisExecutionEvidence::pre_backend(),
+                    precision_rescue: None,
                 },
             }
         );
@@ -4666,7 +5284,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_preflight_polynomial_analysis_retains_gray_zone_failure() {
+    fn preflight_polynomial_analysis_rescues_a_small_positive_pi1_mode() {
         let functionals = [
             functional([0.0; 3], 1.0, [0.0; 3]),
             functional([0.0; 3], 0.0, [1.0, 0.0, 0.0]),
@@ -4690,10 +5308,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert!(matches!(
-            preflight_polynomial_analysis_failure(&fitting_uses),
-            Some(RepresentationFailure::PolynomialRankGrayZone { .. })
-        ));
+        assert_eq!(preflight_polynomial_analysis_failure(&fitting_uses), None);
+
+        let functionals = fitting_uses
+            .iter()
+            .map(|usage| usage.functional().clone())
+            .collect::<Vec<_>>();
+        let (coordinates, _, polynomial) =
+            assemble_polynomial_pairing(&functionals).expect("the canonical Pi1 pairing assembles");
+        let (_, rank, evidence) = verify_polynomial_rank(&polynomial, &functionals, &coordinates)
+            .expect("double-double proves the small fourth Pi1 mode positive");
+        assert_eq!(rank, POLYNOMIAL_DIMENSION);
+        let rescue = evidence
+            .precision_rescue
+            .expect("the actual polynomial upgrade is recorded");
+        assert_eq!(rescue.first_mode, 0);
+        assert_eq!(rescue.mode_count, POLYNOMIAL_DIMENSION);
+        assert_eq!(rescue.precision_bits, 106);
+        assert_eq!(rescue.conclusion, PrecisionRescueConclusion::Positive);
     }
 
     #[test]
@@ -4739,6 +5371,7 @@ mod tests {
             &small_positive,
             &trailing_polynomial,
             &small_positive,
+            None,
         )
         .expect("a reliably positive mode is retained regardless of relative scale");
         assert_eq!(basis.evidence.retained_modes, 2);
@@ -4761,7 +5394,7 @@ mod tests {
                 0.0,
             ),
         ] {
-            match EnergyOrthonormalQuotientBasis::factor(&gram, &trailing_polynomial, &gram) {
+            match EnergyOrthonormalQuotientBasis::factor(&gram, &trailing_polynomial, &gram, None) {
                 Err(RepresentationFailure::QuotientFactorizationNotPositive {
                     quotient_dimension,
                     pivot_index,

@@ -35,15 +35,16 @@ use crate::diagnostics::{
     CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
     CapacityFailureKind, ConvexResidualEvidence as PublicConvexResidualEvidence,
     ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
-    CubicLltPivotInterval, CubicLltPivotIntervalParts, CubicQuotientConstructionEvidence,
-    CubicQuotientConstructionEvidenceParts, CubicQuotientFactorizationEvidence,
-    CubicQuotientFactorizationEvidenceParts, DirectInputConflictEvidence, InertiaCounts,
-    InertiaEvidence, InfeasibilityCertificateEvidence, InfeasibilityCertificateEvidenceParts,
-    InterpretableRankDeficiencyEvidence, InterpretableRankDeficiencyEvidenceParts,
-    LinearResidualEvidence, ProblemDiagnosis, RankDecision, RankDeficiencyConcept, RankEvidence,
-    RankEvidenceDomain, RankEvidenceParts, RecessionRayEvidence, RecessionRayEvidenceParts,
-    RecoveryVerificationEvidence, RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence,
-    ResidualDimension, ScalingFailureReason, ScalingSummary, SharedLevelSetConflictSourceEvidence,
+    CubicLltPivotInterval, CubicLltPivotIntervalParts, CubicPrecisionRescueEvidence,
+    CubicQuotientConstructionEvidence, CubicQuotientConstructionEvidenceParts,
+    CubicQuotientFactorizationEvidence, CubicQuotientFactorizationEvidenceParts,
+    DirectInputConflictEvidence, InertiaCounts, InertiaEvidence, InfeasibilityCertificateEvidence,
+    InfeasibilityCertificateEvidenceParts, InterpretableRankDeficiencyEvidence,
+    InterpretableRankDeficiencyEvidenceParts, LinearResidualEvidence, ProblemDiagnosis,
+    RankDecision, RankDeficiencyConcept, RankEvidence, RankEvidenceDomain, RankEvidenceParts,
+    RecessionRayEvidence, RecessionRayEvidenceParts, RecoveryVerificationEvidence,
+    RecoveryVerificationEvidenceParts, RelationGraphConflictEvidence, ResidualDimension,
+    ScalingFailureReason, ScalingSummary, SharedLevelSetConflictSourceEvidence,
     SharedLevelSetRelationConflictEvidence, SideConditionEvidence, SolveAttemptKind,
     SolveAttemptRecord, SolveAttemptRecordParts, SolveAttemptTermination,
     SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
@@ -6504,6 +6505,13 @@ fn retain_representation_failure(
                 mode.execution.solver_invoked,
                 mode.execution.hidden_regularization_applied,
             ));
+            if let Some(rescue) = mode.precision_rescue {
+                report.analysis_failure =
+                    Some(AnalysisFailureEvidence::PolynomialPrecisionRescue {
+                        rescue: public_precision_rescue(rescue),
+                        backend_invoked: mode.execution.solver_invoked,
+                    });
+            }
         }
         RepresentationFailure::PolynomialRankGrayZone { evidence } => {
             report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
@@ -6519,6 +6527,19 @@ fn retain_representation_failure(
                 decision: RankDecision::NumericalDecisionGrayZone,
                 backend_invoked: evidence.backend_invoked,
             }));
+            if let Some(rescue) = evidence.precision_rescue {
+                report.analysis_failure =
+                    Some(AnalysisFailureEvidence::PolynomialPrecisionRescue {
+                        rescue: public_precision_rescue(rescue),
+                        backend_invoked: evidence.backend_invoked,
+                    });
+            }
+        }
+        RepresentationFailure::PolynomialNegativeCurvature { evidence } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::PolynomialPrecisionRescue {
+                rescue: public_precision_rescue(*evidence),
+                backend_invoked: false,
+            });
         }
         RepresentationFailure::QuotientPivotRequiresPrecisionRescue {
             quotient_dimension,
@@ -6539,6 +6560,62 @@ fn retain_representation_failure(
                     backend_invoked: execution.solver_invoked,
                 },
             );
+        }
+        RepresentationFailure::QuotientPrecisionRescueGrayZone {
+            quotient_dimension,
+            evidence,
+            execution,
+        } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::QuotientPrecisionRescue {
+                quotient_dimension: *quotient_dimension,
+                rescue: public_precision_rescue(*evidence),
+                backend_invoked: execution.solver_invoked,
+            });
+        }
+        RepresentationFailure::QuotientRankDeficient {
+            quotient_dimension,
+            mode,
+            ..
+        } => {
+            report.backend_rank = Some(RankEvidence::new(RankEvidenceParts {
+                domain: RankEvidenceDomain::CubicReducedPairing,
+                dimension: *quotient_dimension,
+                rank: None,
+                exact_zero_index: None,
+                rrqr_ratio: None,
+                singular_values: Vec::new(),
+                svd_ratio: None,
+                reject_ratio: None,
+                accept_ratio: None,
+                decision: RankDecision::RankDeficient,
+                backend_invoked: mode.execution.solver_invoked,
+            }));
+            report.interpretable_rank_deficiency = Some(public_interpretable_rank_deficiency(
+                RankDeficiencyConcept::CubicQuotientFieldMode,
+                RankEvidenceDomain::CubicReducedPairing,
+                source_relations,
+                mode.residual,
+                mode.execution.solver_invoked,
+                mode.execution.hidden_regularization_applied,
+            ));
+            if let Some(rescue) = mode.precision_rescue {
+                report.analysis_failure = Some(AnalysisFailureEvidence::QuotientPrecisionRescue {
+                    quotient_dimension: *quotient_dimension,
+                    rescue: public_precision_rescue(rescue),
+                    backend_invoked: mode.execution.solver_invoked,
+                });
+            }
+        }
+        RepresentationFailure::QuotientNegativeCurvature {
+            quotient_dimension,
+            evidence,
+            execution,
+        } => {
+            report.analysis_failure = Some(AnalysisFailureEvidence::QuotientPrecisionRescue {
+                quotient_dimension: *quotient_dimension,
+                rescue: public_precision_rescue(*evidence),
+                backend_invoked: execution.solver_invoked,
+            });
         }
         RepresentationFailure::QuotientFactorizationNotPositive {
             quotient_dimension,
@@ -7244,6 +7321,10 @@ fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
                 kernel_ridge_applied: evidence.quotient_factorization.kernel_ridge_applied,
                 gram_jitter_applied: evidence.quotient_factorization.gram_jitter_applied,
                 mode_truncation_applied: evidence.quotient_factorization.mode_truncation_applied,
+                precision_rescue: evidence
+                    .quotient_factorization
+                    .precision_rescue
+                    .map(public_precision_rescue),
             },
         ),
         polynomial_singular_values: evidence.singular_values.clone(),
@@ -7251,6 +7332,9 @@ fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
         polynomial_svd_ratio: evidence.polynomial_svd_ratio,
         polynomial_rank_reject_ratio: evidence.polynomial_rank_reject_ratio,
         polynomial_rank_accept_ratio: evidence.polynomial_rank_accept_ratio,
+        polynomial_precision_rescue: evidence
+            .polynomial_precision_rescue
+            .map(public_precision_rescue),
         null_space_defect: evidence.quotient_construction.null_space_defect,
         reduced_symmetry_defect: evidence.reduced_symmetry_defect,
         reduced_symmetry_defect_limit: evidence.symmetry_defect_limit,
@@ -7625,12 +7709,29 @@ fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis 
         RepresentationFailure::PolynomialRankDeficient { .. } => {
             ProblemDiagnosis::UnidentifiedFieldMode
         }
+        RepresentationFailure::QuotientRankDeficient { .. } => {
+            ProblemDiagnosis::UnidentifiedFieldMode
+        }
         RepresentationFailure::PolynomialRankGrayZone { .. } => {
+            ProblemDiagnosis::NumericalDecisionGrayZone
+        }
+        RepresentationFailure::QuotientPrecisionRescueGrayZone { .. } => {
             ProblemDiagnosis::NumericalDecisionGrayZone
         }
         RepresentationFailure::AffineReproductionBackend(failure) => diagnose_kkt(failure),
         _ => ProblemDiagnosis::NumericalFailure,
     }
+}
+
+fn public_precision_rescue(
+    evidence: crate::cubic_equality::PrecisionRescueEvidence,
+) -> CubicPrecisionRescueEvidence {
+    CubicPrecisionRescueEvidence::new(
+        evidence.first_mode,
+        evidence.mode_count,
+        evidence.precision_bits,
+        evidence.conclusion.into(),
+    )
 }
 
 fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
