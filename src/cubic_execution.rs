@@ -5,16 +5,18 @@ use crate::clarabel_backend::{
 };
 use crate::cubic::GlobalAnisotropyMetric;
 use crate::cubic_equality::{
-    CanonicalEqualityParticipation, CanonicalInequalitySense, CanonicalRelationToleranceEvidence,
-    CanonicalSoftResidualBlockKind, CanonicalViolationLoss, CpdEvidence, CubicCanonicalProblem,
-    CubicEqualityCore, CubicEqualityFailure, CubicEqualitySolution, CubicRepresentation,
+    CanonicalInequalitySense, CanonicalRelationToleranceEvidence, CanonicalSoftResidualBlockKind,
+    CanonicalViolationLoss, CpdEvidence, CubicCanonicalProblem, CubicEqualityCore,
+    CubicEqualityFailure, CubicEqualitySolution, CubicRepresentation,
     CubicRepresentationRecoveryFailure, CubicSolverFieldCoordinates, FunctionalViolationEnvelope,
     POLYNOMIAL_DIMENSION, PhysicalSideConditionEvidence, RecoveredCubicField,
     RecoveredHardEquality, RecoveredSemanticLatent, RecoveredSoftEquality, RecoveredSoftObjective,
     RepresentationFailure, canonical_characteristic_field_scale, canonical_fitting_uses,
     canonical_gauge_offset, dense_matrix_vector_product, dot_product, relative_slice_error,
 };
-use crate::cubic_solver_form::{CanonicalCubicSolverForm, CubicFieldCoordinateLayout};
+use crate::cubic_solver_form::{
+    CanonicalCubicSolverForm, CanonicalHardRecoveryGraph, CubicFieldCoordinateLayout,
+};
 use crate::functional::{
     DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, GroupId, ResidualId,
     UsageProvenance,
@@ -234,6 +236,7 @@ pub(crate) struct CubicQpEvidence {
     pub(crate) whitening_round_trip_error: f64,
     pub(crate) objective_round_trip_error: f64,
     pub(crate) provenance_verified: bool,
+    pub(crate) hard_recovery: CanonicalHardRecoveryGraph,
 }
 
 #[derive(Debug, Clone)]
@@ -536,14 +539,21 @@ fn solve_convex_qp(
         })
         .ok_or(QpAssemblyFailureReason::InvalidShape)
         .map_err(CubicExecutionFailure::Assembly)?;
-    let equality_constraints = problem
+    let canonical_relations = problem
         .equalities
-        .iter()
-        .filter(|equality| {
-            equality.participation() == CanonicalEqualityParticipation::SolverConstraint
-        })
-        .count();
-    let constraints = equality_constraints
+        .len()
+        .checked_add(problem.soft_equalities.len())
+        .and_then(|count| count.checked_add(problem.affine_inequalities.len()))
+        .ok_or(QpAssemblyFailureReason::InvalidShape)
+        .map_err(CubicExecutionFailure::Assembly)?;
+    let (representation, field_form) =
+        CubicRepresentation::build(fitting_uses, metric, problem.field_energy_normalization)
+            .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
+    let canonical_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
+        .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
+    let constraints = canonical_form
+        .solver_hard_rows()
+        .count()
         .checked_add(problem.affine_inequalities.len())
         .and_then(|count| {
             count.checked_add(
@@ -556,24 +566,12 @@ fn solve_convex_qp(
         })
         .ok_or(QpAssemblyFailureReason::InvalidShape)
         .map_err(CubicExecutionFailure::Assembly)?;
-    let canonical_relations = problem
-        .equalities
-        .len()
-        .checked_add(problem.soft_equalities.len())
-        .and_then(|count| count.checked_add(problem.affine_inequalities.len()))
-        .ok_or(QpAssemblyFailureReason::InvalidShape)
-        .map_err(CubicExecutionFailure::Assembly)?;
     let capacity = if matches!(fault, Some(QpFaultInjection::Capacity)) {
         plan_convex_qp_capacity(usize::MAX, constraints, canonical_relations)
     } else {
         plan_convex_qp_capacity(variables, constraints, canonical_relations)
     }
     .map_err(|failure| CubicExecutionFailure::Capacity(Box::new(failure)))?;
-    let (representation, field_form) =
-        CubicRepresentation::build(fitting_uses, metric, problem.field_energy_normalization)
-            .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
-    let canonical_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
-        .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
     let mut form = assemble_qp_form(&canonical_form, capacity)?;
     if matches!(fault, Some(QpFaultInjection::Provenance)) {
         form.hard_equality_rows[0].derived_column = Some(DerivedColumnId::from_residual(
@@ -2357,6 +2355,7 @@ fn recover_and_verify_qp(
             whitening_round_trip_error,
             objective_round_trip_error,
             provenance_verified,
+            hard_recovery: canonical_form.hard_recovery.clone(),
         }),
     })
 }
@@ -2410,7 +2409,8 @@ fn verifies_qp_form_provenance(
     let coordinate_layout = CubicFieldCoordinateLayout::Quotient;
     let variable_layout =
         canonical_form.variable_layout(coordinate_layout, form.soft_violation_variables);
-    if form.polynomial_variables != POLYNOMIAL_DIMENSION
+    if !canonical_form.verifies_hard_recovery()
+        || form.polynomial_variables != POLYNOMIAL_DIMENSION
         || form.semantic_latents != canonical_form.semantic_latents
         || form.hard_equality_rows.len() != form.equality_constraints
         || form.affine_inequality_rows.len() != canonical_form.affine_rows.len()
@@ -2911,6 +2911,37 @@ mod tests {
         problem
     }
 
+    fn add_consistent_nontrivial_hard_dependency(problem: &mut CubicCanonicalProblem) {
+        let first = problem.equalities[0]
+            .field()
+            .expect("the manufactured equality has a field functional")
+            .functional()
+            .terms()[0];
+        let second = problem.equalities[1]
+            .field()
+            .expect("the manufactured equality has a field functional")
+            .functional()
+            .terms()[0];
+        let provenance = UsageProvenance::new(
+            SourceId::new("nontrivial-dependent"),
+            None,
+            RelationId::new("nontrivial-dependent-relation"),
+            ResidualId::new("nontrivial-dependent-residual"),
+            SemanticRolePath::new("manufactured/nontrivial-dependent"),
+        );
+        let functional =
+            CanonicalFunctional::new(FunctionalDimension::FieldValue, vec![first, second])
+                .expect("the sum of two distinct value supports is canonical");
+        problem.equalities.push(CanonicalHardEquality::new(
+            Some(FunctionalUse::new(functional, provenance.clone())),
+            Vec::new(),
+            provenance,
+            FunctionalDimension::FieldValue,
+            MANUFACTURED_TARGETS[0] + MANUFACTURED_TARGETS[1],
+            CanonicalEqualityParticipation::VerificationOnly,
+        ));
+    }
+
     fn soft_bounded_manufactured_problem() -> CubicCanonicalProblem {
         let mut problem = manufactured_problem();
         let equality_use = problem.equalities[8].field().unwrap();
@@ -3073,6 +3104,34 @@ mod tests {
                 .expect_err("the Equality entry point must not ignore an affine inequality"),
             CubicEqualityFailure::AffineInequalityRequiresConvexQp
         );
+    }
+
+    #[test]
+    fn equality_and_qp_share_exact_nontrivial_hard_recovery() {
+        let mut equality_problem = manufactured_problem();
+        add_consistent_nontrivial_hard_dependency(&mut equality_problem);
+        let equality = CubicEqualityCore::solve_canonical(
+            equality_problem,
+            GlobalAnisotropyMetric::identity(),
+        )
+        .expect("the exact dependent relation should recover through Equality KKT");
+        assert_eq!(equality.assembly.canonical_hard_equalities, 11);
+        assert_eq!(equality.assembly.hard_equalities, 10);
+        assert_eq!(equality.hard_equalities.len(), 11);
+        assert_eq!(equality.hard_recovery.retained_rows.len(), 10);
+        assert_eq!(equality.hard_recovery.relations.len(), 11);
+        assert!(equality.provenance_verified);
+
+        let mut qp_problem = bounded_manufactured_problem();
+        add_consistent_nontrivial_hard_dependency(&mut qp_problem);
+        let solution = CubicExecutionCore::solve(qp_problem, GlobalAnisotropyMetric::identity())
+            .expect("the same exact dependency should recover through Convex QP");
+        let qp = solution.qp.expect("the bound selects Convex QP");
+        assert_eq!(qp.capacity.constraints, 11);
+        assert_eq!(qp.hard_recovery.retained_rows.len(), 10);
+        assert_eq!(qp.hard_recovery.relations.len(), 11);
+        assert_eq!(solution.hard_equalities.len(), 11);
+        assert!(qp.provenance_verified);
     }
 
     #[test]

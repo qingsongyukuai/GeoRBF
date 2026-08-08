@@ -40,6 +40,7 @@ include = [
     "/docs/implementation/40-verified-energy-orthonormal-quotient.md",
     "/docs/implementation/41-precision-rescue-oracle-double-double.md",
     "/docs/implementation/42-bounded-precision-rescue.md",
+    "/docs/implementation/43-canonical-hard-recovery-graph.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/oracle/precision-rescue-v1/**",
     "/validation/v0.1.0/**",

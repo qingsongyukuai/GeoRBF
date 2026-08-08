@@ -3150,6 +3150,8 @@ impl EqualityLowering {
         kind: SourceHardRelationKind,
     ) -> usize {
         let (key, normalized_target) = normalized_equality_key(&equality);
+        let source_sign =
+            canonical_normalization_sign(equality.field(), equality.latent_coefficients());
         let canonical_index =
             if let Some((index, first_target)) = self.canonical_index_by_key.get(&key).copied() {
                 if first_target != normalized_target {
@@ -3172,6 +3174,15 @@ impl EqualityLowering {
                 if equality.participation() == CanonicalEqualityParticipation::SolverConstraint {
                     self.canonical_equalities[index].promote_to_solver_constraint();
                 }
+                let canonical_sign = canonical_normalization_sign(
+                    self.canonical_equalities[index].field(),
+                    self.canonical_equalities[index].latent_coefficients(),
+                );
+                self.canonical_equalities[index].add_source_recovery(
+                    equality.provenance().clone(),
+                    source_sign / canonical_sign,
+                    equality.target(),
+                );
                 index
             } else {
                 let index = self.canonical_equalities.len();

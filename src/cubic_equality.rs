@@ -14,7 +14,8 @@ use std::cell::RefCell;
 use crate::capacity::{CapacityExceededEvidence, plan_equality_capacity};
 use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::cubic_solver_form::{
-    CanonicalCubicFieldForm, CanonicalCubicSolverForm, CubicFieldCoordinateLayout,
+    CanonicalCubicFieldForm, CanonicalCubicSolverForm, CanonicalHardRecoveryGraph,
+    CubicFieldCoordinateLayout,
 };
 use crate::faer_backend;
 use crate::functional::{
@@ -2574,9 +2575,17 @@ pub(crate) struct CanonicalHardEquality {
     field: Option<FunctionalUse>,
     latent_coefficients: Vec<SemanticLatentCoefficient>,
     provenance: UsageProvenance,
+    source_recoveries: Vec<CanonicalHardSourceRecovery>,
     dimension: FunctionalDimension,
     target: f64,
     participation: CanonicalEqualityParticipation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalHardSourceRecovery {
+    pub(crate) provenance: UsageProvenance,
+    pub(crate) coefficient: f64,
+    pub(crate) target: f64,
 }
 
 impl CanonicalHardEquality {
@@ -2591,6 +2600,11 @@ impl CanonicalHardEquality {
         Self {
             field,
             latent_coefficients,
+            source_recoveries: vec![CanonicalHardSourceRecovery {
+                provenance: provenance.clone(),
+                coefficient: 1.0,
+                target,
+            }],
             provenance,
             dimension,
             target,
@@ -2621,6 +2635,23 @@ impl CanonicalHardEquality {
 
     pub(crate) fn provenance(&self) -> &UsageProvenance {
         &self.provenance
+    }
+
+    pub(crate) fn source_recoveries(&self) -> &[CanonicalHardSourceRecovery] {
+        &self.source_recoveries
+    }
+
+    pub(crate) fn add_source_recovery(
+        &mut self,
+        provenance: UsageProvenance,
+        coefficient: f64,
+        target: f64,
+    ) {
+        self.source_recoveries.push(CanonicalHardSourceRecovery {
+            provenance,
+            coefficient,
+            target,
+        });
     }
 
     pub(crate) fn dimension(&self) -> FunctionalDimension {
@@ -3522,6 +3553,7 @@ impl PhysicalSideConditionEvidence {
 pub(crate) struct CubicEqualitySolution {
     pub(crate) representation: CpdEvidence,
     pub(crate) assembly: EqualityAssemblyEvidence,
+    pub(crate) hard_recovery: CanonicalHardRecoveryGraph,
     pub(crate) backend: KktSolveEvidence,
     pub(crate) field: RecoveredCubicField,
     pub(crate) semantic_latents: Vec<RecoveredSemanticLatent>,
@@ -3755,12 +3787,13 @@ impl CubicEqualityCore {
             .checked_add(POLYNOMIAL_DIMENSION)
             .and_then(|count| count.checked_add(problem.semantic_latents.len()))
             .unwrap_or(usize::MAX);
-        let equality_constraints = problem
-            .equalities
-            .iter()
-            .filter(|equality| {
-                equality.participation == CanonicalEqualityParticipation::SolverConstraint
-            })
+        let (representation, field_form) =
+            CubicRepresentation::build(fitting_uses, metric, problem.field_energy_normalization)
+                .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
+        let solver_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
+            .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
+        let equality_constraints = solver_form
+            .solver_hard_rows()
             .count()
             .checked_add(POLYNOMIAL_DIMENSION)
             .unwrap_or(usize::MAX);
@@ -3769,11 +3802,6 @@ impl CubicEqualityCore {
                 Box::new(failure),
             )))
         })?;
-        let (representation, field_form) =
-            CubicRepresentation::build(fitting_uses, metric, problem.field_energy_normalization)
-                .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
-        let solver_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
-            .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
         #[cfg(test)]
         if let Some(failure) = take_injected_kkt_failure() {
             return Err(CubicEqualityFailure::Backend {
@@ -3949,7 +3977,8 @@ fn verifies_assembled_provenance_and_rows(
 ) -> bool {
     let variable_layout = solver_form.variable_layout(CubicFieldCoordinateLayout::Standard, 0);
     let solver_equalities = solver_form.solver_hard_rows().collect::<Vec<_>>();
-    if assembly.hard_equality_rows.len() != solver_equalities.len()
+    if !solver_form.verifies_hard_recovery()
+        || assembly.hard_equality_rows.len() != solver_equalities.len()
         || assembly.soft_objective_blocks.len() != solver_form.soft_objectives.len()
         || backend.equality_multipliers.len() != assembly.side_conditions + assembly.hard_equalities
     {
@@ -4310,6 +4339,7 @@ fn recover_and_verify(
     Ok(CubicEqualitySolution {
         representation: representation_evidence,
         assembly,
+        hard_recovery: solver_form.hard_recovery.clone(),
         backend,
         field,
         semantic_latents,
