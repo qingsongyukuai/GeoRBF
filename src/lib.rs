@@ -29,6 +29,8 @@ pub mod model;
 #[allow(dead_code)]
 mod numerical;
 pub mod observation;
+#[allow(dead_code)]
+mod precision_rescue;
 pub mod problem;
 pub mod relation;
 

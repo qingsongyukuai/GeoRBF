@@ -1,0 +1,30 @@
+{
+  "case": {
+    "path": "cases/precision-rescue.json",
+    "sha256": "sha256:81275ae5686b9af66a7124999d8ff034a273087d9f07835bac046a09d2f0c2cd"
+  },
+  "dependencies": {
+    "packages": []
+  },
+  "fixture": {
+    "path": "fixtures/precision-rescue.json",
+    "sha256": "sha256:d5c169e58455b09bd0b3fc78f1b968ca85f0406f1642dcf1c12b8801e9735c9e"
+  },
+  "generator": {
+    "path": "generate.py",
+    "sha256": "sha256:0bbf50406b7cecc12d8445b46e75ced13196606b3c2b75e201b2333fbf8b7c19"
+  },
+  "interpreter": {
+    "implementation": "CPython",
+    "version": "3.12.3"
+  },
+  "precision": {
+    "output_significant_digits": 120,
+    "rounding": "ROUND_HALF_EVEN",
+    "working_decimal_digits": 160
+  },
+  "provenance": {
+    "source": "GeoRBF issue #41"
+  },
+  "schema_version": "georbf-precision-rescue-manifest-v1"
+}
