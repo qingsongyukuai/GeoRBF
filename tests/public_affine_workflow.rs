@@ -225,10 +225,10 @@ fn user_can_fit_and_sample_an_absolute_affine_field() {
             .iter()
             .all(|interval| interval.lower_bound() > 0.0)
     );
-    assert!(factorization.field_energy_identity_error() <= 1.0e-11);
-    assert!(factorization.side_condition_error() <= 1.0e-11);
-    assert!(factorization.recovery_round_trip_error() <= 1.0e-11);
-    assert!(factorization.canonical_response_round_trip_error() <= 1.0e-11);
+    assert!(factorization.field_energy_identity_error().unwrap() <= 1.0e-11);
+    assert!(factorization.side_condition_error().unwrap() <= 1.0e-11);
+    assert!(factorization.recovery_round_trip_error().unwrap() <= 1.0e-11);
+    assert!(factorization.canonical_response_round_trip_error().unwrap() <= 1.0e-11);
     assert!(!factorization.kernel_ridge_applied());
     assert!(!factorization.gram_jitter_applied());
     assert!(!factorization.mode_truncation_applied());

@@ -367,6 +367,13 @@ impl RepresentationBuildEvidence {
             problem_regularization_applied: evidence.problem_regularization_applied,
         }
     }
+
+    pub(crate) fn response_assembly_failed(evidence: &CpdEvidence) -> Self {
+        let mut build = Self::completed(evidence);
+        build.failure_stage = RepresentationBuildStage::ResponseAssembly;
+        build.last_completed_stage = RepresentationBuildStage::QuotientFactorization;
+        build
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -633,6 +640,15 @@ pub(crate) enum CubicRepresentationRecoveryFailure {
 }
 
 impl CubicRepresentation {
+    pub(crate) fn audit_response_assembly_failure(
+        &self,
+        failure: RepresentationFailure,
+    ) -> RepresentationFailure {
+        failure.audited(RepresentationBuildEvidence::response_assembly_failed(
+            &self.evidence,
+        ))
+    }
+
     pub(crate) fn build(
         fitting_uses: Vec<FunctionalUse>,
         metric: GlobalAnisotropyMetric,
@@ -875,6 +891,13 @@ impl CubicRepresentation {
         &self,
         functional: &CanonicalFunctional,
     ) -> Result<CubicFunctionalResponse, RepresentationFailure> {
+        #[cfg(test)]
+        if take_injected_response_assembly_failure() {
+            return Err(RepresentationFailure::QuotientResponseRoundTripContract {
+                observed: f64::INFINITY,
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_response_round_trip_limit,
+            });
+        }
         let (standard_field, polynomial) = self.standard_functional_row(functional)?;
         let quotient_response = self.null_space.project(&standard_field)?;
         let quotient_field = self.energy_basis.response(&quotient_response)?;
@@ -1707,10 +1730,10 @@ pub(crate) struct QuotientFactorizationEvidence {
     pub(crate) full_spectrum_analysis_count: usize,
     pub(crate) normalized_backward_error: f64,
     pub(crate) pivot_intervals: Vec<OutwardRoundedInterval>,
-    pub(crate) field_energy_identity_error: f64,
-    pub(crate) side_condition_error: f64,
-    pub(crate) recovery_round_trip_error: f64,
-    pub(crate) canonical_response_round_trip_error: f64,
+    pub(crate) field_energy_identity_error: Option<f64>,
+    pub(crate) side_condition_error: Option<f64>,
+    pub(crate) recovery_round_trip_error: Option<f64>,
+    pub(crate) canonical_response_round_trip_error: Option<f64>,
     pub(crate) kernel_ridge_applied: bool,
     pub(crate) gram_jitter_applied: bool,
     pub(crate) mode_truncation_applied: bool,
@@ -1884,10 +1907,10 @@ impl EnergyOrthonormalQuotientBasis {
                     full_spectrum_analysis_count: 0,
                     normalized_backward_error: 0.0,
                     pivot_intervals: Vec::new(),
-                    field_energy_identity_error: 0.0,
-                    side_condition_error: 0.0,
-                    recovery_round_trip_error: 0.0,
-                    canonical_response_round_trip_error: 0.0,
+                    field_energy_identity_error: Some(0.0),
+                    side_condition_error: Some(0.0),
+                    recovery_round_trip_error: Some(0.0),
+                    canonical_response_round_trip_error: Some(0.0),
                     kernel_ridge_applied: false,
                     gram_jitter_applied: false,
                     mode_truncation_applied: false,
@@ -1973,10 +1996,10 @@ impl EnergyOrthonormalQuotientBasis {
             full_spectrum_analysis_count: 0,
             normalized_backward_error,
             pivot_intervals,
-            field_energy_identity_error: 0.0,
-            side_condition_error: 0.0,
-            recovery_round_trip_error: 0.0,
-            canonical_response_round_trip_error: 0.0,
+            field_energy_identity_error: None,
+            side_condition_error: None,
+            recovery_round_trip_error: None,
+            canonical_response_round_trip_error: None,
             kernel_ridge_applied: false,
             gram_jitter_applied: false,
             mode_truncation_applied: false,
@@ -2020,7 +2043,7 @@ impl EnergyOrthonormalQuotientBasis {
             > EXECUTED_NUMERICAL_POLICY.quotient_basis_recovery_round_trip_limit
         {
             let mut evidence = provisional.evidence.clone();
-            evidence.recovery_round_trip_error = recovery_round_trip_error;
+            evidence.recovery_round_trip_error = Some(recovery_round_trip_error);
             return Err(RepresentationFailure::QuotientRecoveryRoundTripContract {
                 observed: recovery_round_trip_error,
                 limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_recovery_round_trip_limit,
@@ -2034,8 +2057,8 @@ impl EnergyOrthonormalQuotientBasis {
             > EXECUTED_NUMERICAL_POLICY.quotient_field_energy_identity_limit
         {
             let mut evidence = provisional.evidence.clone();
-            evidence.recovery_round_trip_error = recovery_round_trip_error;
-            evidence.field_energy_identity_error = field_energy_identity_error;
+            evidence.recovery_round_trip_error = Some(recovery_round_trip_error);
+            evidence.field_energy_identity_error = Some(field_energy_identity_error);
             return Err(RepresentationFailure::QuotientFieldEnergyIdentityContract {
                 observed: field_energy_identity_error,
                 limit: EXECUTED_NUMERICAL_POLICY.quotient_field_energy_identity_limit,
@@ -2058,9 +2081,9 @@ impl EnergyOrthonormalQuotientBasis {
             .fold(0.0_f64, f64::max);
         if side_condition_error > EXECUTED_NUMERICAL_POLICY.quotient_basis_side_condition_limit {
             let mut evidence = provisional.evidence.clone();
-            evidence.recovery_round_trip_error = recovery_round_trip_error;
-            evidence.field_energy_identity_error = field_energy_identity_error;
-            evidence.side_condition_error = side_condition_error;
+            evidence.recovery_round_trip_error = Some(recovery_round_trip_error);
+            evidence.field_energy_identity_error = Some(field_energy_identity_error);
+            evidence.side_condition_error = Some(side_condition_error);
             return Err(RepresentationFailure::QuotientSideConditionContract {
                 observed: side_condition_error,
                 limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_side_condition_limit,
@@ -2089,10 +2112,11 @@ impl EnergyOrthonormalQuotientBasis {
             > EXECUTED_NUMERICAL_POLICY.quotient_basis_response_round_trip_limit
         {
             let mut evidence = provisional.evidence.clone();
-            evidence.recovery_round_trip_error = recovery_round_trip_error;
-            evidence.field_energy_identity_error = field_energy_identity_error;
-            evidence.side_condition_error = side_condition_error;
-            evidence.canonical_response_round_trip_error = canonical_response_round_trip_error;
+            evidence.recovery_round_trip_error = Some(recovery_round_trip_error);
+            evidence.field_energy_identity_error = Some(field_energy_identity_error);
+            evidence.side_condition_error = Some(side_condition_error);
+            evidence.canonical_response_round_trip_error =
+                Some(canonical_response_round_trip_error);
             return Err(RepresentationFailure::QuotientResponseRoundTripContract {
                 observed: canonical_response_round_trip_error,
                 limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_response_round_trip_limit,
@@ -2102,10 +2126,10 @@ impl EnergyOrthonormalQuotientBasis {
 
         Ok(Self {
             evidence: QuotientFactorizationEvidence {
-                field_energy_identity_error,
-                side_condition_error,
-                recovery_round_trip_error,
-                canonical_response_round_trip_error,
+                field_energy_identity_error: Some(field_energy_identity_error),
+                side_condition_error: Some(side_condition_error),
+                recovery_round_trip_error: Some(recovery_round_trip_error),
+                canonical_response_round_trip_error: Some(canonical_response_round_trip_error),
                 ..provisional.evidence
             },
             ..provisional
@@ -3892,6 +3916,22 @@ pub(crate) struct CubicEqualityCore;
 #[cfg(test)]
 thread_local! {
     static INJECTED_KKT_FAILURE: RefCell<Option<KktFailure>> = const { RefCell::new(None) };
+    static INJECTED_RESPONSE_ASSEMBLY_FAILURE: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_response_assembly_failure_once() {
+    INJECTED_RESPONSE_ASSEMBLY_FAILURE.with(|slot| {
+        assert!(
+            !slot.replace(true),
+            "only one response failure may be injected per fit"
+        );
+    });
+}
+
+#[cfg(test)]
+fn take_injected_response_assembly_failure() -> bool {
+    INJECTED_RESPONSE_ASSEMBLY_FAILURE.with(|slot| slot.replace(false))
 }
 
 #[cfg(test)]
@@ -4000,7 +4040,11 @@ impl CubicEqualityCore {
             CubicRepresentation::build(fitting_uses, metric, problem.field_energy_normalization)
                 .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
         let solver_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
-            .map_err(|failure| CubicEqualityFailure::Representation(Box::new(failure)))?;
+            .map_err(|failure| {
+                CubicEqualityFailure::Representation(Box::new(
+                    representation.audit_response_assembly_failure(failure),
+                ))
+            })?;
         if solver_form.verifies_hard_conflict_witness() {
             if let Some(evidence) = solver_form.hard_recovery.conflict_witness.clone() {
                 return Err(CubicEqualityFailure::DirectInputConflict {
@@ -5118,10 +5162,26 @@ mod tests {
                 .iter()
                 .all(|interval| interval.lower > 0.0)
         );
-        assert!(factorization.field_energy_identity_error <= 1.0e-11);
-        assert!(factorization.side_condition_error <= 1.0e-11);
-        assert!(factorization.recovery_round_trip_error <= 1.0e-11);
-        assert!(factorization.canonical_response_round_trip_error <= 1.0e-11);
+        assert!(
+            factorization
+                .field_energy_identity_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
+        assert!(
+            factorization
+                .side_condition_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
+        assert!(
+            factorization
+                .recovery_round_trip_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
+        assert!(
+            factorization
+                .canonical_response_round_trip_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
         assert!(!factorization.kernel_ridge_applied);
         assert!(!factorization.gram_jitter_applied);
         assert!(!factorization.mode_truncation_applied);
@@ -5167,10 +5227,30 @@ mod tests {
         assert_eq!(rescue.conclusion, PrecisionRescueConclusion::Positive);
         assert_eq!(basis.evidence.retained_modes, 2);
         assert!(basis.evidence.pivot_intervals[1].lower > 0.0);
-        assert!(basis.evidence.field_energy_identity_error <= 1.0e-11);
-        assert!(basis.evidence.side_condition_error <= 1.0e-11);
-        assert!(basis.evidence.recovery_round_trip_error <= 1.0e-11);
-        assert!(basis.evidence.canonical_response_round_trip_error <= 1.0e-11);
+        assert!(
+            basis
+                .evidence
+                .field_energy_identity_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
+        assert!(
+            basis
+                .evidence
+                .side_condition_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
+        assert!(
+            basis
+                .evidence
+                .recovery_round_trip_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
+        assert!(
+            basis
+                .evidence
+                .canonical_response_round_trip_error
+                .is_some_and(|error| error <= 1.0e-11)
+        );
     }
 
     #[test]

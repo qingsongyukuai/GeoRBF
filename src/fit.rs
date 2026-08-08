@@ -8528,7 +8528,10 @@ fn diagnose_kkt(failure: &KktFailure) -> ProblemDiagnosis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cubic_equality::{RecoveryVerificationFailureReason, inject_kkt_failure_once};
+    use crate::cubic_equality::{
+        RecoveryVerificationFailureReason, inject_kkt_failure_once,
+        inject_response_assembly_failure_once,
+    };
     use crate::cubic_execution::{QpFaultInjection, inject_qp_fault_once};
     use crate::geometry::{Handedness, InputCoordinateFrame, LengthUnitLabel, Vector3};
     use crate::kkt::{EqualityKktSystem, solve_equality_kkt};
@@ -9377,5 +9380,41 @@ mod tests {
             diagnose_representation(&negative_curvature),
             ProblemDiagnosis::NegativeCurvature
         );
+    }
+
+    #[test]
+    fn response_assembly_failure_retains_completed_representation_evidence() {
+        inject_response_assembly_failure_once();
+        let failure = injectable_snapshot()
+            .fit()
+            .expect_err("the injected response-assembly contract must prevent publication");
+        let evidence = failure.report().representation_evidence();
+
+        assert_eq!(failure.diagnosis(), ProblemDiagnosis::NumericalFailure);
+        assert_eq!(
+            evidence.failure_stage(),
+            Some(RepresentationEvidenceStage::ResponseAssembly)
+        );
+        assert_eq!(
+            evidence.last_completed_stage(),
+            RepresentationEvidenceStage::QuotientFactorization
+        );
+        assert!(evidence.quotient_construction().is_some());
+        let factorization = evidence
+            .quotient_factorization()
+            .expect("completed LLT evidence survives response assembly failure");
+        assert_eq!(
+            evidence.quotient_dimension(),
+            Some(factorization.quotient_dimension())
+        );
+        assert!(factorization.field_energy_identity_error().is_some());
+        assert!(factorization.side_condition_error().is_some());
+        assert!(factorization.recovery_round_trip_error().is_some());
+        assert!(
+            factorization
+                .canonical_response_round_trip_error()
+                .is_some()
+        );
+        assert_eq!(evidence.recovery_source_count(), 0);
     }
 }

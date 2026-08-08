@@ -1009,10 +1009,10 @@ pub struct CubicQuotientFactorizationEvidence {
     full_spectrum_analysis_count: usize,
     normalized_backward_error: f64,
     pivot_intervals: Box<[CubicLltPivotInterval]>,
-    field_energy_identity_error: f64,
-    side_condition_error: f64,
-    recovery_round_trip_error: f64,
-    canonical_response_round_trip_error: f64,
+    field_energy_identity_error: Option<f64>,
+    side_condition_error: Option<f64>,
+    recovery_round_trip_error: Option<f64>,
+    canonical_response_round_trip_error: Option<f64>,
     kernel_ridge_applied: bool,
     gram_jitter_applied: bool,
     mode_truncation_applied: bool,
@@ -1027,10 +1027,10 @@ pub(crate) struct CubicQuotientFactorizationEvidenceParts {
     pub(crate) full_spectrum_analysis_count: usize,
     pub(crate) normalized_backward_error: f64,
     pub(crate) pivot_intervals: Vec<CubicLltPivotInterval>,
-    pub(crate) field_energy_identity_error: f64,
-    pub(crate) side_condition_error: f64,
-    pub(crate) recovery_round_trip_error: f64,
-    pub(crate) canonical_response_round_trip_error: f64,
+    pub(crate) field_energy_identity_error: Option<f64>,
+    pub(crate) side_condition_error: Option<f64>,
+    pub(crate) recovery_round_trip_error: Option<f64>,
+    pub(crate) canonical_response_round_trip_error: Option<f64>,
     pub(crate) kernel_ridge_applied: bool,
     pub(crate) gram_jitter_applied: bool,
     pub(crate) mode_truncation_applied: bool,
@@ -1093,23 +1093,23 @@ impl CubicQuotientFactorizationEvidence {
         &self.pivot_intervals
     }
 
-    /// Returns the recovered FieldEnergy-to-Euclidean identity defect.
-    pub fn field_energy_identity_error(&self) -> f64 {
+    /// Returns the recovered FieldEnergy-to-Euclidean identity defect once checked.
+    pub fn field_energy_identity_error(&self) -> Option<f64> {
         self.field_energy_identity_error
     }
 
-    /// Returns the complete-Pi1 side-condition defect after the energy change of basis.
-    pub fn side_condition_error(&self) -> f64 {
+    /// Returns the complete-Pi1 side-condition defect once checked.
+    pub fn side_condition_error(&self) -> Option<f64> {
         self.side_condition_error
     }
 
-    /// Returns the solver-coordinate recovery round-trip defect.
-    pub fn recovery_round_trip_error(&self) -> f64 {
+    /// Returns the solver-coordinate recovery round-trip defect once checked.
+    pub fn recovery_round_trip_error(&self) -> Option<f64> {
         self.recovery_round_trip_error
     }
 
-    /// Returns the canonical-response round-trip defect through energy coordinates.
-    pub fn canonical_response_round_trip_error(&self) -> f64 {
+    /// Returns the canonical-response round-trip defect once checked.
+    pub fn canonical_response_round_trip_error(&self) -> Option<f64> {
         self.canonical_response_round_trip_error
     }
 

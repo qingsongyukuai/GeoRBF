@@ -19,6 +19,10 @@ polynomial or quotient rescue evidence is lifted into the common bundle. A
 pre-backend failure retains its structured analysis failure there as well, so
 the actual quotient dimension, pivot interval or rescue conclusion and all
 sources that reached representation participation remain auditable.
+Checks inside the factorization certificate are optional until executed, so an
+early LLT rejection cannot masquerade as an exact zero-error energy, side,
+recovery, or response check. Response-assembly rejection retains the completed
+Householder and LLT certificates and identifies response assembly as its stage.
 
 `AllSourceRecoveryEvidence` is embedded after recovery. It independently lists
 participating and recovered sources and proves whether the unregularized

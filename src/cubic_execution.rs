@@ -586,7 +586,11 @@ fn solve_convex_qp(
         CubicRepresentation::build(fitting_uses, metric, problem.field_energy_normalization)
             .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
     let canonical_form = CanonicalCubicSolverForm::assemble(&representation, field_form, &problem)
-        .map_err(|failure| CubicExecutionFailure::Representation(Box::new(failure)))?;
+        .map_err(|failure| {
+            CubicExecutionFailure::Representation(Box::new(
+                representation.audit_response_assembly_failure(failure),
+            ))
+        })?;
     if canonical_form.verifies_hard_conflict_witness() {
         if let Some(evidence) = canonical_form.hard_recovery.conflict_witness.clone() {
             return Err(CubicExecutionFailure::Equality(Box::new(
