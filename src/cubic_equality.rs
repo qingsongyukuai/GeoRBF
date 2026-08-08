@@ -28,7 +28,7 @@ use crate::kernel::FieldEnergyNormalization;
 use crate::kkt::{EqualityKktSystem, KktFailure, KktSolveEvidence, solve_equality_kkt};
 use crate::math::dot3;
 use crate::numerical::{
-    EQUALITY_KKT_POLICY_V1, SpectralAnalysisFailure, SpectralRankDecision, analyze_spectral_rank,
+    EQUALITY_KKT_POLICY_V2, SpectralAnalysisFailure, SpectralRankDecision, analyze_spectral_rank,
 };
 use crate::precision_rescue::{
     CertifiedDoubleDouble, DOUBLE_DOUBLE_PRECISION_BITS, DoubleDouble, PrecisionRescueConclusion,
@@ -549,30 +549,30 @@ impl CubicRepresentation {
         let (mut reduced, trailing_polynomial, canonical_responses, quotient_construction) =
             implicit_quotient_congruence(&kernel, &polynomial, &null_space)?;
         let null_space_defect = quotient_construction.null_space_defect;
-        if null_space_defect > EQUALITY_KKT_POLICY_V1.null_space_defect_limit {
+        if null_space_defect > EQUALITY_KKT_POLICY_V2.null_space_defect_limit {
             return Err(RepresentationFailure::NullSpaceDefect {
                 observed: null_space_defect,
-                limit: EQUALITY_KKT_POLICY_V1.null_space_defect_limit,
+                limit: EQUALITY_KKT_POLICY_V2.null_space_defect_limit,
             });
         }
         if quotient_construction.householder_orthogonality_error
-            > EQUALITY_KKT_POLICY_V1.quotient_householder_orthogonality_limit
+            > EQUALITY_KKT_POLICY_V2.quotient_householder_orthogonality_limit
         {
             return Err(RepresentationFailure::HouseholderOrthogonalityContract {
                 observed: quotient_construction.householder_orthogonality_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_householder_orthogonality_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_householder_orthogonality_limit,
             });
         }
         if quotient_construction.canonical_response_round_trip_error
-            > EQUALITY_KKT_POLICY_V1.quotient_canonical_response_round_trip_limit
+            > EQUALITY_KKT_POLICY_V2.quotient_canonical_response_round_trip_limit
         {
             return Err(RepresentationFailure::CanonicalResponseRoundTripContract {
                 observed: quotient_construction.canonical_response_round_trip_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_canonical_response_round_trip_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_canonical_response_round_trip_limit,
             });
         }
         let reduced_symmetry_defect = normalized_symmetry_defect(&reduced);
-        let symmetry_defect_limit = EQUALITY_KKT_POLICY_V1.reduced_symmetry_multiplier
+        let symmetry_defect_limit = EQUALITY_KKT_POLICY_V2.reduced_symmetry_multiplier
             * f64::EPSILON
             * reduced.rows.max(reduced.columns) as f64;
         if reduced_symmetry_defect > symmetry_defect_limit {
@@ -603,10 +603,10 @@ impl CubicRepresentation {
         let (reduced_largest_singular_value, reduced_smallest_singular_value) =
             quotient_mode_risk_estimates(&reduced, &energy_basis, field_energy_scale);
         let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial)?;
-        if affine_reproduction_error > EQUALITY_KKT_POLICY_V1.affine_reproduction_limit {
+        if affine_reproduction_error > EQUALITY_KKT_POLICY_V2.affine_reproduction_limit {
             return Err(RepresentationFailure::AffineReproductionContract {
                 observed: affine_reproduction_error,
-                limit: EQUALITY_KKT_POLICY_V1.affine_reproduction_limit,
+                limit: EQUALITY_KKT_POLICY_V2.affine_reproduction_limit,
             });
         }
         Ok(Self {
@@ -780,7 +780,7 @@ impl CubicRepresentation {
         let side_condition = PhysicalSideConditionEvidence {
             components: physical_side_components,
             physical_tolerances: self.coordinates.to_physical_side_condition_tolerances(
-                [EQUALITY_KKT_POLICY_V1.side_condition_limit; POLYNOMIAL_DIMENSION],
+                [EQUALITY_KKT_POLICY_V2.side_condition_limit; POLYNOMIAL_DIMENSION],
             ),
             standard_components: standard_side_components,
             recovered_standard_components: recovered_standard_side,
@@ -1362,7 +1362,7 @@ fn canonical_polynomial_mode_residual(
             solver_invoked: false,
         });
     }
-    if residual > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if residual > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         return Err(RepresentationFailure::AlgebraicAnalysisFailure {
             stage: AlgebraicAnalysisStage::PolynomialRank,
             solver_invoked: false,
@@ -1726,7 +1726,7 @@ impl EnergyOrthonormalQuotientBasis {
                 if factors.dynamic_regularization_count != 0 {
                     return Err(RepresentationFailure::QuotientLltContract {
                         observed: f64::INFINITY,
-                        limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                        limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
                     });
                 }
                 let lower = retained_lower_triangle(factors.lower.as_ref());
@@ -1791,11 +1791,11 @@ impl EnergyOrthonormalQuotientBasis {
         let permuted_gram = permute_symmetric(gram, &permutation);
         let normalized_backward_error = normalized_llt_backward_error(&permuted_gram, &lower);
         if !normalized_backward_error.is_finite()
-            || normalized_backward_error > EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit
+            || normalized_backward_error > EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit
         {
             return Err(RepresentationFailure::QuotientLltContract {
                 observed: normalized_backward_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
             });
         }
 
@@ -1835,21 +1835,21 @@ impl EnergyOrthonormalQuotientBasis {
         let recovered_probe = provisional.to_solver_coordinates(&householder_probe)?;
         let recovery_round_trip_error = relative_slice_error(&recovered_probe, &solver_probe);
         if recovery_round_trip_error
-            > EQUALITY_KKT_POLICY_V1.quotient_basis_recovery_round_trip_limit
+            > EQUALITY_KKT_POLICY_V2.quotient_basis_recovery_round_trip_limit
         {
             return Err(RepresentationFailure::QuotientRecoveryRoundTripContract {
                 observed: recovery_round_trip_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_basis_recovery_round_trip_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_basis_recovery_round_trip_limit,
             });
         }
 
         let field_energy_identity_error =
             quotient_field_energy_identity_error(&permuted_gram, &provisional.lower);
-        if field_energy_identity_error > EQUALITY_KKT_POLICY_V1.quotient_field_energy_identity_limit
+        if field_energy_identity_error > EQUALITY_KKT_POLICY_V2.quotient_field_energy_identity_limit
         {
             return Err(RepresentationFailure::QuotientFieldEnergyIdentityContract {
                 observed: field_energy_identity_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_field_energy_identity_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_field_energy_identity_limit,
             });
         }
 
@@ -1866,10 +1866,10 @@ impl EnergyOrthonormalQuotientBasis {
                     .fold(0.0_f64, f64::max)
             })
             .fold(0.0_f64, f64::max);
-        if side_condition_error > EQUALITY_KKT_POLICY_V1.quotient_basis_side_condition_limit {
+        if side_condition_error > EQUALITY_KKT_POLICY_V2.quotient_basis_side_condition_limit {
             return Err(RepresentationFailure::QuotientSideConditionContract {
                 observed: side_condition_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_basis_side_condition_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_basis_side_condition_limit,
             });
         }
 
@@ -1890,11 +1890,11 @@ impl EnergyOrthonormalQuotientBasis {
             .into_iter()
             .fold(0.0_f64, f64::max);
         if canonical_response_round_trip_error
-            > EQUALITY_KKT_POLICY_V1.quotient_basis_response_round_trip_limit
+            > EQUALITY_KKT_POLICY_V2.quotient_basis_response_round_trip_limit
         {
             return Err(RepresentationFailure::QuotientResponseRoundTripContract {
                 observed: canonical_response_round_trip_error,
-                limit: EQUALITY_KKT_POLICY_V1.quotient_basis_response_round_trip_limit,
+                limit: EQUALITY_KKT_POLICY_V2.quotient_basis_response_round_trip_limit,
             });
         }
 
@@ -2239,7 +2239,7 @@ fn recomputed_lower_for_rescue(
                 if residual <= 0.0 || !residual.is_finite() {
                     return Err(RepresentationFailure::QuotientLltContract {
                         observed: f64::INFINITY,
-                        limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                        limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
                     });
                 }
                 residual.sqrt()
@@ -2249,7 +2249,7 @@ fn recomputed_lower_for_rescue(
             if !coordinate.is_finite() {
                 return Err(RepresentationFailure::QuotientLltContract {
                     observed: f64::INFINITY,
-                    limit: EQUALITY_KKT_POLICY_V1.quotient_llt_backward_error_limit,
+                    limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
                 });
             }
             lower.set(row, column, coordinate);
@@ -4238,7 +4238,7 @@ fn recover_and_verify(
     let objective_round_trip_error = (total_objective - standard_total_objective).abs()
         / standard_total_objective.abs().max(1.0);
     let objective_verified =
-        objective_round_trip_error <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit;
+        objective_round_trip_error <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit;
     let relation_tolerances = canonical_relation_tolerances(
         characteristic_length,
         &problem,
@@ -4313,28 +4313,28 @@ fn recover_and_verify(
     if !side_condition.is_within_policy() {
         reasons.push(RecoveryVerificationFailureReason::SideConditionViolation);
     }
-    if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::SideConditionRoundTripViolation);
     }
     if !hard_residuals_within_tolerance(&problem, &hard_equalities, &relation_tolerances) {
         reasons.push(RecoveryVerificationFailureReason::HardEqualityViolation);
     }
-    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::PolynomialRoundTripViolation);
     }
-    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::FieldCoefficientRoundTripViolation);
     }
-    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::FieldEnergyRoundTripViolation);
     }
-    if whitening_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if whitening_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::WhiteningRoundTripViolation);
     }
     if !objective_verified {
         reasons.push(RecoveryVerificationFailureReason::ObjectiveRoundTripViolation);
     }
-    if tolerance_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if tolerance_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::ToleranceRoundTripViolation);
     }
     if !reasons.is_empty() {
@@ -4461,10 +4461,10 @@ fn canonical_relation_tolerances(
             );
             let relation_reference_scale =
                 (equality.target - equality.constant_shift_response() * gauge_offset).abs();
-            let physical_tolerance = EQUALITY_KKT_POLICY_V1
+            let physical_tolerance = EQUALITY_KKT_POLICY_V2
                 .canonical_characteristic_tolerance_multiplier
                 * characteristic_scale
-                + EQUALITY_KKT_POLICY_V1.canonical_relation_reference_tolerance_multiplier
+                + EQUALITY_KKT_POLICY_V2.canonical_relation_reference_tolerance_multiplier
                     * relation_reference_scale;
             let standard_tolerance = physical_tolerance;
             let kkt_row = assembly
@@ -5634,7 +5634,7 @@ mod tests {
         assert!(solution.side_condition.round_trip_error <= 1.0e-11);
         assert_ne!(
             solution.side_condition.physical_tolerances[1],
-            EQUALITY_KKT_POLICY_V1.side_condition_limit
+            EQUALITY_KKT_POLICY_V2.side_condition_limit
         );
     }
 

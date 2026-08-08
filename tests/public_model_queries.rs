@@ -231,7 +231,7 @@ fn model_retains_its_problem_contract_across_query_and_fit_resource_plans() {
             .fit_configuration()
             .numerical_policy()
             .as_str(),
-        "georbf-v1"
+        "georbf-v2"
     );
     assert_eq!(
         owned_snapshot.input_coordinate_frame().axis_labels(),

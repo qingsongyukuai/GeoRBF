@@ -6,9 +6,14 @@ use crate::faer_backend::{self, DecompositionFailure, WorkspaceAllocationFailure
 pub struct NumericalPolicyId(&'static str);
 
 impl NumericalPolicyId {
-    /// Returns the only numerical policy supported by the public Equality path.
+    /// Returns the historical v0.2.0 numerical policy identity.
     pub fn georbf_v1() -> Self {
-        EQUALITY_KKT_POLICY_V1.id
+        Self("georbf-v1")
+    }
+
+    /// Returns the numerical policy executed by GeoRBF v0.2.1.
+    pub fn georbf_v2() -> Self {
+        EQUALITY_KKT_POLICY_V2.id
     }
 
     /// Returns the stable policy identifier.
@@ -48,8 +53,8 @@ pub(crate) struct EqualityKktNumericalPolicy {
     pub(crate) kkt_max_refinement_steps: usize,
 }
 
-pub(crate) const EQUALITY_KKT_POLICY_V1: EqualityKktNumericalPolicy = EqualityKktNumericalPolicy {
-    id: NumericalPolicyId("georbf-v1"),
+pub(crate) const EQUALITY_KKT_POLICY_V2: EqualityKktNumericalPolicy = EqualityKktNumericalPolicy {
+    id: NumericalPolicyId("georbf-v2"),
     backend_standard_form_backward_error_limit: 1.0e-11,
     convex_backend_residual_limit: 1.0e-8,
     convex_standard_retry_residual_limit: 1.0e-7,
@@ -124,7 +129,7 @@ pub(crate) fn analyze_spectral_rank(
     let largest = singular_values.first().copied().unwrap_or(0.0);
     let smallest = singular_values.last().copied().unwrap_or(0.0);
     let dimension = matrix.nrows().max(matrix.ncols());
-    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V1.spectral_ratio_thresholds(dimension);
+    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V2.spectral_ratio_thresholds(dimension);
     let svd_ratio = if largest > 0.0 {
         smallest / largest
     } else {
@@ -141,7 +146,7 @@ pub(crate) fn analyze_spectral_rank(
         reject_ratio,
         accept_ratio,
         rank,
-        decision: EQUALITY_KKT_POLICY_V1.classify_spectral_ratio(dimension, svd_ratio),
+        decision: EQUALITY_KKT_POLICY_V2.classify_spectral_ratio(dimension, svd_ratio),
     })
 }
 

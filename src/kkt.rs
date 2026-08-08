@@ -8,7 +8,7 @@ use crate::capacity::{
 };
 use crate::faer_backend;
 use crate::numerical::{
-    EQUALITY_KKT_POLICY_V1, NumericalPolicyId, SpectralAnalysisFailure, SpectralRankDecision,
+    EQUALITY_KKT_POLICY_V2, NumericalPolicyId, SpectralAnalysisFailure, SpectralRankDecision,
     analyze_spectral_rank,
 };
 
@@ -98,8 +98,8 @@ fn equilibrate_symmetric_kkt(
     let mut matrix = matrix.to_vec();
     let mut rhs = rhs.to_vec();
     let mut cumulative_exponents = vec![0_i32; dimension];
-    let mut rounds = Vec::with_capacity(EQUALITY_KKT_POLICY_V1.ruiz_rounds);
-    for _ in 0..EQUALITY_KKT_POLICY_V1.ruiz_rounds {
+    let mut rounds = Vec::with_capacity(EQUALITY_KKT_POLICY_V2.ruiz_rounds);
+    for _ in 0..EQUALITY_KKT_POLICY_V2.ruiz_rounds {
         let mut exponents = Vec::with_capacity(dimension);
         for row in 0..dimension {
             let norm = (0..dimension)
@@ -113,8 +113,8 @@ fn equilibrate_symmetric_kkt(
             }
             let desired = (-0.5 * norm.log2()).round();
             let desired = desired.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
-            let round_limit = EQUALITY_KKT_POLICY_V1.ruiz_single_round_exponent_limit;
-            let cumulative_limit = EQUALITY_KKT_POLICY_V1.ruiz_cumulative_exponent_limit;
+            let round_limit = EQUALITY_KKT_POLICY_V2.ruiz_single_round_exponent_limit;
+            let cumulative_limit = EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit;
             let exponent = desired.clamp(-round_limit, round_limit).clamp(
                 -cumulative_limit - cumulative_exponents[row],
                 cumulative_limit - cumulative_exponents[row],
@@ -143,7 +143,7 @@ fn equilibrate_symmetric_kkt(
                 .fold(0.0_f64, f64::max);
             !(0.5..=2.0).contains(&norm)
                 && cumulative_exponents[*row].abs()
-                    == EQUALITY_KKT_POLICY_V1.ruiz_cumulative_exponent_limit
+                    == EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit
         })
         .collect();
     Ok(ScaledKkt {
@@ -255,7 +255,7 @@ pub(crate) struct KktAttemptPlan {
 impl KktAttemptPlan {
     fn equality_v1() -> Self {
         Self {
-            numerical_policy: EQUALITY_KKT_POLICY_V1.id,
+            numerical_policy: EQUALITY_KKT_POLICY_V2.id,
             attempts: [
                 KktAttemptKind::BunchKaufmanRefinement,
                 KktAttemptKind::SvdRescue,
@@ -573,11 +573,11 @@ pub(crate) fn solve_equality_kkt(
         &scaled.evidence,
     );
     if !scaling_round_trip_error.is_finite()
-        || scaling_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+        || scaling_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
     {
         let reason = BackendContractViolationReason::ScalingRoundTripExceeded {
             observed: scaling_round_trip_error,
-            limit: EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit,
+            limit: EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit,
         };
         return Err(KktFailure::BackendContractViolation {
             attempt_plan,
@@ -591,7 +591,7 @@ pub(crate) fn solve_equality_kkt(
         candidate: solution[..primal_variables].to_vec(),
         equality_multipliers: solution[primal_variables..].to_vec(),
         normalized_backward_error,
-        numerical_policy: EQUALITY_KKT_POLICY_V1.id,
+        numerical_policy: EQUALITY_KKT_POLICY_V2.id,
         verification_scope: VerificationScope::BackendStandardForm,
         workspace: capacity.faer_workspace.clone(),
         backend: selected_backend,
@@ -612,7 +612,7 @@ fn exact_zero_row(matrix: &[f64], dimension: usize) -> Option<usize> {
 }
 
 fn exact_rank_deficiency(index: usize, dimension: usize) -> AlgebraicRankEvidence {
-    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V1.spectral_ratio_thresholds(dimension);
+    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V2.spectral_ratio_thresholds(dimension);
     AlgebraicRankEvidence {
         exact_zero_index: Some(index),
         rrqr_ratio: 0.0,
@@ -762,11 +762,11 @@ fn solve_lblt_with_refinement(
     );
 
     let mut refinement_steps = 0;
-    while refinement_steps < EQUALITY_KKT_POLICY_V1.kkt_max_refinement_steps {
+    while refinement_steps < EQUALITY_KKT_POLICY_V2.kkt_max_refinement_steps {
         let error =
             linear_residual_evidence(matrix, dimension, &solution, rhs).normalized_backward_error;
         if !error.is_finite()
-            || error <= EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit
+            || error <= EQUALITY_KKT_POLICY_V2.backend_standard_form_backward_error_limit
             || solution.iter().any(|value| !value.is_finite())
         {
             break;
@@ -811,12 +811,12 @@ fn candidate_rejection_reason(
         ))
     } else if !residual.normalized_backward_error.is_finite()
         || residual.normalized_backward_error
-            > EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit
+            > EQUALITY_KKT_POLICY_V2.backend_standard_form_backward_error_limit
     {
         Some(KktAttemptFailureReason::BackendContract(
             BackendContractViolationReason::BackwardErrorExceeded {
                 observed: residual.normalized_backward_error,
-                limit: EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit,
+                limit: EQUALITY_KKT_POLICY_V2.backend_standard_form_backward_error_limit,
             },
         ))
     } else {
@@ -843,7 +843,7 @@ fn attempt_record(
                 block_size: faer_backend::BLOCK_SIZE,
                 parallelism_threshold: faer_backend::PARALLELISM_THRESHOLD,
                 factor_workspace_source: faer_backend::FACTOR_WORKSPACE_SOURCE,
-                maximum_refinement_steps: EQUALITY_KKT_POLICY_V1.kkt_max_refinement_steps,
+                maximum_refinement_steps: EQUALITY_KKT_POLICY_V2.kkt_max_refinement_steps,
             },
             KktAttemptKind::SvdRescue => BackendAttemptSettings::FullSvd {
                 settings_id: faer_backend::SVD_SETTINGS_ID,
@@ -1071,7 +1071,7 @@ mod tests {
             evidence.analysis_settings.evd_settings_id,
             faer_backend::EVD_SETTINGS_ID
         );
-        assert_eq!(evidence.numerical_policy.as_str(), "georbf-v1");
+        assert_eq!(evidence.numerical_policy.as_str(), "georbf-v2");
         assert_eq!(evidence.scaling.rounds.len(), 8);
         assert_eq!(evidence.rank.classification, RankClassification::FullRank);
         assert!(evidence.rank.rrqr_ratio > evidence.rank.accept_ratio);
@@ -1193,7 +1193,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(reason, BackendContractViolationReason::NonFiniteCandidate);
-                assert_eq!(attempt_plan.numerical_policy.as_str(), "georbf-v1");
+                assert_eq!(attempt_plan.numerical_policy.as_str(), "georbf-v2");
                 assert_eq!(attempts.len(), 2);
                 assert_eq!(attempts[0].kind, KktAttemptKind::BunchKaufmanRefinement);
                 assert_eq!(attempts[1].kind, KktAttemptKind::SvdRescue);
@@ -1272,7 +1272,7 @@ mod tests {
                     reason,
                     BackendContractViolationReason::BackwardErrorExceeded {
                         observed: residual.normalized_backward_error,
-                        limit: EQUALITY_KKT_POLICY_V1.backend_standard_form_backward_error_limit,
+                        limit: EQUALITY_KKT_POLICY_V2.backend_standard_form_backward_error_limit,
                     }
                 );
             }

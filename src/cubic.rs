@@ -1,6 +1,6 @@
 use crate::functional::CanonicalFunctional;
 use crate::math::{canonical_zero, dot3};
-use crate::numerical::EQUALITY_KKT_POLICY_V1;
+use crate::numerical::EQUALITY_KKT_POLICY_V2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GlobalAnisotropyMetric {
@@ -32,7 +32,7 @@ impl GlobalAnisotropyMetric {
         if matrix[0][0] <= 0.0 || leading_two <= 0.0 || determinant <= 0.0 {
             return Err(MetricError::NotPositiveDefinite);
         }
-        let determinant_tolerance = EQUALITY_KKT_POLICY_V1.metric_determinant_one_multiplier
+        let determinant_tolerance = EQUALITY_KKT_POLICY_V2.metric_determinant_one_multiplier
             * f64::EPSILON
             * determinant.abs().max(1.0);
         if (determinant - 1.0).abs() > determinant_tolerance {

@@ -1,4 +1,4 @@
-use georbf::diagnostics::ProblemDiagnosis;
+use georbf::diagnostics::{ProblemDiagnosis, RepresentationEvidenceStage};
 use georbf::fit::{BoundActiveState, BoundSide};
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
 use georbf::kernel::FieldEnergyNormalization;
@@ -142,6 +142,16 @@ fn close_support_positive_mode_is_retained_without_geometric_deduplication() {
     assert!(!factorization.kernel_ridge_applied());
     assert!(!factorization.gram_jitter_applied());
     assert!(!factorization.mode_truncation_applied());
+    let representation = success.report().representation_evidence();
+    assert!(!representation.problem_regularization_applied());
+    assert!(representation.unregularized_canonical_recovery_verified());
+    assert!(
+        representation
+            .backend_factorization_regularization()
+            .iter()
+            .any(|attempt| attempt.enabled()),
+        "Clarabel's factorization-only stabilization must be disclosed"
+    );
 
     for location in close_supports {
         let sample = success.model().evaluate(location).unwrap();
@@ -581,6 +591,22 @@ fn general_bound_infeasibility_requires_a_validated_farkas_certificate() {
 
     let failure = builder.build().unwrap().fit().unwrap_err();
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::InfeasibleProblem);
+    let representation = failure.report().representation_evidence();
+    assert_eq!(
+        representation.failure_stage(),
+        Some(RepresentationEvidenceStage::Backend)
+    );
+    assert!(representation.quotient_construction().is_some());
+    assert!(representation.quotient_factorization().is_some());
+    assert_eq!(representation.source_count(), 7);
+    assert_eq!(representation.recovery_source_count(), 0);
+    assert!(!representation.problem_regularization_applied());
+    assert!(
+        representation
+            .backend_factorization_regularization()
+            .iter()
+            .any(|attempt| attempt.enabled())
+    );
     assert!(!failure.report().attempts().is_empty());
     assert!(failure.report().canonical_acceptance().is_none());
     assert!(failure.report().hard_relations().is_empty());

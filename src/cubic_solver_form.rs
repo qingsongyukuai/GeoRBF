@@ -1347,10 +1347,10 @@ impl CanonicalCubicSolverForm {
                         // Source merging normalizes orientation only. Reject any
                         // future non-unit map until it carries its own scale
                         // evidence; for ±1 the two envelope scales are invariant.
-                        let source_tolerance = crate::numerical::EQUALITY_KKT_POLICY_V1
+                        let source_tolerance = crate::numerical::EQUALITY_KKT_POLICY_V2
                             .canonical_characteristic_tolerance_multiplier
                             * tolerance.characteristic_scale
-                            + crate::numerical::EQUALITY_KKT_POLICY_V1
+                            + crate::numerical::EQUALITY_KKT_POLICY_V2
                                 .canonical_relation_reference_tolerance_multiplier
                                 * tolerance.relation_reference_scale;
                         relation.relation_to_canonical.abs() == 1.0

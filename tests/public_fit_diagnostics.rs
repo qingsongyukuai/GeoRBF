@@ -1,6 +1,6 @@
 use georbf::diagnostics::{
     CubicPrecisionRescueConclusion, ProblemDiagnosis, RankDecision, RankDeficiencyConcept,
-    RankEvidenceDomain, SolveAttemptTermination,
+    RankEvidenceDomain, RepresentationEvidenceStage, SolveAttemptTermination,
 };
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
 use georbf::observation::{
@@ -164,6 +164,19 @@ fn cubic_pi1_rank_loss_is_tied_to_a_canonical_unidentified_field_mode() {
         .fit()
         .expect_err("one value does not identify the complete Cubic polynomial space");
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::UnidentifiedFieldMode);
+    let representation = failure.report().representation_evidence();
+    assert_eq!(representation.numerical_policy().as_str(), "georbf-v2");
+    assert_eq!(
+        representation.failure_stage(),
+        Some(RepresentationEvidenceStage::PolynomialPairing)
+    );
+    assert_eq!(representation.canonical_hard_relation_count(), 2);
+    assert_eq!(representation.source_count(), 2);
+    assert_eq!(representation.representer_count(), Some(2));
+    assert_eq!(representation.polynomial_dimension(), Some(4));
+    assert_eq!(representation.quotient_dimension(), None);
+    assert_eq!(representation.recovery_source_count(), 0);
+    assert!(!representation.problem_regularization_applied());
 
     let interpreted = failure
         .report()
@@ -221,6 +234,32 @@ fn solve_attempt_termination_does_not_encode_canonical_acceptance() {
 
     let success = builder.build().unwrap().fit().unwrap();
     let report = success.report();
+    let representation = report.representation_evidence();
+    assert_eq!(representation.numerical_policy().as_str(), "georbf-v2");
+    assert_eq!(representation.failure_stage(), None);
+    assert_eq!(
+        representation.last_completed_stage(),
+        RepresentationEvidenceStage::Recovery
+    );
+    assert_eq!(representation.canonical_hard_relation_count(), 4);
+    assert_eq!(representation.canonical_soft_relation_count(), 0);
+    assert_eq!(representation.source_count(), 4);
+    assert_eq!(representation.representer_count(), Some(4));
+    assert_eq!(representation.polynomial_dimension(), Some(4));
+    assert_eq!(representation.polynomial_rank(), Some(4));
+    assert_eq!(representation.quotient_dimension(), Some(0));
+    assert_eq!(representation.retained_mode_count(), Some(0));
+    assert_eq!(representation.truncated_mode_count(), Some(0));
+    assert!(representation.quotient_construction().is_some());
+    assert!(representation.quotient_factorization().is_some());
+    assert!(representation.all_source_recovery().unwrap().verified());
+    assert!(!representation.problem_regularization_applied());
+    assert!(
+        representation
+            .backend_factorization_regularization()
+            .iter()
+            .all(|attempt| !attempt.enabled())
+    );
     assert!(report.canonical_acceptance().unwrap().accepted());
     assert!(!report.attempts().is_empty());
     assert!(report.attempts().iter().all(|attempt| {

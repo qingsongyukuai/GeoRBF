@@ -24,6 +24,8 @@ pub enum ProblemDiagnosis {
     UnidentifiedFieldMode,
     /// A numerical decision fell between the versioned accept/reject bands.
     NumericalDecisionGrayZone,
+    /// Canonical representation analysis proved a direction of negative curvature.
+    NegativeCurvature,
     /// The checked peak-memory plan exceeded the supported capacity.
     CapacityExceeded,
     /// A backend candidate violated its backend-standard-form contract.
@@ -1813,6 +1815,257 @@ impl AllSourceRecoveryEvidence {
     }
 }
 
+/// Auditable construction boundary reached by the Cubic representation pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum RepresentationEvidenceStage {
+    /// Canonical relations and their provenance were lowered.
+    Canonical,
+    /// Source participation was collected from the canonical functionals.
+    SourceParticipation,
+    /// The physical representer span was assembled.
+    RepresenterAssembly,
+    /// The complete Cubic Pi1 pairing was classified.
+    PolynomialPairing,
+    /// The implicit Householder quotient was constructed and checked.
+    HouseholderQuotient,
+    /// The quotient energy basis was factorized and certified.
+    QuotientFactorization,
+    /// Canonical functional responses were assembled into a solver-independent form.
+    ResponseAssembly,
+    /// A backend attempt produced or rejected a candidate or certificate.
+    Backend,
+    /// Solver coordinates were recovered and checked against canonical semantics.
+    Recovery,
+}
+
+/// Whether one backend attempt allowed factorization-only stabilization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendFactorizationRegularizationEvidence {
+    attempt_sequence: usize,
+    enabled: bool,
+}
+
+impl BackendFactorizationRegularizationEvidence {
+    pub(crate) fn new(attempt_sequence: usize, enabled: bool) -> Self {
+        Self {
+            attempt_sequence,
+            enabled,
+        }
+    }
+
+    /// Returns the deterministic backend-attempt sequence number.
+    pub fn attempt_sequence(self) -> usize {
+        self.attempt_sequence
+    }
+
+    /// Reports whether this attempt allowed backend factorization stabilization.
+    pub fn enabled(self) -> bool {
+        self.enabled
+    }
+}
+
+/// One representation evidence bundle, available on both successful and failed fits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepresentationEvidence {
+    numerical_policy: NumericalPolicyId,
+    failure_stage: Option<RepresentationEvidenceStage>,
+    last_completed_stage: RepresentationEvidenceStage,
+    canonical_hard_relation_count: usize,
+    canonical_soft_relation_count: usize,
+    source_ids: Box<[SourceId]>,
+    representer_count: Option<usize>,
+    polynomial_dimension: Option<usize>,
+    polynomial_rank: Option<usize>,
+    quotient_dimension: Option<usize>,
+    retained_mode_count: Option<usize>,
+    truncated_mode_count: Option<usize>,
+    quotient_construction: Option<CubicQuotientConstructionEvidence>,
+    quotient_factorization: Option<CubicQuotientFactorizationEvidence>,
+    precision_rescue: Option<CubicPrecisionRescueEvidence>,
+    analysis_failure: Option<AnalysisFailureEvidence>,
+    all_source_recovery: Option<AllSourceRecoveryEvidence>,
+    recovered_source_ids: Box<[SourceId]>,
+    unregularized_canonical_recovery_verified: bool,
+    problem_regularization_applied: bool,
+    backend_factorization_regularization: Box<[BackendFactorizationRegularizationEvidence]>,
+}
+
+pub(crate) struct RepresentationEvidenceParts {
+    pub(crate) numerical_policy: NumericalPolicyId,
+    pub(crate) failure_stage: Option<RepresentationEvidenceStage>,
+    pub(crate) last_completed_stage: RepresentationEvidenceStage,
+    pub(crate) canonical_hard_relation_count: usize,
+    pub(crate) canonical_soft_relation_count: usize,
+    pub(crate) source_ids: Vec<SourceId>,
+    pub(crate) representer_count: Option<usize>,
+    pub(crate) polynomial_dimension: Option<usize>,
+    pub(crate) polynomial_rank: Option<usize>,
+    pub(crate) quotient_dimension: Option<usize>,
+    pub(crate) retained_mode_count: Option<usize>,
+    pub(crate) truncated_mode_count: Option<usize>,
+    pub(crate) quotient_construction: Option<CubicQuotientConstructionEvidence>,
+    pub(crate) quotient_factorization: Option<CubicQuotientFactorizationEvidence>,
+    pub(crate) precision_rescue: Option<CubicPrecisionRescueEvidence>,
+    pub(crate) analysis_failure: Option<AnalysisFailureEvidence>,
+    pub(crate) all_source_recovery: Option<AllSourceRecoveryEvidence>,
+    pub(crate) recovered_source_ids: Vec<SourceId>,
+    pub(crate) unregularized_canonical_recovery_verified: bool,
+    pub(crate) backend_factorization_regularization:
+        Vec<BackendFactorizationRegularizationEvidence>,
+}
+
+impl RepresentationEvidence {
+    pub(crate) fn new(parts: RepresentationEvidenceParts) -> Self {
+        Self {
+            numerical_policy: parts.numerical_policy,
+            failure_stage: parts.failure_stage,
+            last_completed_stage: parts.last_completed_stage,
+            canonical_hard_relation_count: parts.canonical_hard_relation_count,
+            canonical_soft_relation_count: parts.canonical_soft_relation_count,
+            source_ids: parts.source_ids.into(),
+            representer_count: parts.representer_count,
+            polynomial_dimension: parts.polynomial_dimension,
+            polynomial_rank: parts.polynomial_rank,
+            quotient_dimension: parts.quotient_dimension,
+            retained_mode_count: parts.retained_mode_count,
+            truncated_mode_count: parts.truncated_mode_count,
+            quotient_construction: parts.quotient_construction,
+            quotient_factorization: parts.quotient_factorization,
+            precision_rescue: parts.precision_rescue,
+            analysis_failure: parts.analysis_failure,
+            all_source_recovery: parts.all_source_recovery,
+            recovered_source_ids: parts.recovered_source_ids.into(),
+            unregularized_canonical_recovery_verified: parts
+                .unregularized_canonical_recovery_verified,
+            problem_regularization_applied: false,
+            backend_factorization_regularization: parts.backend_factorization_regularization.into(),
+        }
+    }
+
+    /// Returns the immutable numerical policy governing every conclusion.
+    pub fn numerical_policy(&self) -> NumericalPolicyId {
+        self.numerical_policy
+    }
+
+    /// Returns the stage that stopped the fit, or `None` after successful recovery.
+    pub fn failure_stage(&self) -> Option<RepresentationEvidenceStage> {
+        self.failure_stage
+    }
+
+    /// Returns the last stage whose contract completed successfully.
+    pub fn last_completed_stage(&self) -> RepresentationEvidenceStage {
+        self.last_completed_stage
+    }
+
+    /// Returns independently counted canonical hard scalar relations.
+    pub fn canonical_hard_relation_count(&self) -> usize {
+        self.canonical_hard_relation_count
+    }
+
+    /// Returns independently counted canonical soft scalar residual channels.
+    pub fn canonical_soft_relation_count(&self) -> usize {
+        self.canonical_soft_relation_count
+    }
+
+    /// Returns the total independently counted canonical scalar dimension.
+    pub fn canonical_relation_count(&self) -> usize {
+        self.canonical_hard_relation_count + self.canonical_soft_relation_count
+    }
+
+    /// Returns every source that reached representation participation.
+    pub fn source_ids(&self) -> &[SourceId] {
+        &self.source_ids
+    }
+
+    /// Returns the number of distinct sources that reached representation participation.
+    pub fn source_count(&self) -> usize {
+        self.source_ids.len()
+    }
+
+    /// Returns the independently assembled representer dimension when reached.
+    pub fn representer_count(&self) -> Option<usize> {
+        self.representer_count
+    }
+
+    /// Returns the complete polynomial dimension when its pairing was reached.
+    pub fn polynomial_dimension(&self) -> Option<usize> {
+        self.polynomial_dimension
+    }
+
+    /// Returns the recovered polynomial rank when classified.
+    pub fn polynomial_rank(&self) -> Option<usize> {
+        self.polynomial_rank
+    }
+
+    /// Returns the quotient dimension produced by the actual construction.
+    pub fn quotient_dimension(&self) -> Option<usize> {
+        self.quotient_dimension
+    }
+
+    /// Returns the number of retained effective field modes when factorization was reached.
+    pub fn retained_mode_count(&self) -> Option<usize> {
+        self.retained_mode_count
+    }
+
+    /// Returns the number of truncated modes when factorization was reached.
+    pub fn truncated_mode_count(&self) -> Option<usize> {
+        self.truncated_mode_count
+    }
+
+    /// Returns the Householder quotient certificate when construction completed.
+    pub fn quotient_construction(&self) -> Option<CubicQuotientConstructionEvidence> {
+        self.quotient_construction
+    }
+
+    /// Returns the LLT, energy, side-condition, and response certificate bundle.
+    pub fn quotient_factorization(&self) -> Option<&CubicQuotientFactorizationEvidence> {
+        self.quotient_factorization.as_ref()
+    }
+
+    /// Returns the bounded representation precision upgrade, when attempted.
+    pub fn precision_rescue(&self) -> Option<CubicPrecisionRescueEvidence> {
+        self.precision_rescue
+    }
+
+    /// Returns the terminal representation failure, including pivot certificates.
+    pub fn analysis_failure(&self) -> Option<&AnalysisFailureEvidence> {
+        self.analysis_failure.as_ref()
+    }
+
+    /// Returns complete source participation and recovery evidence when reached.
+    pub fn all_source_recovery(&self) -> Option<&AllSourceRecoveryEvidence> {
+        self.all_source_recovery.as_ref()
+    }
+
+    /// Returns SourceIds reached by canonical recovery, or an empty slice before recovery.
+    pub fn recovered_source_ids(&self) -> &[SourceId] {
+        &self.recovered_source_ids
+    }
+
+    /// Returns the actual number of SourceIds reached by canonical recovery.
+    pub fn recovery_source_count(&self) -> usize {
+        self.recovered_source_ids().len()
+    }
+
+    /// Reports whether a candidate passed recovery against the unregularized problem.
+    pub fn unregularized_canonical_recovery_verified(&self) -> bool {
+        self.unregularized_canonical_recovery_verified
+    }
+
+    /// Reports whether GeoRBF altered the canonical problem with regularization.
+    pub fn problem_regularization_applied(&self) -> bool {
+        self.problem_regularization_applied
+    }
+
+    /// Returns factorization-only stabilization settings for every backend attempt.
+    pub fn backend_factorization_regularization(
+        &self,
+    ) -> &[BackendFactorizationRegularizationEvidence] {
+        &self.backend_factorization_regularization
+    }
+}
+
 /// Complete physical Recover-and-Verify acceptance evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanonicalAcceptanceEvidence {
@@ -2694,6 +2947,7 @@ pub struct SolveAttemptRecord {
     convex_residual: Option<ConvexResidualEvidence>,
     certificate_present: bool,
     failure_reason: Option<AttemptFailureEvidence>,
+    backend_factorization_regularization_enabled: bool,
     backend_fingerprint: BackendFingerprint,
 }
 
@@ -2709,6 +2963,7 @@ pub(crate) struct SolveAttemptRecordParts {
     pub(crate) convex_residual: Option<ConvexResidualEvidence>,
     pub(crate) certificate_present: bool,
     pub(crate) failure_reason: Option<AttemptFailureEvidence>,
+    pub(crate) backend_factorization_regularization_enabled: bool,
     pub(crate) backend_fingerprint: BackendFingerprint,
 }
 
@@ -2726,6 +2981,8 @@ impl SolveAttemptRecord {
             convex_residual: parts.convex_residual,
             certificate_present: parts.certificate_present,
             failure_reason: parts.failure_reason,
+            backend_factorization_regularization_enabled: parts
+                .backend_factorization_regularization_enabled,
             backend_fingerprint: parts.backend_fingerprint,
         }
     }
@@ -2789,6 +3046,11 @@ impl SolveAttemptRecord {
     /// Returns structured rejection evidence for a failed attempt.
     pub fn failure_reason(&self) -> Option<AttemptFailureEvidence> {
         self.failure_reason
+    }
+
+    /// Reports whether this attempt enabled backend-only factorization stabilization.
+    pub fn backend_factorization_regularization_enabled(&self) -> bool {
+        self.backend_factorization_regularization_enabled
     }
 
     /// Returns the adapter-recorded backend identity and settings.

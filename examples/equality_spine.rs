@@ -77,7 +77,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let success = snapshot.fit()?;
     let report = success.report();
     assert_eq!(report.resolved_kernel().kind(), KernelKind::Cubic);
-    assert_eq!(report.numerical_policy().as_str(), "georbf-v1");
+    assert_eq!(report.numerical_policy().as_str(), "georbf-v2");
     assert_eq!(
         report
             .backend_fingerprint()

@@ -68,7 +68,7 @@ impl FitConfiguration {
 impl Default for FitConfiguration {
     fn default() -> Self {
         Self {
-            numerical_policy: NumericalPolicyId::georbf_v1(),
+            numerical_policy: NumericalPolicyId::georbf_v2(),
             thread_budget: ThreadBudget::Automatic,
         }
     }

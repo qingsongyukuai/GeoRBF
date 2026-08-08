@@ -22,7 +22,7 @@ use crate::functional::{
     DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, GroupId, ResidualId,
     UsageProvenance,
 };
-use crate::numerical::{EQUALITY_KKT_POLICY_V1, NumericalPolicyId};
+use crate::numerical::{EQUALITY_KKT_POLICY_V2, NumericalPolicyId};
 #[cfg(test)]
 use std::cell::RefCell;
 
@@ -176,9 +176,9 @@ pub(crate) struct QpAttemptPlan {
 }
 
 impl QpAttemptPlan {
-    fn georbf_v1() -> Self {
+    fn georbf_v2() -> Self {
         Self {
-            numerical_policy: EQUALITY_KKT_POLICY_V1.id,
+            numerical_policy: EQUALITY_KKT_POLICY_V2.id,
             profiles: [
                 ClarabelAttemptProfile::Standard,
                 ClarabelAttemptProfile::Robust,
@@ -336,6 +336,30 @@ pub(crate) enum CubicExecutionFailure {
         evidence: Box<QpRecoveryFailureEvidence>,
         attempts: Vec<QpAttemptRecord>,
     },
+    AfterRepresentation {
+        representation: Box<CpdEvidence>,
+        failure: Box<CubicExecutionFailure>,
+    },
+}
+
+impl CubicExecutionFailure {
+    fn after_representation(self, representation: &CpdEvidence) -> Self {
+        match self {
+            Self::AfterRepresentation { .. } => self,
+            _ => Self::AfterRepresentation {
+                representation: Box::new(representation.clone()),
+                failure: Box::new(self),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn root_cause(&self) -> &Self {
+        match self {
+            Self::AfterRepresentation { failure, .. } => failure.root_cause(),
+            _ => self,
+        }
+    }
 }
 
 pub(crate) struct CubicExecutionCore;
@@ -573,6 +597,7 @@ fn solve_convex_qp(
             )));
         }
     }
+    let representation_evidence = canonical_form.representation_evidence.clone();
     let constraints = canonical_form
         .solver_hard_rows()
         .count()
@@ -587,26 +612,31 @@ fn solve_convex_qp(
             )
         })
         .ok_or(QpAssemblyFailureReason::InvalidShape)
-        .map_err(CubicExecutionFailure::Assembly)?;
+        .map_err(CubicExecutionFailure::Assembly)
+        .map_err(|failure| failure.after_representation(&representation_evidence))?;
     let capacity = if matches!(fault, Some(QpFaultInjection::Capacity)) {
         plan_convex_qp_capacity(usize::MAX, constraints, canonical_relations)
     } else {
         plan_convex_qp_capacity(variables, constraints, canonical_relations)
     }
-    .map_err(|failure| CubicExecutionFailure::Capacity(Box::new(failure)))?;
-    let mut form = assemble_qp_form(&canonical_form, capacity)?;
+    .map_err(|failure| CubicExecutionFailure::Capacity(Box::new(failure)))
+    .map_err(|failure| failure.after_representation(&representation_evidence))?;
+    let mut form = assemble_qp_form(&canonical_form, capacity)
+        .map_err(|failure| failure.after_representation(&representation_evidence))?;
     if matches!(fault, Some(QpFaultInjection::Provenance)) {
         form.hard_equality_rows[0].derived_column = Some(DerivedColumnId::from_residual(
             problem.equalities[1].provenance().residual(),
         ));
     }
-    let mut scaled = scale_qp_form(&form)?;
+    let mut scaled = scale_qp_form(&form)
+        .map_err(|failure| failure.after_representation(&representation_evidence))?;
     if matches!(fault, Some(QpFaultInjection::ScalingMap)) {
         scaled.round_trip_error = 1.0e-2;
     }
     let certificate_provenance_verified = verifies_qp_form_provenance(&canonical_form, &form);
     let (candidate, residuals, attempts, accepted_attempt, internal_scaling_error) =
-        execute_qp_attempts(&form, &scaled, fault, certificate_provenance_verified)?;
+        execute_qp_attempts(&form, &scaled, fault, certificate_provenance_verified)
+            .map_err(|failure| failure.after_representation(&representation_evidence))?;
     recover_and_verify_qp(
         plan,
         representation,
@@ -621,6 +651,7 @@ fn solve_convex_qp(
         internal_scaling_error,
         fault,
     )
+    .map_err(|failure| failure.after_representation(&representation_evidence))
 }
 
 fn validate_qp_problem(problem: &CubicCanonicalProblem) -> Result<(), CubicExecutionFailure> {
@@ -980,8 +1011,8 @@ fn scale_qp_form(form: &ConvexQpForm) -> Result<ScaledQpForm, CubicExecutionFail
     let mut constraint_rhs = original_rhs.clone();
     let mut cumulative_variable_exponents = vec![0_i32; form.variables];
     let mut cumulative_constraint_exponents = vec![0_i32; constraints_count];
-    let mut rounds = Vec::with_capacity(EQUALITY_KKT_POLICY_V1.ruiz_rounds);
-    for _ in 0..EQUALITY_KKT_POLICY_V1.ruiz_rounds {
+    let mut rounds = Vec::with_capacity(EQUALITY_KKT_POLICY_V2.ruiz_rounds);
+    for _ in 0..EQUALITY_KKT_POLICY_V2.ruiz_rounds {
         let variable_exponents = (0..form.variables)
             .map(|column| {
                 let hessian_norm = (0..form.variables)
@@ -1039,7 +1070,7 @@ fn scale_qp_form(form: &ConvexQpForm) -> Result<ScaledQpForm, CubicExecutionFail
     if cumulative_variable_exponents
         .iter()
         .chain(&cumulative_constraint_exponents)
-        .any(|exponent| exponent.abs() > EQUALITY_KKT_POLICY_V1.ruiz_cumulative_exponent_limit)
+        .any(|exponent| exponent.abs() > EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit)
     {
         return Err(CubicExecutionFailure::Assembly(
             QpAssemblyFailureReason::ScalingLimitExceeded,
@@ -1075,7 +1106,7 @@ fn scale_qp_form(form: &ConvexQpForm) -> Result<ScaledQpForm, CubicExecutionFail
         &original_rhs,
     );
     if !round_trip_error.is_finite()
-        || round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+        || round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
     {
         return Err(CubicExecutionFailure::Assembly(
             QpAssemblyFailureReason::ScalingLimitExceeded,
@@ -1106,8 +1137,8 @@ fn bounded_ruiz_exponent(norm: f64, cumulative: i32) -> Result<i32, CubicExecuti
     }
     let desired = (-0.5 * norm.log2()).round();
     let desired = desired.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
-    let round_limit = EQUALITY_KKT_POLICY_V1.ruiz_single_round_exponent_limit;
-    let cumulative_limit = EQUALITY_KKT_POLICY_V1.ruiz_cumulative_exponent_limit;
+    let round_limit = EQUALITY_KKT_POLICY_V2.ruiz_single_round_exponent_limit;
+    let cumulative_limit = EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit;
     Ok(desired.clamp(-round_limit, round_limit).clamp(
         -cumulative_limit - cumulative,
         cumulative_limit - cumulative,
@@ -1122,7 +1153,7 @@ fn count_saturated_qp_rows(
     variable_exponents: &[i32],
     constraint_exponents: &[i32],
 ) -> usize {
-    let limit = EQUALITY_KKT_POLICY_V1.ruiz_cumulative_exponent_limit;
+    let limit = EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit;
     let variable_count = (0..variables)
         .filter(|column| {
             let norm = (0..variables)
@@ -1340,12 +1371,12 @@ fn execute_qp_attempts(
                 .to_ascii_lowercase()
                 .contains(clarabel_backend::DIRECT_SOLVER)
             && internal_scaling_error.is_finite()
-            && internal_scaling_error <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit;
+            && internal_scaling_error <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit;
         let threads_verified =
             candidate.attempt.actual_threads == clarabel_backend::REQUESTED_THREADS;
         let residual_verified = residuals.is_some_and(|residuals| {
             residuals.is_finite()
-                && residuals.maximum() <= EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit
+                && residuals.maximum() <= EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit
         });
         let infeasibility_certificate =
             (finite && threads_verified && fingerprint_verified && infeasibility_termination)
@@ -1445,7 +1476,7 @@ fn execute_qp_attempts(
                 Some(QpAttemptFailureReason::BackendResidualExceeded)
             )
             && residuals.is_some_and(|residuals| {
-                residuals.maximum() <= EQUALITY_KKT_POLICY_V1.convex_standard_retry_residual_limit
+                residuals.maximum() <= EQUALITY_KKT_POLICY_V2.convex_standard_retry_residual_limit
             });
         if (matches!(candidate.attempt.termination, ClarabelTermination::Solved)
             && !retryable_standard_residual)
@@ -1463,7 +1494,7 @@ fn execute_qp_attempts(
             return Err(CubicExecutionFailure::BackendContract {
                 attempts,
                 observed,
-                limit: EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit,
+                limit: EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit,
             });
         }
     }
@@ -1504,7 +1535,7 @@ fn validate_primal_infeasibility_certificate(
     )?;
     if !provenance_verified
         || !recovery_round_trip_error.is_finite()
-        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
     {
         return None;
     }
@@ -1629,7 +1660,7 @@ fn validate_recession_certificate(
     )?;
     if !provenance_verified
         || !recovery_round_trip_error.is_finite()
-        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
     {
         return None;
     }
@@ -1706,15 +1737,15 @@ fn validate_primal_infeasibility_ray(
         stationarity_residual,
         dual_cone_violation,
         separation_margin,
-        residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit * matrix_scale,
-        separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit * rhs_scale,
+        residual_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_residual_limit * matrix_scale,
+        separation_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_separation_limit * rhs_scale,
         recovery_round_trip_error: 0.0,
         provenance_verified: false,
         witness_relations: Vec::new(),
     };
     (evidence.finite
         && (evidence.normalized_ray_norm - 1.0).abs()
-            <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+            <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
         && evidence.stationarity_residual <= evidence.residual_limit
         && evidence.dual_cone_violation <= evidence.residual_limit
         && evidence.separation_margin >= evidence.separation_limit)
@@ -1791,15 +1822,15 @@ fn validate_recession_ray(
         hessian_null_residual,
         constraint_ray_violation,
         descent_margin,
-        residual_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_residual_limit,
-        separation_limit: EQUALITY_KKT_POLICY_V1.convex_certificate_separation_limit,
+        residual_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_residual_limit,
+        separation_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_separation_limit,
         recovery_round_trip_error: 0.0,
         provenance_verified: false,
         sources: Vec::new(),
     };
     (evidence.finite
         && (evidence.normalized_ray_norm - 1.0).abs()
-            <= EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+            <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
         && evidence.hessian_null_residual <= evidence.residual_limit
         && evidence.constraint_ray_violation <= evidence.residual_limit
         && evidence.descent_margin >= evidence.separation_limit)
@@ -2227,12 +2258,12 @@ fn recover_and_verify_qp(
 
     let physical_standard_form_violation = physical_residuals.primal;
     if !physical_residuals.is_finite()
-        || physical_residuals.maximum() > EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit
+        || physical_residuals.maximum() > EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit
     {
         return Err(CubicExecutionFailure::BackendContract {
             attempts,
             observed: physical_residuals.maximum(),
-            limit: EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit,
+            limit: EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit,
         });
     }
     let backend_slack_mismatch = affine_inequalities
@@ -2383,7 +2414,7 @@ fn recover_and_verify_qp(
     if !side_condition.is_within_policy() {
         reasons.push(QpRecoveryFailureReason::SideConditionViolation);
     }
-    if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::SideConditionRoundTripViolation);
     }
     if !hard_residuals_within_tolerance(&problem, &hard_equalities, &hard_relation_tolerances) {
@@ -2403,28 +2434,28 @@ fn recover_and_verify_qp(
     // coordinate-recovery round trip.  Judge its solve residual with the
     // backend residual policy; the independent physical relation check above
     // still uses the tighter relation tolerance.
-    if backend_slack_mismatch > EQUALITY_KKT_POLICY_V1.convex_backend_residual_limit {
+    if backend_slack_mismatch > EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit {
         reasons.push(QpRecoveryFailureReason::BackendSlackMismatch);
     }
-    if reduction_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if reduction_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ReductionRoundTripViolation);
     }
-    if candidate_scaling_round_trip > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if candidate_scaling_round_trip > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ScalingRoundTripViolation);
     }
-    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::PolynomialRoundTripViolation);
     }
-    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::FieldCoefficientRoundTripViolation);
     }
-    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::FieldEnergyRoundTripViolation);
     }
-    if whitening_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if whitening_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::WhiteningRoundTripViolation);
     }
-    if objective_round_trip_error > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit {
+    if objective_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ObjectiveRoundTripViolation);
     }
     if !reasons.is_empty() {
@@ -2462,7 +2493,7 @@ fn recover_and_verify_qp(
             physical_residuals,
             backend_internal_scaling_round_trip_error,
             attempts,
-            attempt_plan: QpAttemptPlan::georbf_v1(),
+            attempt_plan: QpAttemptPlan::georbf_v2(),
             accepted_attempt,
             physical_standard_form_violation,
             reduction_round_trip_error,
@@ -2753,9 +2784,9 @@ fn relation_tolerance(
         FunctionalDimension::FieldValuePerLength => field_scale / characteristic_length,
     };
     let relation_reference_scale = (target - constant_shift_response * gauge_offset).abs();
-    let physical_tolerance = EQUALITY_KKT_POLICY_V1.canonical_characteristic_tolerance_multiplier
+    let physical_tolerance = EQUALITY_KKT_POLICY_V2.canonical_characteristic_tolerance_multiplier
         * characteristic_scale
-        + EQUALITY_KKT_POLICY_V1.canonical_relation_reference_tolerance_multiplier
+        + EQUALITY_KKT_POLICY_V2.canonical_relation_reference_tolerance_multiplier
             * relation_reference_scale;
     CanonicalRelationToleranceEvidence {
         dimension,
@@ -3437,8 +3468,8 @@ mod tests {
         )
         .expect_err("a missing affine mode must stop before the QP backend");
 
-        match failure {
-            CubicExecutionFailure::Representation(failure) => match *failure {
+        match failure.root_cause() {
+            CubicExecutionFailure::Representation(failure) => match failure.as_ref() {
                 RepresentationFailure::PolynomialRankDeficient { mode, .. } => {
                     assert_eq!(mode.residual, 0.0);
                     assert!(!mode.execution.solver_invoked);
@@ -3459,7 +3490,7 @@ mod tests {
         )
         .expect_err("a reassociated QP row must fail canonical provenance recovery");
 
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::RecoveryVerification { evidence, attempts } => {
                 assert_eq!(
                     evidence.reasons,
@@ -3481,7 +3512,7 @@ mod tests {
         )
         .expect_err("a corrupted GeoRBF scaling map must fail recovery");
 
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::RecoveryVerification { evidence, .. } => {
                 assert_eq!(
                     evidence.reasons,
@@ -3489,7 +3520,7 @@ mod tests {
                 );
                 assert!(
                     evidence.scaling_round_trip_error
-                        > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+                        > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
                 );
                 assert!(evidence.no_model_produced);
             }
@@ -3506,7 +3537,7 @@ mod tests {
         )
         .expect_err("a corrupted Householder recovery map must fail recovery");
 
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::RecoveryVerification { evidence, .. } => {
                 assert_eq!(
                     evidence.reasons,
@@ -3514,7 +3545,7 @@ mod tests {
                 );
                 assert!(
                     evidence.reduction_round_trip_error
-                        > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
+                        > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
                 );
                 assert!(evidence.no_model_produced);
             }
@@ -3531,7 +3562,7 @@ mod tests {
         )
         .expect_err("a corrupted Clarabel residual envelope must fail before recovery");
 
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::BackendContract {
                 attempts,
                 observed,
@@ -3557,7 +3588,7 @@ mod tests {
         )
         .expect_err("a damaged recovered backend equation is not a canonical recovery failure");
 
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::BackendContract {
                 attempts,
                 observed,
@@ -3670,7 +3701,7 @@ mod tests {
         )
         .expect_err("a corrupted standard-form objective must fail canonical recovery");
 
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::RecoveryVerification { evidence, .. } => {
                 assert_eq!(
                     evidence.reasons,
@@ -3808,7 +3839,7 @@ mod tests {
 
         let failure = execute_qp_attempts(&form, &scaled, None, true)
             .expect_err("an independently verified recession ray must not produce a model");
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::ValidatedUnbounded { evidence, attempts } => {
                 assert!(evidence.finite);
                 assert_eq!(evidence.normalized_ray_norm, 1.0);
@@ -3850,7 +3881,7 @@ mod tests {
             true,
         )
         .expect_err("unverified dual-infeasibility rays must not prove unboundedness");
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::AttemptsExhausted { attempts } => {
                 assert_eq!(attempts.len(), 2);
                 assert!(attempts.iter().all(|attempt| {
@@ -3923,7 +3954,7 @@ mod tests {
             true,
         )
         .expect_err("validated contradictory attempts must not select either conclusion");
-        match failure {
+        match failure.root_cause() {
             CubicExecutionFailure::InconsistentAttempts { attempts } => {
                 assert_eq!(attempts.len(), 2);
                 assert!(attempts[0].residuals.is_some());
