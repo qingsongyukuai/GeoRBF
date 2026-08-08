@@ -1734,6 +1734,85 @@ impl SideConditionEvidence {
     }
 }
 
+/// Independently counted participation and recovery evidence for every source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllSourceRecoveryEvidence {
+    canonical_hard_relation_count: usize,
+    canonical_soft_relation_count: usize,
+    participating_sources: Box<[SourceId]>,
+    recovered_sources: Box<[SourceId]>,
+    representer_count: usize,
+    solver_relation_row_count: usize,
+    recovery_edge_count: usize,
+    verified: bool,
+}
+
+pub(crate) struct AllSourceRecoveryEvidenceParts {
+    pub(crate) canonical_hard_relation_count: usize,
+    pub(crate) canonical_soft_relation_count: usize,
+    pub(crate) participating_sources: Vec<SourceId>,
+    pub(crate) recovered_sources: Vec<SourceId>,
+    pub(crate) representer_count: usize,
+    pub(crate) solver_relation_row_count: usize,
+    pub(crate) recovery_edge_count: usize,
+    pub(crate) verified: bool,
+}
+
+impl AllSourceRecoveryEvidence {
+    pub(crate) fn new(parts: AllSourceRecoveryEvidenceParts) -> Self {
+        Self {
+            canonical_hard_relation_count: parts.canonical_hard_relation_count,
+            canonical_soft_relation_count: parts.canonical_soft_relation_count,
+            participating_sources: parts.participating_sources.into(),
+            recovered_sources: parts.recovered_sources.into(),
+            representer_count: parts.representer_count,
+            solver_relation_row_count: parts.solver_relation_row_count,
+            recovery_edge_count: parts.recovery_edge_count,
+            verified: parts.verified,
+        }
+    }
+
+    /// Returns the independently counted canonical hard relations.
+    pub fn canonical_hard_relation_count(&self) -> usize {
+        self.canonical_hard_relation_count
+    }
+
+    /// Returns the independently counted canonical soft residual channels.
+    pub fn canonical_soft_relation_count(&self) -> usize {
+        self.canonical_soft_relation_count
+    }
+
+    /// Returns every SourceId whose canonical relation participates in the problem.
+    pub fn participating_sources(&self) -> &[SourceId] {
+        &self.participating_sources
+    }
+
+    /// Returns every SourceId reached through a verified recovery edge.
+    pub fn recovered_sources(&self) -> &[SourceId] {
+        &self.recovered_sources
+    }
+
+    /// Returns the independently constructed physical representer count.
+    pub fn representer_count(&self) -> usize {
+        self.representer_count
+    }
+
+    /// Returns relation rows retained by the solver-independent form.
+    pub fn solver_relation_row_count(&self) -> usize {
+        self.solver_relation_row_count
+    }
+
+    /// Returns source-bearing canonical-to-recovery edges.
+    pub fn recovery_edge_count(&self) -> usize {
+        self.recovery_edge_count
+    }
+
+    /// Reports complete source coverage and objective association verification.
+    pub fn verified(&self) -> bool {
+        self.verified
+    }
+}
+
 /// Complete physical Recover-and-Verify acceptance evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanonicalAcceptanceEvidence {

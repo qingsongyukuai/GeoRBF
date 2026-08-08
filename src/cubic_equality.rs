@@ -14,8 +14,8 @@ use std::cell::RefCell;
 use crate::capacity::{CapacityExceededEvidence, plan_equality_capacity};
 use crate::cubic::{CubicKernel, GlobalAnisotropyMetric};
 use crate::cubic_solver_form::{
-    CanonicalCubicFieldForm, CanonicalCubicSolverForm, CanonicalHardConflictWitness,
-    CanonicalHardRecoveryGraph, CubicFieldCoordinateLayout,
+    AllSourceRecoveryLedger, CanonicalCubicFieldForm, CanonicalCubicSolverForm,
+    CanonicalHardConflictWitness, CanonicalHardRecoveryGraph, CubicFieldCoordinateLayout,
 };
 use crate::faer_backend;
 use crate::functional::{
@@ -3554,6 +3554,7 @@ pub(crate) struct CubicEqualitySolution {
     pub(crate) representation: CpdEvidence,
     pub(crate) assembly: EqualityAssemblyEvidence,
     pub(crate) hard_recovery: CanonicalHardRecoveryGraph,
+    pub(crate) all_source_recovery: AllSourceRecoveryLedger,
     pub(crate) backend: KktSolveEvidence,
     pub(crate) field: RecoveredCubicField,
     pub(crate) semantic_latents: Vec<RecoveredSemanticLatent>,
@@ -3585,6 +3586,8 @@ pub enum RecoveryVerificationFailureReason {
     InvalidRecoveryMap,
     /// Canonical usage provenance no longer matched assembly evidence.
     ProvenanceMismatch,
+    /// One or more participating SourceIds lacked a complete recovery edge.
+    SourceCoverageMismatch,
     /// At least one recovered physical quantity was non-finite.
     NonFiniteRecoveredQuantity,
     /// The recovered Cubic Π₁ side condition exceeded its tolerance.
@@ -4243,6 +4246,13 @@ fn recover_and_verify(
         &assembly,
         &backend,
     );
+    let all_source_recovery = solver_form.verify_all_source_recovery(
+        &hard_equalities,
+        &relation_tolerances,
+        &[],
+        &soft_equalities,
+        &soft_objectives,
+    );
     let tolerance_round_trip_error = relation_tolerances
         .iter()
         .map(|evidence| evidence.round_trip_error)
@@ -4296,6 +4306,9 @@ fn recover_and_verify(
     let mut reasons = Vec::new();
     if !recovery_finite {
         reasons.push(RecoveryVerificationFailureReason::NonFiniteRecoveredQuantity);
+    }
+    if !all_source_recovery.verified {
+        reasons.push(RecoveryVerificationFailureReason::SourceCoverageMismatch);
     }
     if !side_condition.is_within_policy() {
         reasons.push(RecoveryVerificationFailureReason::SideConditionViolation);
@@ -4353,6 +4366,7 @@ fn recover_and_verify(
         representation: representation_evidence,
         assembly,
         hard_recovery: solver_form.hard_recovery.clone(),
+        all_source_recovery,
         backend,
         field,
         semantic_latents,
@@ -5777,7 +5791,7 @@ mod tests {
     }
 
     #[test]
-    fn damaged_whitening_recovery_map_is_rejected_without_a_model() {
+    fn damaged_whitening_objective_association_is_rejected_without_a_model() {
         let hard_uses = usages();
         let soft_uses = hard_uses[8..].to_vec();
         let mut problem = canonical_problem(hard_uses, MANUFACTURED_TARGETS.to_vec());
@@ -5844,12 +5858,9 @@ mod tests {
             CubicEqualityFailure::RecoveryVerification { evidence, .. } => {
                 assert_eq!(
                     evidence.reasons,
-                    vec![RecoveryVerificationFailureReason::WhiteningRoundTripViolation]
+                    vec![RecoveryVerificationFailureReason::ProvenanceMismatch]
                 );
-                assert!(
-                    evidence.whitening_round_trip_error.unwrap()
-                        > EQUALITY_KKT_POLICY_V1.recovery_round_trip_limit
-                );
+                assert_eq!(evidence.whitening_round_trip_error, None);
                 assert!(evidence.no_model_produced);
             }
             other => panic!("unexpected failure: {other:?}"),

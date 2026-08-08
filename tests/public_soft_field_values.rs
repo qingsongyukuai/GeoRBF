@@ -418,6 +418,28 @@ fn equality_kkt_and_convex_qp_keep_hard_and_duplicate_soft_semantics_separate() 
 
     for fit in [&equality, &qp] {
         let report = fit.report();
+        let ledger = report
+            .all_source_recovery()
+            .expect("both solver routes retain one all-source ledger");
+        assert!(ledger.verified());
+        assert_eq!(ledger.canonical_soft_relation_count(), 2);
+        assert_eq!(ledger.recovered_sources(), ledger.participating_sources());
+        assert_eq!(
+            ledger.recovery_edge_count(),
+            ledger.canonical_hard_relation_count() + ledger.canonical_soft_relation_count()
+        );
+        assert!(
+            ledger
+                .recovered_sources()
+                .iter()
+                .any(|source| source.as_str() == "soft-light")
+        );
+        assert!(
+            ledger
+                .recovered_sources()
+                .iter()
+                .any(|source| source.as_str() == "soft-heavy")
+        );
         let assessments = report.soft_field_values();
         assert_eq!(report.problem_size().scalar_soft_relations(), 2);
         assert_eq!(report.problem_size().quadratic_objective_terms(), 2);

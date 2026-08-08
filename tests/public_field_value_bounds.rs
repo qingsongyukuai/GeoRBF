@@ -422,6 +422,13 @@ fn soft_bounds_require_normalization_and_recover_independent_physical_losses() {
     assert_eq!(report.problem_size().quadratic_objective_terms(), 4);
     assert_eq!(report.problem_size().linear_objective_terms(), 1);
     assert_eq!(report.problem_size().affine_inequality_constraints(), 10);
+    let ledger = report.all_source_recovery().unwrap();
+    assert!(ledger.verified());
+    assert_eq!(ledger.canonical_hard_relation_count(), 4);
+    assert_eq!(ledger.canonical_soft_relation_count(), 5);
+    assert_eq!(ledger.recovery_edge_count(), 9);
+    assert_eq!(ledger.solver_relation_row_count(), 9);
+    assert_eq!(ledger.recovered_sources(), ledger.participating_sources());
 
     let side = |source: &str, expected_side: BoundSide| {
         report
@@ -525,6 +532,11 @@ fn duplicate_hard_bounds_share_one_backend_relation_and_keep_both_sources() {
     }
 
     let success = builder.build().unwrap().fit().unwrap();
+    let ledger = success.report().all_source_recovery().unwrap();
+    assert!(ledger.verified());
+    assert_eq!(ledger.canonical_hard_relation_count(), 5);
+    assert_eq!(ledger.recovery_edge_count(), 6);
+    assert_eq!(ledger.recovered_sources(), ledger.participating_sources());
     assert_eq!(success.report().field_value_bounds().len(), 2);
     assert_eq!(
         success

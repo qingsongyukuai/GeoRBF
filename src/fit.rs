@@ -29,11 +29,11 @@ use crate::cubic_execution::{
     ValidatedRecessionEvidence,
 };
 use crate::diagnostics::{
-    AnalysisContractQuantity, AnalysisFailureEvidence, AnalysisFailureStage,
-    AttemptFailureCategory, AttemptFailureEvidence, BackendAttemptSettings, BackendFingerprint,
-    BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
-    CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
-    CapacityFailureKind, ConflictWitnessEvidence, ConflictWitnessEvidenceParts,
+    AllSourceRecoveryEvidence, AllSourceRecoveryEvidenceParts, AnalysisContractQuantity,
+    AnalysisFailureEvidence, AnalysisFailureStage, AttemptFailureCategory, AttemptFailureEvidence,
+    BackendAttemptSettings, BackendFingerprint, BackendFingerprintParts, BackendInputField,
+    CanonicalAcceptanceEvidence, CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource,
+    CapacityEvidence, CapacityFailureKind, ConflictWitnessEvidence, ConflictWitnessEvidenceParts,
     ConflictWitnessRelationEvidence, ConvexResidualEvidence as PublicConvexResidualEvidence,
     ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
     CubicLltPivotInterval, CubicLltPivotIntervalParts, CubicPrecisionRescueEvidence,
@@ -1414,6 +1414,7 @@ pub struct FitReport {
     interpretable_rank_deficiency: Option<InterpretableRankDeficiencyEvidence>,
     inertia: Option<InertiaEvidence>,
     canonical_acceptance: Option<CanonicalAcceptanceEvidence>,
+    all_source_recovery: Option<AllSourceRecoveryEvidence>,
     capacity: Option<CapacityEvidence>,
     analysis_failure: Option<AnalysisFailureEvidence>,
     infeasibility_certificate: Option<InfeasibilityCertificateEvidence>,
@@ -1606,6 +1607,11 @@ impl FitReport {
     /// Returns physical Recover-and-Verify acceptance evidence when reached.
     pub fn canonical_acceptance(&self) -> Option<&CanonicalAcceptanceEvidence> {
         self.canonical_acceptance.as_ref()
+    }
+
+    /// Returns the independently counted all-source recovery ledger when reached.
+    pub fn all_source_recovery(&self) -> Option<&AllSourceRecoveryEvidence> {
+        self.all_source_recovery.as_ref()
     }
 
     /// Returns checked capacity evidence when planning rejected the fit.
@@ -2171,6 +2177,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         interpretable_rank_deficiency: None,
         inertia: None,
         canonical_acceptance: None,
+        all_source_recovery: None,
         capacity: None,
         analysis_failure: None,
         infeasibility_certificate: None,
@@ -5954,21 +5961,12 @@ fn success_report_qp(
         .qp
         .as_ref()
         .expect("an affine-inequality execution retains QP evidence");
-    let mut hard_relations = source_relations
-        .iter()
-        .map(|source_relation| {
-            hard_relation_assessment(
-                source_relation,
-                solution.hard_equalities[source_relation.canonical_index].value,
-                qp.hard_relation_tolerances[source_relation.canonical_index],
-            )
-        })
-        .collect::<Vec<_>>();
-    hard_relations.sort_by(|left, right| {
-        left.source_id
-            .cmp(&right.source_id)
-            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
-    });
+    let hard_relations = source_hard_assessments(
+        source_relations,
+        &solution.field,
+        &solution.semantic_latents,
+        &qp.hard_relation_tolerances,
+    );
     let mut field_value_bounds = source_bound_relations
         .iter()
         .filter_map(|source_relation| {
@@ -6112,6 +6110,7 @@ fn success_report_qp(
         interpretable_rank_deficiency: None,
         inertia: None,
         canonical_acceptance: Some(public_qp_success_acceptance(solution)),
+        all_source_recovery: Some(public_all_source_recovery(&solution.all_source_recovery)),
         capacity: None,
         analysis_failure: None,
         infeasibility_certificate: None,
@@ -6404,6 +6403,21 @@ fn public_qp_success_acceptance(solution: &CubicExecutionSolution) -> CanonicalA
     })
 }
 
+fn public_all_source_recovery(
+    ledger: &crate::cubic_solver_form::AllSourceRecoveryLedger,
+) -> AllSourceRecoveryEvidence {
+    AllSourceRecoveryEvidence::new(AllSourceRecoveryEvidenceParts {
+        canonical_hard_relation_count: ledger.canonical_hard_relations,
+        canonical_soft_relation_count: ledger.canonical_soft_relations,
+        participating_sources: ledger.participating_sources.clone(),
+        recovered_sources: ledger.recovered_sources.clone(),
+        representer_count: ledger.representers,
+        solver_relation_row_count: ledger.solver_relation_rows,
+        recovery_edge_count: ledger.recovery_edges,
+        verified: ledger.verified,
+    })
+}
+
 fn success_report(
     snapshot: &ProblemSnapshot,
     planned_problem_size: ProblemSize,
@@ -6430,19 +6444,12 @@ fn success_report(
         ),
         kkt_dimension: Some(solution.backend.capacity.kkt_dimension),
     };
-    let mut hard_relations = source_relations
-        .iter()
-        .map(|source_relation| {
-            let tolerance = solution.relation_tolerances[source_relation.canonical_index];
-            let recovered_value = solution.hard_equalities[source_relation.canonical_index].value;
-            hard_relation_assessment(source_relation, recovered_value, tolerance)
-        })
-        .collect::<Vec<_>>();
-    hard_relations.sort_by(|left, right| {
-        left.source_id
-            .cmp(&right.source_id)
-            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
-    });
+    let hard_relations = source_hard_assessments(
+        source_relations,
+        &solution.field,
+        &solution.semantic_latents,
+        &solution.relation_tolerances,
+    );
     let mut soft_field_values = solution
         .soft_objectives
         .iter()
@@ -6514,6 +6521,7 @@ fn success_report(
             true,
         )),
         canonical_acceptance: Some(public_success_acceptance(solution)),
+        all_source_recovery: Some(public_all_source_recovery(&solution.all_source_recovery)),
         capacity: None,
         analysis_failure: None,
         infeasibility_certificate: None,
@@ -6550,6 +6558,34 @@ fn hard_relation_assessment(
         recovered_physical_tolerance: tolerance.recovered_physical_tolerance,
         tolerance_round_trip_error: tolerance.round_trip_error,
     }
+}
+
+fn source_hard_assessments(
+    source_relations: &[SourceHardRelation],
+    field: &crate::cubic_equality::RecoveredCubicField,
+    semantic_latents: &[crate::cubic_equality::RecoveredSemanticLatent],
+    tolerances: &[CanonicalRelationToleranceEvidence],
+) -> Vec<HardRelationAssessment> {
+    let latent_values = semantic_latents
+        .iter()
+        .map(|latent| latent.value)
+        .collect::<Vec<_>>();
+    let mut assessments = source_relations
+        .iter()
+        .map(|source_relation| {
+            hard_relation_assessment(
+                source_relation,
+                source_relation.equality.evaluate(field, &latent_values),
+                tolerances[source_relation.canonical_index],
+            )
+        })
+        .collect::<Vec<_>>();
+    assessments.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.semantic_role.cmp(&right.semantic_role))
+    });
+    assessments
 }
 
 fn soft_field_value_assessment(
@@ -8023,6 +8059,7 @@ fn public_qp_recovery_evidence(
         .map(|reason| match reason {
             InternalReason::InvalidRecoveryMap => PublicReason::InvalidRecoveryMap,
             InternalReason::ProvenanceMismatch => PublicReason::ProvenanceMismatch,
+            InternalReason::SourceCoverageMismatch => PublicReason::SourceCoverageMismatch,
             InternalReason::NonFiniteRecoveredQuantity => PublicReason::NonFiniteRecoveredQuantity,
             InternalReason::SideConditionViolation => PublicReason::SideConditionViolation,
             InternalReason::SideConditionRoundTripViolation => {

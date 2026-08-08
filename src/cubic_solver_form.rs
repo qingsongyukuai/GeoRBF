@@ -8,14 +8,36 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cubic_equality::{
     CanonicalEqualityParticipation, CanonicalHardSourceRecovery, CanonicalInequalitySense,
-    CanonicalSoftLoss, CanonicalSoftResidualBlockKind, CanonicalViolationLoss, CpdEvidence,
-    CubicCanonicalProblem, CubicFunctionalResponse, CubicRepresentation, RepresentationFailure,
-    SemanticLatentCoefficient,
+    CanonicalRelationToleranceEvidence, CanonicalSoftLoss, CanonicalSoftResidualBlockKind,
+    CanonicalViolationLoss, CpdEvidence, CubicCanonicalProblem, CubicFunctionalResponse,
+    CubicRepresentation, RecoveredHardEquality, RecoveredSoftEquality, RecoveredSoftObjective,
+    RepresentationFailure, SemanticLatentCoefficient,
 };
 use crate::functional::{
     CanonicalFunctional, DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension,
-    GroupId, ResidualId, UsageProvenance,
+    GroupId, ResidualId, SourceId, UsageProvenance,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AllSourceRecoveryLedger {
+    pub(crate) canonical_hard_relations: usize,
+    pub(crate) canonical_soft_relations: usize,
+    pub(crate) participating_sources: Vec<SourceId>,
+    pub(crate) recovered_sources: Vec<SourceId>,
+    pub(crate) representers: usize,
+    pub(crate) solver_relation_rows: usize,
+    pub(crate) recovery_edges: usize,
+    pub(crate) verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecoveredAffineRelation {
+    pub(crate) canonical_index: usize,
+    pub(crate) provenances: Vec<UsageProvenance>,
+    pub(crate) violation_loss: Option<CanonicalViolationLoss>,
+    pub(crate) violation: f64,
+    pub(crate) tolerance: f64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CubicFieldCoordinateLayout {
@@ -129,6 +151,7 @@ pub(crate) struct CanonicalHardRecoveryRelation {
     pub(crate) canonical_index: usize,
     pub(crate) provenance: UsageProvenance,
     pub(crate) target: f64,
+    pub(crate) relation_to_canonical: f64,
     /// `(retained solver row, coefficient)` entries reconstructing this row.
     pub(crate) coefficients: Vec<(usize, f64)>,
     pub(crate) complete_affine_verified: bool,
@@ -247,6 +270,7 @@ impl CanonicalHardRecoveryGraph {
                                             &self.retained_rows,
                                             rows,
                                         ))
+                                && relation.relation_to_canonical == source.coefficient
                         })
                 })
             })
@@ -666,6 +690,7 @@ fn build_hard_recovery_graph(rows: &[SymbolicAffineRow]) -> CanonicalHardRecover
                 canonical_index,
                 provenance: source.provenance.clone(),
                 target: source.target,
+                relation_to_canonical: source.coefficient,
                 complete_affine_verified: complete_affine_verified
                     && exactly_reconstructs_source(
                         row,
@@ -1243,6 +1268,148 @@ impl CanonicalCubicSolverForm {
             .verifies(&self.soft_rows, &self.soft_objectives)
     }
 
+    pub(crate) fn verify_all_source_recovery(
+        &self,
+        recovered_hard_relations: &[RecoveredHardEquality],
+        hard_relation_tolerances: &[CanonicalRelationToleranceEvidence],
+        recovered_affine_relations: &[RecoveredAffineRelation],
+        recovered_soft_relations: &[RecoveredSoftEquality],
+        recovered_soft_objectives: &[RecoveredSoftObjective],
+    ) -> AllSourceRecoveryLedger {
+        let canonical_hard_relations = self.hard_rows.len()
+            + self
+                .affine_rows
+                .iter()
+                .filter(|row| row.violation_loss.is_none())
+                .count();
+        let canonical_soft_relations = self.soft_rows.len()
+            + self
+                .affine_rows
+                .iter()
+                .filter(|row| row.violation_loss.is_some())
+                .count();
+        let mut participating_sources = self
+            .hard_rows
+            .iter()
+            .flat_map(|row| &row.row.source_provenances)
+            .chain(
+                self.affine_rows
+                    .iter()
+                    .flat_map(|row| &row.row.source_provenances),
+            )
+            .chain(
+                self.soft_rows
+                    .iter()
+                    .flat_map(|row| &row.row.source_provenances),
+            )
+            .map(|provenance| provenance.source().clone())
+            .collect::<Vec<_>>();
+        participating_sources.sort();
+        participating_sources.dedup();
+
+        let mut recovered_sources = self
+            .hard_recovery
+            .relations
+            .iter()
+            .map(|relation| relation.provenance.source().clone())
+            .chain(
+                recovered_affine_relations
+                    .iter()
+                    .flat_map(|relation| &relation.provenances)
+                    .map(|provenance| provenance.source().clone()),
+            )
+            .chain(
+                recovered_soft_relations
+                    .iter()
+                    .map(|relation| relation.provenance.source().clone()),
+            )
+            .collect::<Vec<_>>();
+        recovered_sources.sort();
+        recovered_sources.dedup();
+
+        let objective_associations_verified = recovered_soft_objectives.len()
+            == self.soft_objectives.len()
+            && recovered_soft_objectives
+                .iter()
+                .zip(&self.soft_objectives)
+                .all(|(recovered, canonical)| {
+                    recovered.canonical_indices == canonical.canonical_indices
+                        && recovered.loss == canonical.loss
+                        && recovered.covariance_group == canonical.covariance_group
+                        && recovered.block_kind == canonical.block_kind
+                });
+        let every_source_hard_relation_accepted =
+            self.hard_recovery.relations.iter().all(|relation| {
+                recovered_hard_relations
+                    .get(relation.canonical_index)
+                    .zip(hard_relation_tolerances.get(relation.canonical_index))
+                    .is_some_and(|(recovered, tolerance)| {
+                        // Source merging normalizes orientation only. Reject any
+                        // future non-unit map until it carries its own scale
+                        // evidence; for ±1 the two envelope scales are invariant.
+                        let source_tolerance = crate::numerical::EQUALITY_KKT_POLICY_V1
+                            .canonical_characteristic_tolerance_multiplier
+                            * tolerance.characteristic_scale
+                            + crate::numerical::EQUALITY_KKT_POLICY_V1
+                                .canonical_relation_reference_tolerance_multiplier
+                                * tolerance.relation_reference_scale;
+                        relation.relation_to_canonical.abs() == 1.0
+                            && (relation.relation_to_canonical * recovered.value - relation.target)
+                                .abs()
+                                <= source_tolerance
+                    })
+            });
+        let affine_associations_verified = recovered_affine_relations.len()
+            == self.affine_rows.len()
+            && recovered_affine_relations
+                .iter()
+                .enumerate()
+                .zip(&self.affine_rows)
+                .all(|((canonical_index, recovered), canonical)| {
+                    recovered.canonical_index == canonical_index
+                        && recovered.provenances == canonical.row.source_provenances
+                        && recovered.violation_loss == canonical.violation_loss
+                        && (recovered.violation_loss.is_some()
+                            || recovered.violation <= recovered.tolerance)
+                });
+        let soft_relations_verified = recovered_soft_relations.len() == self.soft_rows.len()
+            && recovered_soft_relations
+                .iter()
+                .zip(&self.soft_recovery.relations)
+                .all(|(recovered, edge)| {
+                    recovered.provenance == edge.provenance
+                        && edge.canonical_index < self.soft_rows.len()
+                });
+        let recovery_edges = self.hard_recovery.relations.len()
+            + recovered_affine_relations
+                .iter()
+                .map(|relation| relation.provenances.len())
+                .sum::<usize>()
+            + self.soft_recovery.relations.len();
+        let verified = self.verifies_hard_recovery()
+            && self.verifies_soft_recovery()
+            && recovered_hard_relations.len() == self.hard_rows.len()
+            && hard_relation_tolerances.len() == self.hard_rows.len()
+            && every_source_hard_relation_accepted
+            && affine_associations_verified
+            && soft_relations_verified
+            && objective_associations_verified
+            && participating_sources == recovered_sources;
+
+        AllSourceRecoveryLedger {
+            canonical_hard_relations,
+            canonical_soft_relations,
+            participating_sources,
+            recovered_sources,
+            representers: self.representation_evidence.fitting_functional_count,
+            solver_relation_rows: self.hard_recovery.retained_rows.len()
+                + self.affine_rows.len()
+                + self.soft_recovery.retained_rows.len(),
+            recovery_edges,
+            verified,
+        }
+    }
+
     pub(crate) fn field_energy(&self, coordinate_layout: CubicFieldCoordinateLayout) -> &[f64] {
         match coordinate_layout {
             CubicFieldCoordinateLayout::Standard => &self.standard_field_energy,
@@ -1372,6 +1539,7 @@ mod tests {
         assert_eq!(graph.relations[1].coefficients, vec![(0, -1.0)]);
         assert_eq!(graph.relations[1].provenance, second);
         assert_eq!(graph.relations[1].target, -2.0);
+        assert_eq!(graph.relations[1].relation_to_canonical, -1.0);
         assert!(graph.verifies(&rows));
     }
 

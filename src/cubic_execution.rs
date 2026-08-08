@@ -15,7 +15,8 @@ use crate::cubic_equality::{
     canonical_gauge_offset, dense_matrix_vector_product, dot_product, relative_slice_error,
 };
 use crate::cubic_solver_form::{
-    CanonicalCubicSolverForm, CanonicalHardRecoveryGraph, CubicFieldCoordinateLayout,
+    AllSourceRecoveryLedger, CanonicalCubicSolverForm, CanonicalHardRecoveryGraph,
+    CubicFieldCoordinateLayout, RecoveredAffineRelation,
 };
 use crate::functional::{
     DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, GroupId, ResidualId,
@@ -262,6 +263,7 @@ pub(crate) struct CubicExecutionSolution {
     pub(crate) total_objective: f64,
     pub(crate) backend_standard_form_verified: bool,
     pub(crate) canonical_acceptance_verified: bool,
+    pub(crate) all_source_recovery: AllSourceRecoveryLedger,
     pub(crate) qp: Option<CubicQpEvidence>,
 }
 
@@ -278,6 +280,7 @@ pub(crate) enum QpAssemblyFailureReason {
 pub(crate) enum QpRecoveryFailureReason {
     InvalidRecoveryMap,
     ProvenanceMismatch,
+    SourceCoverageMismatch,
     NonFiniteRecoveredQuantity,
     SideConditionViolation,
     SideConditionRoundTripViolation,
@@ -410,7 +413,9 @@ impl CubicExecutionCore {
                     backend_standard_form_verified: true,
                     canonical_acceptance_verified: solution.recovery_finite
                         && solution.provenance_verified
-                        && solution.objective_verified,
+                        && solution.objective_verified
+                        && solution.all_source_recovery.verified,
+                    all_source_recovery: solution.all_source_recovery,
                     qp: None,
                 })
                 .map_err(|failure| CubicExecutionFailure::Equality(Box::new(failure))),
@@ -2303,6 +2308,31 @@ fn recover_and_verify_qp(
         standard_total_objective += 1.0;
     }
     let objective_round_trip_error = relative_error(total_objective, standard_total_objective);
+    let recovered_affine_relations = affine_inequalities
+        .iter()
+        .zip(&form.affine_inequality_rows)
+        .enumerate()
+        .map(
+            |(canonical_index, (relation, solver_row))| RecoveredAffineRelation {
+                canonical_index,
+                provenances: solver_row
+                    .provenance_edges
+                    .iter()
+                    .map(|edge| edge.provenance.clone())
+                    .collect(),
+                violation_loss: relation.violation_loss,
+                violation: relation.violation,
+                tolerance: relation.tolerance,
+            },
+        )
+        .collect::<Vec<_>>();
+    let all_source_recovery = canonical_form.verify_all_source_recovery(
+        &hard_equalities,
+        &hard_relation_tolerances,
+        &recovered_affine_relations,
+        &soft_equalities,
+        &soft_objectives,
+    );
 
     let recovery_finite = standard_coefficients
         .iter()
@@ -2346,6 +2376,9 @@ fn recover_and_verify_qp(
     let mut reasons = Vec::new();
     if !recovery_finite {
         reasons.push(QpRecoveryFailureReason::NonFiniteRecoveredQuantity);
+    }
+    if !all_source_recovery.verified {
+        reasons.push(QpRecoveryFailureReason::SourceCoverageMismatch);
     }
     if !side_condition.is_within_policy() {
         reasons.push(QpRecoveryFailureReason::SideConditionViolation);
@@ -2420,6 +2453,7 @@ fn recover_and_verify_qp(
         total_objective,
         backend_standard_form_verified: true,
         canonical_acceptance_verified: true,
+        all_source_recovery,
         qp: Some(CubicQpEvidence {
             capacity: form.capacity,
             scaling: scaled.scaling,
