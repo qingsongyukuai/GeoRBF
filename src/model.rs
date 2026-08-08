@@ -103,16 +103,6 @@ fn checked_field_sample(sample: RecoveredFieldSample) -> Result<FieldSample, Que
     })
 }
 
-fn query_field_sample(
-    field: &RecoveredCubicField,
-    point: Point3,
-) -> Result<FieldSample, QueryError> {
-    let sample = field
-        .reliable_sample(point.components())
-        .map_err(QueryError::from_sample_failure)?;
-    checked_field_sample(sample)
-}
-
 /// An owning, immutable, cheaply cloned solved field model.
 #[derive(Clone)]
 pub struct SolvedModel {
@@ -142,7 +132,12 @@ impl SolvedModel {
 
     /// Evaluates field value and complete gradient together at one point.
     pub fn evaluate(&self, point: Point3) -> Result<FieldSample, QueryError> {
-        query_field_sample(&self.inner.field, point)
+        let sample = self
+            .inner
+            .field
+            .reliable_sample(point.components())
+            .map_err(QueryError::from_sample_failure)?;
+        checked_field_sample(sample)
     }
 
     /// Evaluates an ordered logical batch of points atomically.

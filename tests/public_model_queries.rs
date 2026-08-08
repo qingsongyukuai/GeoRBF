@@ -306,6 +306,7 @@ fn recovered_field_publishes_verified_query_representation_evidence() {
     assert!(query.pi1_side_condition_verified());
     assert!(query.field_energy_round_trip_verified());
     assert!(query.basis_round_trip_error() <= 1.0e-11);
+    assert!(query.query_response_round_trip_error() <= 1.0e-11);
 }
 
 #[test]
@@ -322,7 +323,9 @@ fn cancellation_queries_escalate_the_same_field_and_remain_batch_equivalent() {
     let batch = model.evaluate_batch(&[query, query]).unwrap();
 
     assert_eq!(batch, vec![single, single]);
-    let value_tolerance = 1.0e-12 * expected_value.abs().max(1.0) + 1.0e-11 * expected_value.abs();
+    let field_scale = expected_value.abs().max(1.0);
+    let characteristic_length = 3.0_f64.sqrt() / 2.0;
+    let value_tolerance = 1.0e-12 * field_scale + 1.0e-11 * expected_value.abs();
     assert!((single.value() - expected_value).abs() <= value_tolerance);
     for (component, expected) in single
         .gradient()
@@ -330,7 +333,7 @@ fn cancellation_queries_escalate_the_same_field_and_remain_batch_equivalent() {
         .into_iter()
         .zip(expected_gradient)
     {
-        let tolerance = 1.0e-12 * expected_value.abs().max(1.0) + 1.0e-11 * expected.abs();
+        let tolerance = 1.0e-12 * (field_scale / characteristic_length) + 1.0e-11 * expected.abs();
         assert!((component - expected).abs() <= tolerance);
     }
 }

@@ -263,6 +263,7 @@ pub(crate) struct CubicExecutionSolution {
     pub(crate) total_objective: f64,
     pub(crate) backend_standard_form_verified: bool,
     pub(crate) canonical_acceptance_verified: bool,
+    pub(crate) query_response_round_trip_error: f64,
     pub(crate) all_source_recovery: AllSourceRecoveryLedger,
     pub(crate) qp: Option<CubicQpEvidence>,
 }
@@ -291,6 +292,7 @@ pub(crate) enum QpRecoveryFailureReason {
     ScalingRoundTripViolation,
     PolynomialRoundTripViolation,
     FieldCoefficientRoundTripViolation,
+    QueryRepresentationRoundTripViolation,
     FieldEnergyRoundTripViolation,
     WhiteningRoundTripViolation,
     ObjectiveRoundTripViolation,
@@ -439,6 +441,7 @@ impl CubicExecutionCore {
                         && solution.provenance_verified
                         && solution.objective_verified
                         && solution.all_source_recovery.verified,
+                    query_response_round_trip_error: solution.query_response_round_trip_error,
                     all_source_recovery: solution.all_source_recovery,
                     qp: None,
                 })
@@ -2463,6 +2466,23 @@ fn recover_and_verify_qp(
     if objective_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ObjectiveRoundTripViolation);
     }
+    let query_response_round_trip_error = if reasons.is_empty() {
+        match field.finalize_verified_query_representation(
+            field_scale,
+            canonical_form.characteristic_length,
+            polynomial_round_trip_error.max(field_coefficient_round_trip_error),
+        ) {
+            Ok(error) if error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit => {
+                Some(error)
+            }
+            Ok(_) | Err(_) => {
+                reasons.push(QpRecoveryFailureReason::QueryRepresentationRoundTripViolation);
+                None
+            }
+        }
+    } else {
+        None
+    };
     if !reasons.is_empty() {
         return recovery_failure(
             reasons,
@@ -2473,11 +2493,6 @@ fn recover_and_verify_qp(
             attempts,
         );
     }
-
-    field.finalize_verified_query_representation(
-        field_scale,
-        polynomial_round_trip_error.max(field_coefficient_round_trip_error),
-    );
 
     Ok(CubicExecutionSolution {
         plan,
@@ -2494,6 +2509,8 @@ fn recover_and_verify_qp(
         total_objective,
         backend_standard_form_verified: true,
         canonical_acceptance_verified: true,
+        query_response_round_trip_error: query_response_round_trip_error
+            .expect("accepted recovery verified the query response round trip"),
         all_source_recovery,
         qp: Some(CubicQpEvidence {
             capacity: form.capacity,

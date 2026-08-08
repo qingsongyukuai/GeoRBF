@@ -1909,6 +1909,7 @@ pub struct VerifiedQueryRepresentationEvidence {
     pi1_side_condition_verified: bool,
     field_energy_round_trip_verified: bool,
     basis_round_trip_error: f64,
+    query_response_round_trip_error: f64,
 }
 
 impl VerifiedQueryRepresentationEvidence {
@@ -1918,6 +1919,7 @@ impl VerifiedQueryRepresentationEvidence {
         pi1_side_condition_verified: bool,
         field_energy_round_trip_verified: bool,
         basis_round_trip_error: f64,
+        query_response_round_trip_error: f64,
     ) -> Self {
         Self {
             verified,
@@ -1925,6 +1927,7 @@ impl VerifiedQueryRepresentationEvidence {
             pi1_side_condition_verified,
             field_energy_round_trip_verified,
             basis_round_trip_error,
+            query_response_round_trip_error,
         }
     }
 
@@ -1948,9 +1951,14 @@ impl VerifiedQueryRepresentationEvidence {
         self.field_energy_round_trip_verified
     }
 
-    /// Returns the maximum polynomial/coefficient basis recovery error.
+    /// Returns the maximum stable-basis recovery error.
     pub fn basis_round_trip_error(self) -> f64 {
         self.basis_round_trip_error
+    }
+
+    /// Returns the recovered-basis/query-response round-trip error.
+    pub fn query_response_round_trip_error(self) -> f64 {
+        self.query_response_round_trip_error
     }
 }
 
@@ -2177,6 +2185,7 @@ pub struct CanonicalAcceptanceEvidence {
     field_value_per_length_hard_residual_max: Option<f64>,
     polynomial_round_trip_error: Option<f64>,
     field_coefficient_round_trip_error: Option<f64>,
+    query_response_round_trip_error: Option<f64>,
     field_energy_round_trip_error: Option<f64>,
     whitening_round_trip_error: Option<f64>,
     objective_round_trip_error: Option<f64>,
@@ -2199,6 +2208,7 @@ pub(crate) struct CanonicalAcceptanceEvidenceParts {
     pub(crate) hard_residual_maxima: Option<(f64, f64)>,
     pub(crate) polynomial_round_trip_error: Option<f64>,
     pub(crate) field_coefficient_round_trip_error: Option<f64>,
+    pub(crate) query_response_round_trip_error: Option<f64>,
     pub(crate) field_energy_round_trip_error: Option<f64>,
     pub(crate) whitening_round_trip_error: Option<f64>,
     pub(crate) objective_round_trip_error: Option<f64>,
@@ -2226,6 +2236,7 @@ impl CanonicalAcceptanceEvidence {
                 .map(|maxima| maxima.1),
             polynomial_round_trip_error: parts.polynomial_round_trip_error,
             field_coefficient_round_trip_error: parts.field_coefficient_round_trip_error,
+            query_response_round_trip_error: parts.query_response_round_trip_error,
             field_energy_round_trip_error: parts.field_energy_round_trip_error,
             whitening_round_trip_error: parts.whitening_round_trip_error,
             objective_round_trip_error: parts.objective_round_trip_error,
@@ -2284,6 +2295,11 @@ impl CanonicalAcceptanceEvidence {
     /// Returns field-coefficient recovery round-trip error when reached.
     pub fn field_coefficient_round_trip_error(&self) -> Option<f64> {
         self.field_coefficient_round_trip_error
+    }
+
+    /// Returns recovered-basis/query-response round-trip error when reached.
+    pub fn query_response_round_trip_error(&self) -> Option<f64> {
+        self.query_response_round_trip_error
     }
 
     /// Returns FieldEnergy recovery round-trip error when reached.

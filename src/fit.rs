@@ -1519,17 +1519,22 @@ impl FitReport {
                 let basis_round_trip_error = acceptance
                     .polynomial_round_trip_error()?
                     .max(acceptance.field_coefficient_round_trip_error()?);
+                let query_response_round_trip_error =
+                    acceptance.query_response_round_trip_error()?;
                 Some(VerifiedQueryRepresentationEvidence::new(
                     acceptance.accepted()
                         && all_source_response_verified
                         && pi1_side_condition_verified
                         && field_energy_round_trip_verified
                         && basis_round_trip_error
+                            <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
+                        && query_response_round_trip_error
                             <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit,
                     all_source_response_verified,
                     pi1_side_condition_verified,
                     field_energy_round_trip_verified,
                     basis_round_trip_error,
+                    query_response_round_trip_error,
                 ))
             });
 
@@ -6632,6 +6637,7 @@ fn public_qp_success_acceptance(solution: &CubicExecutionSolution) -> CanonicalA
         )),
         polynomial_round_trip_error: Some(qp.polynomial_round_trip_error),
         field_coefficient_round_trip_error: Some(qp.field_coefficient_round_trip_error),
+        query_response_round_trip_error: Some(solution.query_response_round_trip_error),
         field_energy_round_trip_error: Some(qp.field_energy_round_trip_error),
         whitening_round_trip_error: Some(qp.whitening_round_trip_error),
         objective_round_trip_error: Some(qp.objective_round_trip_error),
@@ -7726,6 +7732,7 @@ fn public_failure_acceptance(
                 .map(|envelope| (envelope.field_value, envelope.field_value_per_length)),
             polynomial_round_trip_error: evidence.polynomial_round_trip_error,
             field_coefficient_round_trip_error: evidence.field_coefficient_round_trip_error,
+            query_response_round_trip_error: None,
             field_energy_round_trip_error: evidence.field_energy_round_trip_error,
             whitening_round_trip_error: evidence.whitening_round_trip_error,
             objective_round_trip_error: evidence.objective_round_trip_error,
@@ -8146,6 +8153,7 @@ fn public_success_acceptance(solution: &CubicEqualitySolution) -> CanonicalAccep
         )),
         polynomial_round_trip_error: Some(solution.polynomial_round_trip_error),
         field_coefficient_round_trip_error: Some(solution.field_coefficient_round_trip_error),
+        query_response_round_trip_error: Some(solution.query_response_round_trip_error),
         field_energy_round_trip_error: Some(solution.field_energy_round_trip_error),
         whitening_round_trip_error: Some(solution.whitening_round_trip_error),
         objective_round_trip_error: Some(solution.objective_round_trip_error),
@@ -8372,6 +8380,9 @@ fn public_qp_recovery_evidence(
             }
             InternalReason::FieldCoefficientRoundTripViolation => {
                 PublicReason::FieldCoefficientRoundTripViolation
+            }
+            InternalReason::QueryRepresentationRoundTripViolation => {
+                PublicReason::QueryRepresentationRoundTripViolation
             }
             InternalReason::FieldEnergyRoundTripViolation => {
                 PublicReason::FieldEnergyRoundTripViolation

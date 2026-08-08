@@ -3580,22 +3580,32 @@ pub(crate) enum QuerySampleFailure {
     NumericalIndeterminate,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DoubleDoubleQuerySample {
+    components: [DoubleDouble; 4],
+    error_bounds: [f64; 4],
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct CompensatedQuerySum {
     sum: f64,
     correction: f64,
     absolute_scale: f64,
-    terms: usize,
+    operations: usize,
     has_positive: bool,
     has_negative: bool,
 }
 
 impl CompensatedQuerySum {
-    fn add(&mut self, value: f64) {
-        self.terms += 1;
+    fn add(&mut self, value: f64, operations: usize) {
+        self.add_with_scale(value, value.abs(), operations);
+    }
+
+    fn add_with_scale(&mut self, value: f64, absolute_scale: f64, operations: usize) {
+        self.operations = self.operations.saturating_add(operations.max(1));
         self.has_positive |= value.is_sign_positive() && value != 0.0;
         self.has_negative |= value.is_sign_negative() && value != 0.0;
-        self.absolute_scale += value.abs();
+        self.absolute_scale += absolute_scale;
         let next = self.sum + value;
         if self.sum.abs() >= value.abs() {
             self.correction += (self.sum - next) + value;
@@ -3610,7 +3620,12 @@ impl CompensatedQuerySum {
     }
 
     fn error_bound(self) -> f64 {
-        8.0 * self.terms as f64 * f64::EPSILON * self.absolute_scale
+        let relative_bound = 8.0 * self.operations as f64 * f64::EPSILON;
+        if relative_bound >= 1.0 {
+            f64::INFINITY
+        } else {
+            relative_bound / (1.0 - relative_bound) * self.absolute_scale
+        }
     }
 
     fn has_cancellation(self) -> bool {
@@ -3626,7 +3641,7 @@ pub(crate) struct RecoveredCubicField {
     physical_polynomial: [f64; 4],
     query_coordinates: CubicSolveCoordinateTransform,
     query_standard_polynomial: [f64; 4],
-    query_field_scale: Option<f64>,
+    query_component_field_scales: Option<[f64; 4]>,
 }
 
 impl RecoveredCubicField {
@@ -3648,7 +3663,7 @@ impl RecoveredCubicField {
             physical_polynomial: representation.coordinates.to_physical(standard_polynomial),
             query_coordinates: representation.coordinates,
             query_standard_polynomial: standard_polynomial,
-            query_field_scale: None,
+            query_component_field_scales: None,
         }
     }
 
@@ -3663,22 +3678,47 @@ impl RecoveredCubicField {
     pub(crate) fn finalize_verified_query_representation(
         &mut self,
         field_scale: f64,
+        characteristic_length: f64,
         basis_round_trip_error: f64,
-    ) {
+    ) -> Result<f64, QuerySampleFailure> {
         debug_assert!(field_scale.is_finite() && field_scale >= 0.0);
+        debug_assert!(characteristic_length.is_finite() && characteristic_length > 0.0);
         debug_assert!(
             basis_round_trip_error.is_finite()
                 && basis_round_trip_error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
         );
-        self.query_field_scale = Some(field_scale);
+        self.query_component_field_scales = Some([
+            field_scale,
+            field_scale / characteristic_length,
+            field_scale / characteristic_length,
+            field_scale / characteristic_length,
+        ]);
+        let mut round_trip_error = 0.0_f64;
+        for functional in &self.representers {
+            let recovered_response = self.evaluate_functional(functional);
+            let mut query_response = CompensatedQuerySum::default();
+            for term in functional.terms() {
+                let sample = self.reliable_sample(term.support())?;
+                query_response.add(
+                    term.value_coefficient() * sample.value
+                        + dot3(term.gradient_coefficient(), sample.gradient),
+                    16,
+                );
+            }
+            round_trip_error = round_trip_error.max(
+                (query_response.value() - recovered_response).abs()
+                    / recovered_response.abs().max(1.0),
+            );
+        }
+        Ok(round_trip_error)
     }
 
     pub(crate) fn reliable_sample(
         &self,
         point: [f64; 3],
     ) -> Result<FieldSample, QuerySampleFailure> {
-        let field_scale = self
-            .query_field_scale
+        let component_field_scales = self
+            .query_component_field_scales
             .expect("only a verified recovered field can reach SolvedModel");
         let primary = self.compensated_sample(point);
         let primary_values = [
@@ -3687,10 +3727,15 @@ impl RecoveredCubicField {
             primary[2].value(),
             primary[3].value(),
         ];
-        if primary_values.iter().zip(primary).all(|(value, sum)| {
-            value.is_finite()
-                && sum.error_bound() <= query_reliability_envelope(field_scale, *value)
-        }) {
+        if primary_values
+            .iter()
+            .zip(primary)
+            .zip(component_field_scales)
+            .all(|((value, sum), field_scale)| {
+                value.is_finite()
+                    && sum.error_bound() <= query_reliability_envelope(field_scale, *value)
+            })
+        {
             return Ok(FieldSample {
                 value: primary_values[0],
                 gradient: [primary_values[1], primary_values[2], primary_values[3]],
@@ -3698,11 +3743,12 @@ impl RecoveredCubicField {
         }
 
         let upgraded = self.double_double_sample(point);
-        let upgraded_values = upgraded.0.map(DoubleDouble::to_f64);
+        let upgraded_values = upgraded.components.map(DoubleDouble::to_f64);
         if upgraded_values
             .iter()
-            .zip(upgraded.1)
-            .all(|(value, error)| {
+            .zip(upgraded.error_bounds)
+            .zip(component_field_scales)
+            .all(|((value, error), field_scale)| {
                 value.is_finite() && error <= query_reliability_envelope(field_scale, *value)
             })
         {
@@ -3724,30 +3770,50 @@ impl RecoveredCubicField {
     }
 
     fn compensated_sample(&self, point: [f64; 3]) -> [CompensatedQuerySum; 4] {
+        // Keep the f64 and double-double expansions arithmetically independent:
+        // sharing a numeric abstraction here would make the rescue path repeat
+        // primary-rounding defects instead of recomputing the same field.
         let mut sums = [CompensatedQuerySum::default(); 4];
-        sums[0].add(self.query_standard_polynomial[0]);
+        sums[0].add(self.query_standard_polynomial[0], 1);
         for axis in 0..3 {
             let standard_coordinate = (point[axis] - self.query_coordinates.center()[axis])
                 / self.query_coordinates.length();
-            sums[0].add(self.query_standard_polynomial[axis + 1] * standard_coordinate);
-            sums[axis + 1]
-                .add(self.query_standard_polynomial[axis + 1] / self.query_coordinates.length());
+            sums[0].add(
+                self.query_standard_polynomial[axis + 1] * standard_coordinate,
+                4,
+            );
+            sums[axis + 1].add(
+                self.query_standard_polynomial[axis + 1] / self.query_coordinates.length(),
+                2,
+            );
         }
         for (coefficient, functional) in self.coefficients.iter().zip(&self.representers) {
             for term in functional.terms() {
                 let jet = CubicKernel::jet(point, term.support(), &self.metric);
                 let derivative = term.gradient_coefficient();
-                sums[0].add(
-                    coefficient
-                        * (term.value_coefficient() * jet.value()
-                            + dot3(derivative, jet.gradient_y())),
+                let value_term = term.value_coefficient() * jet.value();
+                let derivative_terms: [f64; 3] =
+                    std::array::from_fn(|axis| derivative[axis] * jet.gradient_y()[axis]);
+                sums[0].add_with_scale(
+                    coefficient * (value_term + derivative_terms.into_iter().sum::<f64>()),
+                    coefficient.abs()
+                        * (value_term.abs()
+                            + derivative_terms.into_iter().map(f64::abs).sum::<f64>()),
+                    128,
                 );
                 let mixed_derivative = jet.mixed_xy();
                 for axis in 0..3 {
-                    sums[axis + 1].add(
+                    let value_derivative_term = term.value_coefficient() * jet.gradient_x()[axis];
+                    let mixed_terms: [f64; 3] = std::array::from_fn(|column| {
+                        mixed_derivative[axis][column] * derivative[column]
+                    });
+                    sums[axis + 1].add_with_scale(
                         coefficient
-                            * (term.value_coefficient() * jet.gradient_x()[axis]
-                                + dot3(mixed_derivative[axis], derivative)),
+                            * (value_derivative_term + mixed_terms.into_iter().sum::<f64>()),
+                        coefficient.abs()
+                            * (value_derivative_term.abs()
+                                + mixed_terms.into_iter().map(f64::abs).sum::<f64>()),
+                        128,
                     );
                 }
             }
@@ -3755,7 +3821,7 @@ impl RecoveredCubicField {
         sums
     }
 
-    fn double_double_sample(&self, point: [f64; 3]) -> ([DoubleDouble; 4], [f64; 4]) {
+    fn double_double_sample(&self, point: [f64; 3]) -> DoubleDoubleQuerySample {
         let mut sums = [DoubleDouble::from(0.0); 4];
         let mut absolute_scales = [0.0_f64; 4];
         let mut operations = [0_usize; 4];
@@ -3809,7 +3875,10 @@ impl RecoveredCubicField {
         let errors = std::array::from_fn(|component| {
             8.0 * operations[component] as f64 * f64::EPSILON.powi(2) * absolute_scales[component]
         });
-        (sums, errors)
+        DoubleDoubleQuerySample {
+            components: sums,
+            error_bounds: errors,
+        }
     }
 
     pub(crate) fn sample(&self, point: [f64; 3]) -> FieldSample {
@@ -4005,6 +4074,7 @@ pub(crate) struct CubicEqualitySolution {
     pub(crate) tolerance_round_trip_error: f64,
     pub(crate) polynomial_round_trip_error: f64,
     pub(crate) field_coefficient_round_trip_error: f64,
+    pub(crate) query_response_round_trip_error: f64,
     pub(crate) field_energy_round_trip_error: f64,
     pub(crate) whitening_round_trip_error: f64,
     pub(crate) objective_round_trip_error: f64,
@@ -4046,6 +4116,8 @@ pub enum RecoveryVerificationFailureReason {
     PolynomialRoundTripViolation,
     /// Field-coefficient recovery exceeded its round-trip limit.
     FieldCoefficientRoundTripViolation,
+    /// Recovered-basis responses disagreed with the finalized query path.
+    QueryRepresentationRoundTripViolation,
     /// FieldEnergy recovery exceeded its round-trip limit.
     FieldEnergyRoundTripViolation,
     /// A whitening map failed to recover its original physical residual.
@@ -4810,6 +4882,26 @@ fn recover_and_verify(
     if tolerance_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::ToleranceRoundTripViolation);
     }
+    let query_field_scale =
+        canonical_characteristic_field_scale(&problem, characteristic_length, field_energy);
+    let query_response_round_trip_error = if reasons.is_empty() {
+        match field.finalize_verified_query_representation(
+            query_field_scale,
+            characteristic_length,
+            polynomial_round_trip_error.max(field_coefficient_round_trip_error),
+        ) {
+            Ok(error) if error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit => {
+                Some(error)
+            }
+            Ok(_) | Err(_) => {
+                reasons
+                    .push(RecoveryVerificationFailureReason::QueryRepresentationRoundTripViolation);
+                None
+            }
+        }
+    } else {
+        None
+    };
     if !reasons.is_empty() {
         return Err(CubicEqualityFailure::RecoveryVerification {
             evidence: Box::new(RecoveryVerificationFailureEvidence {
@@ -4835,13 +4927,6 @@ fn recover_and_verify(
         });
     }
 
-    let query_field_scale =
-        canonical_characteristic_field_scale(&problem, characteristic_length, field_energy);
-    field.finalize_verified_query_representation(
-        query_field_scale,
-        polynomial_round_trip_error.max(field_coefficient_round_trip_error),
-    );
-
     Ok(CubicEqualitySolution {
         representation: representation_evidence,
         assembly,
@@ -4859,6 +4944,8 @@ fn recover_and_verify(
         tolerance_round_trip_error,
         polynomial_round_trip_error,
         field_coefficient_round_trip_error,
+        query_response_round_trip_error: query_response_round_trip_error
+            .expect("accepted recovery verified the query response round trip"),
         field_energy_round_trip_error,
         whitening_round_trip_error,
         objective_round_trip_error,

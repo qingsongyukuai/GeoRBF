@@ -12,8 +12,12 @@ physical generalized-RBF coefficients and the centered/scaled complete Pi1
 coordinates from the stable solver representation. The expansion becomes
 queryable only after all-source recovery, the physical Pi1 side condition,
 polynomial and coefficient basis round trips, and the FieldEnergy round trip
-have passed. `RepresentationEvidence::verified_query_representation` records
-those conclusions and the maximum basis round-trip error.
+have passed. Recovery also re-evaluates every retained fitting functional
+through the finalized reliable query path and compares those responses with
+the canonical recovered expansion before a model can be produced.
+`RepresentationEvidence::verified_query_representation` records those
+conclusions, the stable-basis recovery error, and this measured query-response
+round-trip error separately.
 
 Keeping the centered Pi1 coordinates prevents a large physical constant from
 destroying low-order field information at translated query locations. Recovery
@@ -25,8 +29,11 @@ a second fit or a model choice.
 
 Value and all three physical gradient components use the same ordered Neumaier
 accumulation over polynomial and generalized-RBF contributions. Each component
-is accepted only when its rounding bound fits
+is accepted only when its operation-aware rounding bound (including Cubic jet,
+product, dot-product, coordinate, and addition work) fits
 `1e-12 * field_scale + 1e-11 * abs(sample_component)`.
+Gradient field scales are converted to field-value-per-length units with the
+recovery representation's characteristic length.
 
 When that evidence is insufficient, the query streams the same polynomial,
 coefficients, representers, and Cubic jets once more with the existing
