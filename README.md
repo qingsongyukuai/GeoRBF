@@ -245,6 +245,9 @@ closure for the v0.2 Convex surface is recorded in
 The v0.2.0 release matrix, traceability, compatibility boundary, package, and
 publication procedure are recorded in
 [#36](docs/implementation/36-convex-relations-release.md).
+The v0.2.1 numerical repair executes only the versioned `georbf-v2` policy;
+its compatibility and audit boundary is recorded in
+[#49](docs/implementation/49-georbf-v2-numerical-policy.md).
 
 ## Shared-level affine relations
 

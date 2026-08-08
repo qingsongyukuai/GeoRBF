@@ -250,6 +250,7 @@ fn solve_attempt_termination_does_not_encode_canonical_acceptance() {
     assert_eq!(representation.quotient_dimension(), Some(0));
     assert_eq!(representation.retained_mode_count(), Some(0));
     assert_eq!(representation.truncated_mode_count(), Some(0));
+    assert_eq!(representation.hard_to_soft_conversion_count(), 0);
     assert!(representation.quotient_construction().is_some());
     assert!(representation.quotient_factorization().is_some());
     assert!(representation.all_source_recovery().unwrap().verified());
@@ -288,8 +289,14 @@ fn public_fit_rescues_a_small_positive_pi1_mode_and_recovers_every_source() {
         .unwrap()
         .fit()
         .expect("bounded precision rescue proves the thin positive Pi1 mode");
-    let analysis = success
-        .report()
+    let report = success.report();
+    let representation = report.representation_evidence();
+    assert_eq!(representation.numerical_policy().as_str(), "georbf-v2");
+    assert_eq!(representation.truncated_mode_count(), Some(0));
+    assert_eq!(representation.hard_to_soft_conversion_count(), 0);
+    assert!(!representation.problem_regularization_applied());
+    assert!(representation.unregularized_canonical_recovery_verified());
+    let analysis = report
         .cubic_analysis()
         .expect("a successful Cubic fit publishes representation evidence");
     let rescue = analysis
@@ -302,10 +309,9 @@ fn public_fit_rescues_a_small_positive_pi1_mode_and_recovers_every_source() {
         rescue.conclusion(),
         CubicPrecisionRescueConclusion::Positive
     );
-    assert_eq!(success.report().hard_relations().len(), observations.len());
+    assert_eq!(report.hard_relations().len(), observations.len());
     assert!(
-        success
-            .report()
+        report
             .hard_relations()
             .iter()
             .all(|relation| { relation.residual().abs() <= relation.tolerance() })

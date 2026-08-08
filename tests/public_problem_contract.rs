@@ -1,6 +1,7 @@
 use std::num::NonZeroUsize;
 use std::thread;
 
+use georbf::diagnostics::NumericalPolicyId;
 use georbf::geometry::{
     FieldUnitLabel, GeometryError, GlobalAnisotropyMetric, Handedness, InputCoordinateFrame,
     LengthUnitLabel, Point3, Vector3,
@@ -124,6 +125,25 @@ fn affine_snapshot(order: &[usize]) -> georbf::ProblemSnapshot {
         add_affine_input(&mut builder, *input_index);
     }
     builder.build().expect("the affine fixture is valid")
+}
+
+#[test]
+fn default_fit_configuration_executes_v2_and_retains_v1_as_history_only() {
+    let configuration = FitConfiguration::default();
+    assert_eq!(configuration.numerical_policy().as_str(), "georbf-v2");
+    assert_eq!(NumericalPolicyId::georbf_v1().as_str(), "georbf-v1");
+
+    let snapshot = affine_snapshot(&[0, 1, 2, 3]);
+    assert_eq!(snapshot.fit_configuration(), configuration);
+    assert_eq!(
+        snapshot
+            .fit()
+            .expect("the default policy fits the affine public contract")
+            .report()
+            .numerical_policy()
+            .as_str(),
+        "georbf-v2"
+    );
 }
 
 macro_rules! assert_group_draft_contract {

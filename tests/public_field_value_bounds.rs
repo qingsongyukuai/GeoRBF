@@ -145,6 +145,8 @@ fn close_support_positive_mode_is_retained_without_geometric_deduplication() {
     assert!(!factorization.gram_jitter_applied());
     assert!(!factorization.mode_truncation_applied());
     let representation = success.report().representation_evidence();
+    assert_eq!(representation.numerical_policy().as_str(), "georbf-v2");
+    assert_eq!(representation.hard_to_soft_conversion_count(), 0);
     assert!(!representation.problem_regularization_applied());
     assert!(representation.unregularized_canonical_recovery_verified());
     assert!(
@@ -604,6 +606,8 @@ fn general_bound_infeasibility_requires_a_validated_farkas_certificate() {
     let failure = builder.build().unwrap().fit().unwrap_err();
     assert_eq!(failure.diagnosis(), ProblemDiagnosis::InfeasibleProblem);
     let representation = failure.report().representation_evidence();
+    assert_eq!(representation.numerical_policy().as_str(), "georbf-v2");
+    assert_eq!(representation.hard_to_soft_conversion_count(), 0);
     assert_eq!(
         representation.failure_stage(),
         Some(RepresentationEvidenceStage::Backend)

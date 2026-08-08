@@ -1585,6 +1585,7 @@ impl FitReport {
             problem_regularization_applied: analysis
                 .is_some_and(CubicAnalysisEvidence::problem_regularization_applied)
                 || build.is_some_and(|evidence| evidence.problem_regularization_applied),
+            hard_to_soft_conversion_count: 0,
             backend_factorization_regularization: self
                 .attempts
                 .iter()

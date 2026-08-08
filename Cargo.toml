@@ -44,6 +44,7 @@ include = [
     "/docs/implementation/44-canonical-soft-objective-recovery.md",
     "/docs/implementation/46-all-source-recover-and-verify.md",
     "/docs/implementation/47-representation-evidence-diagnosis.md",
+    "/docs/implementation/49-georbf-v2-numerical-policy.md",
     "/validation/oracle/cubic-v1/**",
     "/validation/oracle/precision-rescue-v1/**",
     "/validation/v0.1.0/**",

@@ -1985,6 +1985,7 @@ pub struct RepresentationEvidence {
     recovered_source_ids: Box<[SourceId]>,
     unregularized_canonical_recovery_verified: bool,
     problem_regularization_applied: bool,
+    hard_to_soft_conversion_count: usize,
     backend_factorization_regularization: Box<[BackendFactorizationRegularizationEvidence]>,
     verified_query_representation: Option<VerifiedQueryRepresentationEvidence>,
 }
@@ -2010,6 +2011,7 @@ pub(crate) struct RepresentationEvidenceParts {
     pub(crate) recovered_source_ids: Vec<SourceId>,
     pub(crate) unregularized_canonical_recovery_verified: bool,
     pub(crate) problem_regularization_applied: bool,
+    pub(crate) hard_to_soft_conversion_count: usize,
     pub(crate) backend_factorization_regularization:
         Vec<BackendFactorizationRegularizationEvidence>,
     pub(crate) verified_query_representation: Option<VerifiedQueryRepresentationEvidence>,
@@ -2039,6 +2041,7 @@ impl RepresentationEvidence {
             unregularized_canonical_recovery_verified: parts
                 .unregularized_canonical_recovery_verified,
             problem_regularization_applied: parts.problem_regularization_applied,
+            hard_to_soft_conversion_count: parts.hard_to_soft_conversion_count,
             backend_factorization_regularization: parts.backend_factorization_regularization.into(),
             verified_query_representation: parts.verified_query_representation,
         }
@@ -2158,6 +2161,11 @@ impl RepresentationEvidence {
     /// Reports whether GeoRBF altered the canonical problem with regularization.
     pub fn problem_regularization_applied(&self) -> bool {
         self.problem_regularization_applied
+    }
+
+    /// Returns the number of canonical hard relations converted to soft ones.
+    pub fn hard_to_soft_conversion_count(&self) -> usize {
+        self.hard_to_soft_conversion_count
     }
 
     /// Returns factorization-only stabilization settings for every backend attempt.
