@@ -3675,12 +3675,12 @@ impl RecoveredCubicField {
         self.physical_polynomial
     }
 
-    pub(crate) fn finalize_verified_query_representation(
+    pub(crate) fn verify_and_finalize_query_representation(
         &mut self,
         field_scale: f64,
         characteristic_length: f64,
         basis_round_trip_error: f64,
-    ) -> Result<f64, QuerySampleFailure> {
+    ) -> Option<f64> {
         debug_assert!(field_scale.is_finite() && field_scale >= 0.0);
         debug_assert!(characteristic_length.is_finite() && characteristic_length > 0.0);
         debug_assert!(
@@ -3698,7 +3698,7 @@ impl RecoveredCubicField {
             let recovered_response = self.evaluate_functional(functional);
             let mut query_response = CompensatedQuerySum::default();
             for term in functional.terms() {
-                let sample = self.reliable_sample(term.support())?;
+                let sample = self.reliable_sample(term.support()).ok()?;
                 query_response.add(
                     term.value_coefficient() * sample.value
                         + dot3(term.gradient_coefficient(), sample.gradient),
@@ -3710,7 +3710,8 @@ impl RecoveredCubicField {
                     / recovered_response.abs().max(1.0),
             );
         }
-        Ok(round_trip_error)
+        (round_trip_error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit)
+            .then_some(round_trip_error)
     }
 
     pub(crate) fn reliable_sample(
@@ -4885,15 +4886,13 @@ fn recover_and_verify(
     let query_field_scale =
         canonical_characteristic_field_scale(&problem, characteristic_length, field_energy);
     let query_response_round_trip_error = if reasons.is_empty() {
-        match field.finalize_verified_query_representation(
+        match field.verify_and_finalize_query_representation(
             query_field_scale,
             characteristic_length,
             polynomial_round_trip_error.max(field_coefficient_round_trip_error),
         ) {
-            Ok(error) if error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit => {
-                Some(error)
-            }
-            Ok(_) | Err(_) => {
+            Some(error) => Some(error),
+            None => {
                 reasons
                     .push(RecoveryVerificationFailureReason::QueryRepresentationRoundTripViolation);
                 None

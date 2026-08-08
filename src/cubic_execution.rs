@@ -2467,15 +2467,13 @@ fn recover_and_verify_qp(
         reasons.push(QpRecoveryFailureReason::ObjectiveRoundTripViolation);
     }
     let query_response_round_trip_error = if reasons.is_empty() {
-        match field.finalize_verified_query_representation(
+        match field.verify_and_finalize_query_representation(
             field_scale,
             canonical_form.characteristic_length,
             polynomial_round_trip_error.max(field_coefficient_round_trip_error),
         ) {
-            Ok(error) if error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit => {
-                Some(error)
-            }
-            Ok(_) | Err(_) => {
+            Some(error) => Some(error),
+            None => {
                 reasons.push(QpRecoveryFailureReason::QueryRepresentationRoundTripViolation);
                 None
             }
