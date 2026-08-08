@@ -22,12 +22,15 @@ sources that reached representation participation remain auditable.
 
 `AllSourceRecoveryEvidence` is embedded after recovery. It independently lists
 participating and recovered sources and proves whether the unregularized
-canonical problem passed complete recovery. Problem regularization remains
-unconditionally false. Backend factorization regularization is recorded per
-attempt and stays separate: Equality KKT attempts disable it, while Clarabel
-attempts transparently report whether their internal static or dynamic
-stabilization was enabled. Such a setting does not imply canonical acceptance;
-only Recover and Verify can set the unregularized recovery result.
+canonical problem passed complete recovery. The representation construction
+directly reports whether problem regularization was applied; the current policy
+reports false. Backend factorization regularization is recorded per attempt and
+stays separate. Equality KKT attempts report both mechanisms disabled. Clarabel
+reports static regularization as applied when configured and explicitly marks
+dynamic regularization as enabled-but-not-reported when its adapter cannot
+observe whether that mechanism fired. Such a backend status does not imply
+canonical acceptance; only Recover and Verify can set the unregularized
+recovery result.
 
 Problem diagnosis no longer folds a proved representation negative-curvature
 direction into generic numerical failure. It remains distinct from algebraic

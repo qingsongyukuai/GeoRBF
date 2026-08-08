@@ -1,4 +1,6 @@
-use georbf::diagnostics::{ProblemDiagnosis, RepresentationEvidenceStage};
+use georbf::diagnostics::{
+    BackendRegularizationApplication, ProblemDiagnosis, RepresentationEvidenceStage,
+};
 use georbf::fit::{BoundActiveState, BoundSide};
 use georbf::geometry::{FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel};
 use georbf::kernel::FieldEnergyNormalization;
@@ -151,6 +153,16 @@ fn close_support_positive_mode_is_retained_without_geometric_deduplication() {
             .iter()
             .any(|attempt| attempt.enabled()),
         "Clarabel's factorization-only stabilization must be disclosed"
+    );
+    assert!(
+        representation
+            .backend_factorization_regularization()
+            .iter()
+            .all(|attempt| {
+                attempt.static_application() == BackendRegularizationApplication::Applied
+                    && attempt.dynamic_application()
+                        == BackendRegularizationApplication::EnabledApplicationNotReported
+            })
     );
 
     for location in close_supports {

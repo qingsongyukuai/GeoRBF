@@ -170,7 +170,7 @@ fn cubic_pi1_rank_loss_is_tied_to_a_canonical_unidentified_field_mode() {
         representation.failure_stage(),
         Some(RepresentationEvidenceStage::PolynomialPairing)
     );
-    assert_eq!(representation.canonical_hard_relation_count(), 2);
+    assert_eq!(representation.canonical_hard_relation_count(), Some(2));
     assert_eq!(representation.source_count(), 2);
     assert_eq!(representation.representer_count(), Some(2));
     assert_eq!(representation.polynomial_dimension(), Some(4));
@@ -241,8 +241,8 @@ fn solve_attempt_termination_does_not_encode_canonical_acceptance() {
         representation.last_completed_stage(),
         RepresentationEvidenceStage::Recovery
     );
-    assert_eq!(representation.canonical_hard_relation_count(), 4);
-    assert_eq!(representation.canonical_soft_relation_count(), 0);
+    assert_eq!(representation.canonical_hard_relation_count(), Some(4));
+    assert_eq!(representation.canonical_soft_relation_count(), Some(0));
     assert_eq!(representation.source_count(), 4);
     assert_eq!(representation.representer_count(), Some(4));
     assert_eq!(representation.polynomial_dimension(), Some(4));

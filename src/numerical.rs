@@ -13,7 +13,7 @@ impl NumericalPolicyId {
 
     /// Returns the numerical policy executed by GeoRBF v0.2.1.
     pub fn georbf_v2() -> Self {
-        EQUALITY_KKT_POLICY_V2.id
+        EXECUTED_NUMERICAL_POLICY.id
     }
 
     /// Returns the stable policy identifier.
@@ -53,35 +53,36 @@ pub(crate) struct EqualityKktNumericalPolicy {
     pub(crate) kkt_max_refinement_steps: usize,
 }
 
-pub(crate) const EQUALITY_KKT_POLICY_V2: EqualityKktNumericalPolicy = EqualityKktNumericalPolicy {
-    id: NumericalPolicyId("georbf-v2"),
-    backend_standard_form_backward_error_limit: 1.0e-11,
-    convex_backend_residual_limit: 1.0e-8,
-    convex_standard_retry_residual_limit: 1.0e-7,
-    convex_certificate_residual_limit: 1.0e-8,
-    convex_certificate_separation_limit: 1.0e-7,
-    spectral_reject_multiplier: 64.0,
-    spectral_accept_multiplier: 4096.0,
-    reduced_symmetry_multiplier: 256.0,
-    null_space_defect_limit: 1.0e-12,
-    quotient_householder_orthogonality_limit: 1.0e-11,
-    quotient_canonical_response_round_trip_limit: 1.0e-11,
-    quotient_llt_backward_error_limit: 1.0e-11,
-    quotient_field_energy_identity_limit: 1.0e-11,
-    quotient_basis_side_condition_limit: 1.0e-11,
-    quotient_basis_recovery_round_trip_limit: 1.0e-11,
-    quotient_basis_response_round_trip_limit: 1.0e-11,
-    affine_reproduction_limit: 1.0e-11,
-    side_condition_limit: 1.0e-10,
-    canonical_characteristic_tolerance_multiplier: 1.0e-10,
-    canonical_relation_reference_tolerance_multiplier: 1.0e-8,
-    recovery_round_trip_limit: 1.0e-11,
-    metric_determinant_one_multiplier: 64.0,
-    ruiz_rounds: 8,
-    ruiz_single_round_exponent_limit: 8,
-    ruiz_cumulative_exponent_limit: 32,
-    kkt_max_refinement_steps: 2,
-};
+pub(crate) const EXECUTED_NUMERICAL_POLICY: EqualityKktNumericalPolicy =
+    EqualityKktNumericalPolicy {
+        id: NumericalPolicyId("georbf-v2"),
+        backend_standard_form_backward_error_limit: 1.0e-11,
+        convex_backend_residual_limit: 1.0e-8,
+        convex_standard_retry_residual_limit: 1.0e-7,
+        convex_certificate_residual_limit: 1.0e-8,
+        convex_certificate_separation_limit: 1.0e-7,
+        spectral_reject_multiplier: 64.0,
+        spectral_accept_multiplier: 4096.0,
+        reduced_symmetry_multiplier: 256.0,
+        null_space_defect_limit: 1.0e-12,
+        quotient_householder_orthogonality_limit: 1.0e-11,
+        quotient_canonical_response_round_trip_limit: 1.0e-11,
+        quotient_llt_backward_error_limit: 1.0e-11,
+        quotient_field_energy_identity_limit: 1.0e-11,
+        quotient_basis_side_condition_limit: 1.0e-11,
+        quotient_basis_recovery_round_trip_limit: 1.0e-11,
+        quotient_basis_response_round_trip_limit: 1.0e-11,
+        affine_reproduction_limit: 1.0e-11,
+        side_condition_limit: 1.0e-10,
+        canonical_characteristic_tolerance_multiplier: 1.0e-10,
+        canonical_relation_reference_tolerance_multiplier: 1.0e-8,
+        recovery_round_trip_limit: 1.0e-11,
+        metric_determinant_one_multiplier: 64.0,
+        ruiz_rounds: 8,
+        ruiz_single_round_exponent_limit: 8,
+        ruiz_cumulative_exponent_limit: 32,
+        kkt_max_refinement_steps: 2,
+    };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpectralRankDecision {
@@ -129,7 +130,8 @@ pub(crate) fn analyze_spectral_rank(
     let largest = singular_values.first().copied().unwrap_or(0.0);
     let smallest = singular_values.last().copied().unwrap_or(0.0);
     let dimension = matrix.nrows().max(matrix.ncols());
-    let (reject_ratio, accept_ratio) = EQUALITY_KKT_POLICY_V2.spectral_ratio_thresholds(dimension);
+    let (reject_ratio, accept_ratio) =
+        EXECUTED_NUMERICAL_POLICY.spectral_ratio_thresholds(dimension);
     let svd_ratio = if largest > 0.0 {
         smallest / largest
     } else {
@@ -146,7 +148,7 @@ pub(crate) fn analyze_spectral_rank(
         reject_ratio,
         accept_ratio,
         rank,
-        decision: EQUALITY_KKT_POLICY_V2.classify_spectral_ratio(dimension, svd_ratio),
+        decision: EXECUTED_NUMERICAL_POLICY.classify_spectral_ratio(dimension, svd_ratio),
     })
 }
 

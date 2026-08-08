@@ -18,7 +18,8 @@ use crate::cubic_equality::{
     CanonicalSoftLoss, CanonicalSoftObjective, CanonicalSoftResidualBlockKind,
     CanonicalSoftResidualMemberKind, CanonicalViolationChannel, CanonicalViolationLoss,
     CpdEvidence, CubicCanonicalProblem, CubicEqualityFailure, CubicEqualitySolution,
-    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence, RepresentationFailure,
+    PhysicalSideConditionEvidence, RecoveryVerificationFailureEvidence,
+    RepresentationBuildEvidence, RepresentationBuildStage, RepresentationFailure,
     SemanticLatentCoefficient, SemanticLatentDefinition,
     SolveCoordinateTransformFailureReason as InternalSolveCoordinateFailure,
     canonical_fitting_uses, preflight_polynomial_analysis_failure,
@@ -32,9 +33,9 @@ use crate::diagnostics::{
     AllSourceRecoveryEvidence, AllSourceRecoveryEvidenceParts, AnalysisContractQuantity,
     AnalysisFailureEvidence, AnalysisFailureStage, AttemptFailureCategory, AttemptFailureEvidence,
     BackendAttemptSettings, BackendFactorizationRegularizationEvidence, BackendFingerprint,
-    BackendFingerprintParts, BackendInputField, CanonicalAcceptanceEvidence,
-    CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource, CapacityEvidence,
-    CapacityFailureKind, ConflictWitnessEvidence, ConflictWitnessEvidenceParts,
+    BackendFingerprintParts, BackendInputField, BackendRegularizationApplication,
+    CanonicalAcceptanceEvidence, CanonicalAcceptanceEvidenceParts, CanonicalEvidenceSource,
+    CapacityEvidence, CapacityFailureKind, ConflictWitnessEvidence, ConflictWitnessEvidenceParts,
     ConflictWitnessRelationEvidence, ConvexResidualEvidence as PublicConvexResidualEvidence,
     ConvexResidualEvidenceParts, CubicAnalysisEvidence, CubicAnalysisEvidenceParts,
     CubicLltPivotInterval, CubicLltPivotIntervalParts, CubicPrecisionRescueEvidence,
@@ -1391,6 +1392,7 @@ pub struct FitReport {
     canonical_hard_relation_count: Option<usize>,
     canonical_soft_relation_count: Option<usize>,
     representation_source_ids: Vec<SourceId>,
+    representation_build_evidence: Option<RepresentationBuildEvidence>,
     requested_thread_budget: ThreadBudget,
     hard_relations: Vec<HardRelationAssessment>,
     field_value_bounds: Vec<FieldValueBoundAssessment>,
@@ -1453,15 +1455,26 @@ impl FitReport {
     /// Returns the unified representation evidence bundle for this fit.
     pub fn representation_evidence(&self) -> RepresentationEvidence {
         let analysis = self.cubic_analysis.as_ref();
-        let factorization = analysis.map(CubicAnalysisEvidence::quotient_factorization);
-        let quotient_construction = analysis.map(CubicAnalysisEvidence::quotient_construction);
-        let failure_stage = representation_failure_stage(self);
-        let last_completed_stage = representation_last_completed_stage(self, failure_stage);
-        let quotient_dimension = analysis
-            .map(|evidence| evidence.quotient_construction().quotient_dimension())
-            .or_else(|| representation_failure_quotient_dimension(self));
+        let build = self.representation_build_evidence.as_ref();
+        let factorization = analysis
+            .map(CubicAnalysisEvidence::quotient_factorization)
+            .cloned()
+            .or_else(|| {
+                build
+                    .and_then(|evidence| evidence.quotient_factorization.as_ref())
+                    .map(public_quotient_factorization)
+            });
+        let quotient_construction = analysis
+            .map(CubicAnalysisEvidence::quotient_construction)
+            .or_else(|| {
+                build
+                    .and_then(|evidence| evidence.quotient_construction.as_ref())
+                    .map(public_quotient_construction)
+            });
+        let (failure_stage, last_completed_stage) = representation_stages(self, build);
         let precision_rescue = factorization
-            .and_then(CubicQuotientFactorizationEvidence::precision_rescue)
+            .as_ref()
+            .and_then(|evidence| evidence.precision_rescue())
             .or_else(|| analysis.and_then(CubicAnalysisEvidence::polynomial_precision_rescue))
             .or_else(|| representation_failure_precision_rescue(self));
         let mut recovered_source_ids = self
@@ -1491,44 +1504,34 @@ impl FitReport {
                 .all_source_recovery
                 .as_ref()
                 .map(AllSourceRecoveryEvidence::canonical_hard_relation_count)
-                .or(self.canonical_hard_relation_count)
-                .unwrap_or(0),
+                .or(self.canonical_hard_relation_count),
             canonical_soft_relation_count: self
                 .all_source_recovery
                 .as_ref()
                 .map(AllSourceRecoveryEvidence::canonical_soft_relation_count)
-                .or(self.canonical_soft_relation_count)
-                .unwrap_or(0),
+                .or(self.canonical_soft_relation_count),
             source_ids: self.representation_source_ids.clone(),
             representer_count: analysis
                 .map(CubicAnalysisEvidence::fitting_functional_count)
-                .or_else(|| self.problem_size.center_coefficients()),
+                .or_else(|| build.and_then(|evidence| evidence.representer_count)),
             polynomial_dimension: analysis
                 .map(CubicAnalysisEvidence::polynomial_dimension)
-                .or_else(|| {
-                    (last_completed_stage >= RepresentationEvidenceStage::RepresenterAssembly)
-                        .then_some(4)
-                }),
+                .or_else(|| build.and_then(|evidence| evidence.polynomial_dimension)),
             polynomial_rank: analysis
                 .map(CubicAnalysisEvidence::polynomial_rank)
-                .or_else(|| {
-                    self.backend_rank.as_ref().and_then(|evidence| {
-                        (evidence.domain() == RankEvidenceDomain::CubicPolynomialPairing)
-                            .then(|| evidence.rank())
-                            .flatten()
-                    })
-                })
-                .or_else(|| {
-                    (last_completed_stage >= RepresentationEvidenceStage::PolynomialPairing)
-                        .then_some(4)
-                }),
-            quotient_dimension,
+                .or_else(|| build.and_then(|evidence| evidence.polynomial_rank)),
+            quotient_dimension: quotient_construction
+                .map(CubicQuotientConstructionEvidence::quotient_dimension),
             retained_mode_count: factorization
-                .map(CubicQuotientFactorizationEvidence::retained_modes),
+                .as_ref()
+                .map(CubicQuotientFactorizationEvidence::retained_modes)
+                .or_else(|| build.and_then(|evidence| evidence.retained_modes)),
             truncated_mode_count: factorization
-                .map(CubicQuotientFactorizationEvidence::truncated_modes),
+                .as_ref()
+                .map(CubicQuotientFactorizationEvidence::truncated_modes)
+                .or_else(|| build.and_then(|evidence| evidence.truncated_modes)),
             quotient_construction,
-            quotient_factorization: factorization.cloned(),
+            quotient_factorization: factorization,
             precision_rescue,
             analysis_failure: self.analysis_failure.clone(),
             all_source_recovery: self.all_source_recovery.clone(),
@@ -1537,15 +1540,13 @@ impl FitReport {
                 .canonical_acceptance
                 .as_ref()
                 .is_some_and(CanonicalAcceptanceEvidence::accepted),
+            problem_regularization_applied: analysis
+                .is_some_and(CubicAnalysisEvidence::problem_regularization_applied)
+                || build.is_some_and(|evidence| evidence.problem_regularization_applied),
             backend_factorization_regularization: self
                 .attempts
                 .iter()
-                .map(|attempt| {
-                    BackendFactorizationRegularizationEvidence::new(
-                        attempt.sequence(),
-                        attempt.backend_factorization_regularization_enabled(),
-                    )
-                })
+                .map(SolveAttemptRecord::backend_factorization_regularization)
                 .collect(),
         })
     }
@@ -1760,153 +1761,71 @@ impl FitReport {
     }
 }
 
-fn representation_failure_stage(report: &FitReport) -> Option<RepresentationEvidenceStage> {
+fn representation_stages(
+    report: &FitReport,
+    build: Option<&RepresentationBuildEvidence>,
+) -> (
+    Option<RepresentationEvidenceStage>,
+    RepresentationEvidenceStage,
+) {
     if report
         .canonical_acceptance
         .as_ref()
         .is_some_and(CanonicalAcceptanceEvidence::accepted)
     {
-        return None;
+        return (None, RepresentationEvidenceStage::Recovery);
     }
     if report.recovery_verification.is_some() {
-        return Some(RepresentationEvidenceStage::Recovery);
+        return (
+            Some(RepresentationEvidenceStage::Recovery),
+            RepresentationEvidenceStage::Backend,
+        );
     }
     if report.execution_failure.is_some()
         || (!report.attempts.is_empty() && report.cubic_analysis.is_some())
     {
-        return Some(RepresentationEvidenceStage::Backend);
+        return (
+            Some(RepresentationEvidenceStage::Backend),
+            RepresentationEvidenceStage::ResponseAssembly,
+        );
     }
-    if let Some(failure) = report.analysis_failure.as_ref() {
-        return Some(match failure {
-            AnalysisFailureEvidence::EmptyRepresenterSpan
-            | AnalysisFailureEvidence::InvalidSolveCoordinateTransform { .. } => {
-                RepresentationEvidenceStage::RepresenterAssembly
-            }
-            AnalysisFailureEvidence::NumericalAnalysis {
-                stage: AnalysisFailureStage::CubicPolynomialRank,
-                ..
-            }
-            | AnalysisFailureEvidence::WorkspaceAllocation {
-                stage: AnalysisFailureStage::CubicPolynomialRank,
-                ..
-            }
-            | AnalysisFailureEvidence::PolynomialPrecisionRescue { .. } => {
-                RepresentationEvidenceStage::PolynomialPairing
-            }
-            AnalysisFailureEvidence::NullSpaceWorkspaceAllocation
-            | AnalysisFailureEvidence::ContractThresholdExceeded {
-                quantity:
-                    AnalysisContractQuantity::NullSpaceDefect
-                    | AnalysisContractQuantity::HouseholderOrthogonalityError
-                    | AnalysisContractQuantity::CanonicalResponseRoundTripError
-                    | AnalysisContractQuantity::ReducedSymmetryDefect,
-                ..
-            } => RepresentationEvidenceStage::HouseholderQuotient,
-            AnalysisFailureEvidence::NumericalAnalysis {
-                stage: AnalysisFailureStage::CubicReducedCholesky,
-                ..
-            }
-            | AnalysisFailureEvidence::WorkspaceAllocation {
-                stage: AnalysisFailureStage::CubicReducedCholesky,
-                ..
-            }
-            | AnalysisFailureEvidence::QuotientPivotRequiresPrecisionRescue { .. }
-            | AnalysisFailureEvidence::QuotientPrecisionRescue { .. }
-            | AnalysisFailureEvidence::QuotientFactorizationNotPositive { .. }
-            | AnalysisFailureEvidence::ContractThresholdExceeded {
-                quantity:
-                    AnalysisContractQuantity::QuotientLltBackwardError
-                    | AnalysisContractQuantity::QuotientFieldEnergyIdentityError
-                    | AnalysisContractQuantity::QuotientSideConditionError
-                    | AnalysisContractQuantity::QuotientRecoveryRoundTripError
-                    | AnalysisContractQuantity::QuotientBasisResponseRoundTripError,
-                ..
-            } => RepresentationEvidenceStage::QuotientFactorization,
-            AnalysisFailureEvidence::ContractThresholdExceeded {
-                quantity: AnalysisContractQuantity::AffineReproductionError,
-                ..
-            }
-            | AnalysisFailureEvidence::InvalidBackendInputLength { .. }
-            | AnalysisFailureEvidence::NonFiniteBackendInput { .. }
-            | AnalysisFailureEvidence::ScalingFailure { .. } => {
-                RepresentationEvidenceStage::ResponseAssembly
-            }
-            AnalysisFailureEvidence::NumericalAnalysis { .. }
-            | AnalysisFailureEvidence::WorkspaceAllocation { .. } => {
-                RepresentationEvidenceStage::Backend
-            }
-        });
-    }
-    if let Some(rank) = report.backend_rank.as_ref() {
-        return Some(match rank.domain() {
-            RankEvidenceDomain::CubicPolynomialPairing => {
-                RepresentationEvidenceStage::PolynomialPairing
-            }
-            RankEvidenceDomain::CubicReducedPairing => {
-                RepresentationEvidenceStage::QuotientFactorization
-            }
-            RankEvidenceDomain::BackendKkt => RepresentationEvidenceStage::Backend,
-        });
+    if let Some(build) = build {
+        return (
+            Some(public_representation_stage(build.failure_stage)),
+            public_representation_stage(build.last_completed_stage),
+        );
     }
     if report.cubic_analysis.is_some() {
-        return Some(RepresentationEvidenceStage::ResponseAssembly);
+        return (
+            Some(RepresentationEvidenceStage::ResponseAssembly),
+            RepresentationEvidenceStage::QuotientFactorization,
+        );
     }
-    if report.capacity.is_some() && report.problem_size.center_coefficients().is_some() {
-        return Some(RepresentationEvidenceStage::RepresenterAssembly);
-    }
-    Some(RepresentationEvidenceStage::Canonical)
+    (
+        Some(RepresentationEvidenceStage::Canonical),
+        RepresentationEvidenceStage::Canonical,
+    )
 }
 
-fn representation_last_completed_stage(
-    report: &FitReport,
-    failure_stage: Option<RepresentationEvidenceStage>,
-) -> RepresentationEvidenceStage {
-    match failure_stage {
-        None => RepresentationEvidenceStage::Recovery,
-        Some(RepresentationEvidenceStage::Canonical) => RepresentationEvidenceStage::Canonical,
-        Some(RepresentationEvidenceStage::SourceParticipation) => {
-            RepresentationEvidenceStage::Canonical
-        }
-        Some(RepresentationEvidenceStage::RepresenterAssembly) => {
+fn public_representation_stage(stage: RepresentationBuildStage) -> RepresentationEvidenceStage {
+    match stage {
+        RepresentationBuildStage::SourceParticipation => {
             RepresentationEvidenceStage::SourceParticipation
         }
-        Some(RepresentationEvidenceStage::PolynomialPairing) => {
+        RepresentationBuildStage::RepresenterAssembly => {
             RepresentationEvidenceStage::RepresenterAssembly
         }
-        Some(RepresentationEvidenceStage::HouseholderQuotient) => {
+        RepresentationBuildStage::PolynomialPairing => {
             RepresentationEvidenceStage::PolynomialPairing
         }
-        Some(RepresentationEvidenceStage::QuotientFactorization) => {
+        RepresentationBuildStage::HouseholderQuotient => {
             RepresentationEvidenceStage::HouseholderQuotient
         }
-        Some(RepresentationEvidenceStage::ResponseAssembly) => {
-            if report.cubic_analysis.is_some() {
-                RepresentationEvidenceStage::QuotientFactorization
-            } else {
-                RepresentationEvidenceStage::HouseholderQuotient
-            }
+        RepresentationBuildStage::QuotientFactorization => {
+            RepresentationEvidenceStage::QuotientFactorization
         }
-        Some(RepresentationEvidenceStage::Backend) => RepresentationEvidenceStage::ResponseAssembly,
-        Some(RepresentationEvidenceStage::Recovery) => RepresentationEvidenceStage::Backend,
-    }
-}
-
-fn representation_failure_quotient_dimension(report: &FitReport) -> Option<usize> {
-    match report.analysis_failure.as_ref() {
-        Some(AnalysisFailureEvidence::QuotientPivotRequiresPrecisionRescue {
-            quotient_dimension,
-            ..
-        })
-        | Some(AnalysisFailureEvidence::QuotientPrecisionRescue {
-            quotient_dimension, ..
-        })
-        | Some(AnalysisFailureEvidence::QuotientFactorizationNotPositive {
-            quotient_dimension,
-            ..
-        }) => Some(*quotient_dimension),
-        _ => report.backend_rank.as_ref().and_then(|rank| {
-            (rank.domain() == RankEvidenceDomain::CubicReducedPairing).then_some(rank.dimension())
-        }),
+        RepresentationBuildStage::ResponseAssembly => RepresentationEvidenceStage::ResponseAssembly,
+        RepresentationBuildStage::Backend => RepresentationEvidenceStage::Backend,
     }
 }
 
@@ -2454,6 +2373,7 @@ fn empty_report(snapshot: &ProblemSnapshot, problem_size: ProblemSize) -> FitRep
         canonical_hard_relation_count: None,
         canonical_soft_relation_count: None,
         representation_source_ids: Vec::new(),
+        representation_build_evidence: None,
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations: Vec::new(),
         field_value_bounds: Vec::new(),
@@ -6390,6 +6310,7 @@ fn success_report_qp(
         canonical_hard_relation_count: Some(solution.all_source_recovery.canonical_hard_relations),
         canonical_soft_relation_count: Some(solution.all_source_recovery.canonical_soft_relations),
         representation_source_ids: solution.all_source_recovery.participating_sources.clone(),
+        representation_build_evidence: None,
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
         field_value_bounds,
@@ -6677,7 +6598,7 @@ fn public_qp_success_acceptance(solution: &CubicExecutionSolution) -> CanonicalA
         whitening_round_trip_error: Some(qp.whitening_round_trip_error),
         objective_round_trip_error: Some(qp.objective_round_trip_error),
         objective_verified: qp.objective_round_trip_error
-            <= crate::numerical::EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit,
+            <= crate::numerical::EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit,
         tolerance_round_trip_error: Some(
             qp.hard_relation_tolerances
                 .iter()
@@ -6796,6 +6717,7 @@ fn success_report(
         canonical_hard_relation_count: Some(solution.all_source_recovery.canonical_hard_relations),
         canonical_soft_relation_count: Some(solution.all_source_recovery.canonical_soft_relations),
         representation_source_ids: solution.all_source_recovery.participating_sources.clone(),
+        representation_build_evidence: None,
         requested_thread_budget: snapshot.inner.fit_configuration.thread_budget(),
         hard_relations,
         field_value_bounds: Vec::new(),
@@ -7233,6 +7155,13 @@ fn retain_representation_failure(
     source_relations: &[SourceHardRelation],
 ) {
     match failure {
+        RepresentationFailure::AuditedBuild { evidence, failure } => {
+            report.representation_build_evidence = Some((**evidence).clone());
+            retain_representation_failure(report, failure, source_relations);
+        }
+        RepresentationFailure::AuditedFactorization { failure, .. } => {
+            retain_representation_failure(report, failure, source_relations);
+        }
         RepresentationFailure::EmptyRepresenterSpan => {
             report.analysis_failure = Some(AnalysisFailureEvidence::EmptyRepresenterSpan);
         }
@@ -7840,7 +7769,12 @@ fn public_attempts(attempts: &[KktAttemptRecord]) -> Vec<SolveAttemptRecord> {
                 convex_residual: None,
                 certificate_present: attempt.certificate_present,
                 failure_reason: attempt.failure_reason.map(public_attempt_failure),
-                backend_factorization_regularization_enabled: false,
+                backend_factorization_regularization:
+                    BackendFactorizationRegularizationEvidence::new(
+                        attempt.sequence,
+                        BackendRegularizationApplication::Disabled,
+                        BackendRegularizationApplication::Disabled,
+                    ),
                 backend_fingerprint: public_backend_fingerprint(&attempt.backend),
             })
         })
@@ -7913,11 +7847,20 @@ fn public_qp_attempts(attempts: &[QpAttemptRecord]) -> Vec<SolveAttemptRecord> {
                         | ClarabelTermination::AlmostDualInfeasible
                 ),
                 failure_reason: attempt.failure_reason.map(public_qp_attempt_failure),
-                backend_factorization_regularization_enabled: attempt
-                    .backend
-                    .settings
-                    .static_regularization_enabled
-                    || attempt.backend.settings.dynamic_regularization_enabled,
+                backend_factorization_regularization:
+                    BackendFactorizationRegularizationEvidence::new(
+                        attempt.backend.sequence,
+                        if attempt.backend.settings.static_regularization_enabled {
+                            BackendRegularizationApplication::Applied
+                        } else {
+                            BackendRegularizationApplication::Disabled
+                        },
+                        if attempt.backend.settings.dynamic_regularization_enabled {
+                            BackendRegularizationApplication::EnabledApplicationNotReported
+                        } else {
+                            BackendRegularizationApplication::Disabled
+                        },
+                    ),
                 backend_fingerprint: public_qp_backend_fingerprint(&attempt.backend),
             })
         })
@@ -8037,68 +7980,56 @@ fn public_backend_contract_failure(
     }
 }
 
+fn public_quotient_construction(
+    evidence: &crate::cubic_equality::QuotientConstructionEvidence,
+) -> CubicQuotientConstructionEvidence {
+    CubicQuotientConstructionEvidence::new(CubicQuotientConstructionEvidenceParts {
+        quotient_dimension: evidence.quotient_dimension,
+        householder_reflector_count: evidence.householder_reflector_count,
+        congruence_pass_count: evidence.congruence_pass_count,
+        householder_orthogonality_error: evidence.householder_orthogonality_error,
+        canonical_response_round_trip_error: evidence.canonical_response_round_trip_error,
+    })
+}
+
+fn public_quotient_factorization(
+    evidence: &crate::cubic_equality::QuotientFactorizationEvidence,
+) -> CubicQuotientFactorizationEvidence {
+    CubicQuotientFactorizationEvidence::new(CubicQuotientFactorizationEvidenceParts {
+        quotient_dimension: evidence.quotient_dimension,
+        retained_modes: evidence.retained_modes,
+        truncated_modes: evidence.truncated_modes,
+        unregularized_llt_count: evidence.unregularized_llt_count,
+        full_spectrum_analysis_count: evidence.full_spectrum_analysis_count,
+        normalized_backward_error: evidence.normalized_backward_error,
+        pivot_intervals: evidence
+            .pivot_intervals
+            .iter()
+            .map(|interval| {
+                CubicLltPivotInterval::new(CubicLltPivotIntervalParts {
+                    lower: interval.lower,
+                    upper: interval.upper,
+                })
+            })
+            .collect(),
+        field_energy_identity_error: evidence.field_energy_identity_error,
+        side_condition_error: evidence.side_condition_error,
+        recovery_round_trip_error: evidence.recovery_round_trip_error,
+        canonical_response_round_trip_error: evidence.canonical_response_round_trip_error,
+        kernel_ridge_applied: evidence.kernel_ridge_applied,
+        gram_jitter_applied: evidence.gram_jitter_applied,
+        mode_truncation_applied: evidence.mode_truncation_applied,
+        precision_rescue: evidence.precision_rescue.map(public_precision_rescue),
+    })
+}
+
 fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
     CubicAnalysisEvidence::new(CubicAnalysisEvidenceParts {
         fitting_functional_count: evidence.fitting_functional_count,
         polynomial_dimension: evidence.polynomial_dimension,
         polynomial_rank: evidence.polynomial_rank,
-        quotient_construction: CubicQuotientConstructionEvidence::new(
-            CubicQuotientConstructionEvidenceParts {
-                quotient_dimension: evidence.quotient_construction.quotient_dimension,
-                householder_reflector_count: evidence
-                    .quotient_construction
-                    .householder_reflector_count,
-                congruence_pass_count: evidence.quotient_construction.congruence_pass_count,
-                householder_orthogonality_error: evidence
-                    .quotient_construction
-                    .householder_orthogonality_error,
-                canonical_response_round_trip_error: evidence
-                    .quotient_construction
-                    .canonical_response_round_trip_error,
-            },
-        ),
-        quotient_factorization: CubicQuotientFactorizationEvidence::new(
-            CubicQuotientFactorizationEvidenceParts {
-                quotient_dimension: evidence.quotient_factorization.quotient_dimension,
-                retained_modes: evidence.quotient_factorization.retained_modes,
-                truncated_modes: evidence.quotient_factorization.truncated_modes,
-                unregularized_llt_count: evidence.quotient_factorization.unregularized_llt_count,
-                full_spectrum_analysis_count: evidence
-                    .quotient_factorization
-                    .full_spectrum_analysis_count,
-                normalized_backward_error: evidence
-                    .quotient_factorization
-                    .normalized_backward_error,
-                pivot_intervals: evidence
-                    .quotient_factorization
-                    .pivot_intervals
-                    .iter()
-                    .map(|interval| {
-                        CubicLltPivotInterval::new(CubicLltPivotIntervalParts {
-                            lower: interval.lower,
-                            upper: interval.upper,
-                        })
-                    })
-                    .collect(),
-                field_energy_identity_error: evidence
-                    .quotient_factorization
-                    .field_energy_identity_error,
-                side_condition_error: evidence.quotient_factorization.side_condition_error,
-                recovery_round_trip_error: evidence
-                    .quotient_factorization
-                    .recovery_round_trip_error,
-                canonical_response_round_trip_error: evidence
-                    .quotient_factorization
-                    .canonical_response_round_trip_error,
-                kernel_ridge_applied: evidence.quotient_factorization.kernel_ridge_applied,
-                gram_jitter_applied: evidence.quotient_factorization.gram_jitter_applied,
-                mode_truncation_applied: evidence.quotient_factorization.mode_truncation_applied,
-                precision_rescue: evidence
-                    .quotient_factorization
-                    .precision_rescue
-                    .map(public_precision_rescue),
-            },
-        ),
+        quotient_construction: public_quotient_construction(&evidence.quotient_construction),
+        quotient_factorization: public_quotient_factorization(&evidence.quotient_factorization),
         polynomial_singular_values: evidence.singular_values.clone(),
         polynomial_rrqr_ratio: evidence.polynomial_rrqr_ratio,
         polynomial_svd_ratio: evidence.polynomial_svd_ratio,
@@ -8115,6 +8046,7 @@ fn public_cubic_analysis(evidence: &CpdEvidence) -> CubicAnalysisEvidence {
         affine_reproduction_error: evidence.affine_reproduction_error,
         solve_coordinate_length: evidence.solve_coordinate_length,
         degenerate_extent: evidence.degenerate_extent,
+        problem_regularization_applied: evidence.problem_regularization_applied,
     })
 }
 
@@ -8546,6 +8478,10 @@ fn public_canonical_evidence_source(provenance: &UsageProvenance) -> CanonicalEv
 
 fn diagnose_representation(failure: &RepresentationFailure) -> ProblemDiagnosis {
     match failure {
+        RepresentationFailure::AuditedBuild { failure, .. }
+        | RepresentationFailure::AuditedFactorization { failure, .. } => {
+            diagnose_representation(failure)
+        }
         RepresentationFailure::Capacity(_) => ProblemDiagnosis::CapacityExceeded,
         RepresentationFailure::PolynomialRankDeficient { .. } => {
             ProblemDiagnosis::UnidentifiedFieldMode
@@ -9327,7 +9263,26 @@ mod tests {
                 solver_invoked: false,
                 hidden_regularization_applied: false,
             },
-        };
+        }
+        .audited(RepresentationBuildEvidence {
+            failure_stage: RepresentationBuildStage::QuotientFactorization,
+            last_completed_stage: RepresentationBuildStage::HouseholderQuotient,
+            representer_count: Some(6),
+            polynomial_dimension: Some(4),
+            polynomial_rank: Some(4),
+            quotient_construction: Some(crate::cubic_equality::QuotientConstructionEvidence {
+                quotient_dimension: 2,
+                householder_reflector_count: 4,
+                congruence_pass_count: 1,
+                householder_orthogonality_error: 0.0,
+                null_space_defect: 0.0,
+                canonical_response_round_trip_error: 0.0,
+            }),
+            quotient_factorization: None,
+            retained_modes: Some(0),
+            truncated_modes: Some(0),
+            problem_regularization_applied: false,
+        });
         assert_eq!(
             diagnose_representation(&reduced_failure),
             ProblemDiagnosis::NumericalFailure
@@ -9349,7 +9304,9 @@ mod tests {
             RepresentationEvidenceStage::HouseholderQuotient
         );
         assert_eq!(representation.quotient_dimension(), Some(2));
-        assert_eq!(representation.representer_count(), None);
+        assert_eq!(representation.representer_count(), Some(6));
+        assert_eq!(representation.canonical_hard_relation_count(), None);
+        assert_eq!(representation.canonical_soft_relation_count(), None);
         assert_eq!(representation.recovery_source_count(), 0);
         assert!(matches!(
             representation.analysis_failure(),

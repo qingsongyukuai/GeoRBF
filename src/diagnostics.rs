@@ -1237,6 +1237,7 @@ pub struct CubicAnalysisEvidence {
     affine_reproduction_error: f64,
     solve_coordinate_length: f64,
     degenerate_extent: bool,
+    problem_regularization_applied: bool,
 }
 
 pub(crate) struct CubicAnalysisEvidenceParts {
@@ -1259,6 +1260,7 @@ pub(crate) struct CubicAnalysisEvidenceParts {
     pub(crate) affine_reproduction_error: f64,
     pub(crate) solve_coordinate_length: f64,
     pub(crate) degenerate_extent: bool,
+    pub(crate) problem_regularization_applied: bool,
 }
 
 impl CubicAnalysisEvidence {
@@ -1283,6 +1285,7 @@ impl CubicAnalysisEvidence {
             affine_reproduction_error: parts.affine_reproduction_error,
             solve_coordinate_length: parts.solve_coordinate_length,
             degenerate_extent: parts.degenerate_extent,
+            problem_regularization_applied: parts.problem_regularization_applied,
         }
     }
 
@@ -1388,6 +1391,11 @@ impl CubicAnalysisEvidence {
     /// Reports whether every support had zero geometric extent.
     pub fn degenerate_extent(&self) -> bool {
         self.degenerate_extent
+    }
+
+    /// Reports whether construction altered the canonical problem.
+    pub fn problem_regularization_applied(&self) -> bool {
+        self.problem_regularization_applied
     }
 }
 
@@ -1839,18 +1847,35 @@ pub enum RepresentationEvidenceStage {
     Recovery,
 }
 
-/// Whether one backend attempt allowed factorization-only stabilization.
+/// What is known about one backend factorization-regularization mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendRegularizationApplication {
+    /// The mechanism was disabled for this attempt.
+    Disabled,
+    /// The mechanism was applied by the backend.
+    Applied,
+    /// The mechanism was enabled, but the backend did not report whether it fired.
+    EnabledApplicationNotReported,
+}
+
+/// Auditable factorization-only stabilization status for one backend attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendFactorizationRegularizationEvidence {
     attempt_sequence: usize,
-    enabled: bool,
+    static_application: BackendRegularizationApplication,
+    dynamic_application: BackendRegularizationApplication,
 }
 
 impl BackendFactorizationRegularizationEvidence {
-    pub(crate) fn new(attempt_sequence: usize, enabled: bool) -> Self {
+    pub(crate) fn new(
+        attempt_sequence: usize,
+        static_application: BackendRegularizationApplication,
+        dynamic_application: BackendRegularizationApplication,
+    ) -> Self {
         Self {
             attempt_sequence,
-            enabled,
+            static_application,
+            dynamic_application,
         }
     }
 
@@ -1859,9 +1884,20 @@ impl BackendFactorizationRegularizationEvidence {
         self.attempt_sequence
     }
 
-    /// Reports whether this attempt allowed backend factorization stabilization.
+    /// Returns what is known about static backend regularization application.
+    pub fn static_application(self) -> BackendRegularizationApplication {
+        self.static_application
+    }
+
+    /// Returns what is known about dynamic backend regularization application.
+    pub fn dynamic_application(self) -> BackendRegularizationApplication {
+        self.dynamic_application
+    }
+
+    /// Reports whether this attempt enabled either backend stabilization mechanism.
     pub fn enabled(self) -> bool {
-        self.enabled
+        self.static_application != BackendRegularizationApplication::Disabled
+            || self.dynamic_application != BackendRegularizationApplication::Disabled
     }
 }
 
@@ -1871,8 +1907,8 @@ pub struct RepresentationEvidence {
     numerical_policy: NumericalPolicyId,
     failure_stage: Option<RepresentationEvidenceStage>,
     last_completed_stage: RepresentationEvidenceStage,
-    canonical_hard_relation_count: usize,
-    canonical_soft_relation_count: usize,
+    canonical_hard_relation_count: Option<usize>,
+    canonical_soft_relation_count: Option<usize>,
     source_ids: Box<[SourceId]>,
     representer_count: Option<usize>,
     polynomial_dimension: Option<usize>,
@@ -1895,8 +1931,8 @@ pub(crate) struct RepresentationEvidenceParts {
     pub(crate) numerical_policy: NumericalPolicyId,
     pub(crate) failure_stage: Option<RepresentationEvidenceStage>,
     pub(crate) last_completed_stage: RepresentationEvidenceStage,
-    pub(crate) canonical_hard_relation_count: usize,
-    pub(crate) canonical_soft_relation_count: usize,
+    pub(crate) canonical_hard_relation_count: Option<usize>,
+    pub(crate) canonical_soft_relation_count: Option<usize>,
     pub(crate) source_ids: Vec<SourceId>,
     pub(crate) representer_count: Option<usize>,
     pub(crate) polynomial_dimension: Option<usize>,
@@ -1911,6 +1947,7 @@ pub(crate) struct RepresentationEvidenceParts {
     pub(crate) all_source_recovery: Option<AllSourceRecoveryEvidence>,
     pub(crate) recovered_source_ids: Vec<SourceId>,
     pub(crate) unregularized_canonical_recovery_verified: bool,
+    pub(crate) problem_regularization_applied: bool,
     pub(crate) backend_factorization_regularization:
         Vec<BackendFactorizationRegularizationEvidence>,
 }
@@ -1938,7 +1975,7 @@ impl RepresentationEvidence {
             recovered_source_ids: parts.recovered_source_ids.into(),
             unregularized_canonical_recovery_verified: parts
                 .unregularized_canonical_recovery_verified,
-            problem_regularization_applied: false,
+            problem_regularization_applied: parts.problem_regularization_applied,
             backend_factorization_regularization: parts.backend_factorization_regularization.into(),
         }
     }
@@ -1959,18 +1996,19 @@ impl RepresentationEvidence {
     }
 
     /// Returns independently counted canonical hard scalar relations.
-    pub fn canonical_hard_relation_count(&self) -> usize {
+    pub fn canonical_hard_relation_count(&self) -> Option<usize> {
         self.canonical_hard_relation_count
     }
 
     /// Returns independently counted canonical soft scalar residual channels.
-    pub fn canonical_soft_relation_count(&self) -> usize {
+    pub fn canonical_soft_relation_count(&self) -> Option<usize> {
         self.canonical_soft_relation_count
     }
 
     /// Returns the total independently counted canonical scalar dimension.
-    pub fn canonical_relation_count(&self) -> usize {
-        self.canonical_hard_relation_count + self.canonical_soft_relation_count
+    pub fn canonical_relation_count(&self) -> Option<usize> {
+        self.canonical_hard_relation_count?
+            .checked_add(self.canonical_soft_relation_count?)
     }
 
     /// Returns every source that reached representation participation.
@@ -2947,7 +2985,7 @@ pub struct SolveAttemptRecord {
     convex_residual: Option<ConvexResidualEvidence>,
     certificate_present: bool,
     failure_reason: Option<AttemptFailureEvidence>,
-    backend_factorization_regularization_enabled: bool,
+    backend_factorization_regularization: BackendFactorizationRegularizationEvidence,
     backend_fingerprint: BackendFingerprint,
 }
 
@@ -2963,7 +3001,7 @@ pub(crate) struct SolveAttemptRecordParts {
     pub(crate) convex_residual: Option<ConvexResidualEvidence>,
     pub(crate) certificate_present: bool,
     pub(crate) failure_reason: Option<AttemptFailureEvidence>,
-    pub(crate) backend_factorization_regularization_enabled: bool,
+    pub(crate) backend_factorization_regularization: BackendFactorizationRegularizationEvidence,
     pub(crate) backend_fingerprint: BackendFingerprint,
 }
 
@@ -2981,8 +3019,7 @@ impl SolveAttemptRecord {
             convex_residual: parts.convex_residual,
             certificate_present: parts.certificate_present,
             failure_reason: parts.failure_reason,
-            backend_factorization_regularization_enabled: parts
-                .backend_factorization_regularization_enabled,
+            backend_factorization_regularization: parts.backend_factorization_regularization,
             backend_fingerprint: parts.backend_fingerprint,
         }
     }
@@ -3050,7 +3087,14 @@ impl SolveAttemptRecord {
 
     /// Reports whether this attempt enabled backend-only factorization stabilization.
     pub fn backend_factorization_regularization_enabled(&self) -> bool {
-        self.backend_factorization_regularization_enabled
+        self.backend_factorization_regularization.enabled()
+    }
+
+    /// Returns application evidence for backend-only factorization stabilization.
+    pub fn backend_factorization_regularization(
+        &self,
+    ) -> BackendFactorizationRegularizationEvidence {
+        self.backend_factorization_regularization
     }
 
     /// Returns the adapter-recorded backend identity and settings.

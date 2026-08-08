@@ -28,7 +28,7 @@ use crate::kernel::FieldEnergyNormalization;
 use crate::kkt::{EqualityKktSystem, KktFailure, KktSolveEvidence, solve_equality_kkt};
 use crate::math::dot3;
 use crate::numerical::{
-    EQUALITY_KKT_POLICY_V2, SpectralAnalysisFailure, SpectralRankDecision, analyze_spectral_rank,
+    EXECUTED_NUMERICAL_POLICY, SpectralAnalysisFailure, SpectralRankDecision, analyze_spectral_rank,
 };
 use crate::precision_rescue::{
     CertifiedDoubleDouble, DOUBLE_DOUBLE_PRECISION_BITS, DoubleDouble, PrecisionRescueConclusion,
@@ -309,6 +309,64 @@ pub(crate) struct CpdEvidence {
     pub(crate) solve_coordinate_center: [f64; 3],
     pub(crate) solve_coordinate_length: f64,
     pub(crate) degenerate_extent: bool,
+    pub(crate) problem_regularization_applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepresentationBuildStage {
+    SourceParticipation,
+    RepresenterAssembly,
+    PolynomialPairing,
+    HouseholderQuotient,
+    QuotientFactorization,
+    ResponseAssembly,
+    Backend,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RepresentationBuildEvidence {
+    pub(crate) failure_stage: RepresentationBuildStage,
+    pub(crate) last_completed_stage: RepresentationBuildStage,
+    pub(crate) representer_count: Option<usize>,
+    pub(crate) polynomial_dimension: Option<usize>,
+    pub(crate) polynomial_rank: Option<usize>,
+    pub(crate) quotient_construction: Option<QuotientConstructionEvidence>,
+    pub(crate) quotient_factorization: Option<QuotientFactorizationEvidence>,
+    pub(crate) retained_modes: Option<usize>,
+    pub(crate) truncated_modes: Option<usize>,
+    pub(crate) problem_regularization_applied: bool,
+}
+
+impl RepresentationBuildEvidence {
+    fn new() -> Self {
+        Self {
+            failure_stage: RepresentationBuildStage::RepresenterAssembly,
+            last_completed_stage: RepresentationBuildStage::SourceParticipation,
+            representer_count: None,
+            polynomial_dimension: None,
+            polynomial_rank: None,
+            quotient_construction: None,
+            quotient_factorization: None,
+            retained_modes: None,
+            truncated_modes: None,
+            problem_regularization_applied: false,
+        }
+    }
+
+    pub(crate) fn completed(evidence: &CpdEvidence) -> Self {
+        Self {
+            failure_stage: RepresentationBuildStage::Backend,
+            last_completed_stage: RepresentationBuildStage::ResponseAssembly,
+            representer_count: Some(evidence.fitting_functional_count),
+            polynomial_dimension: Some(evidence.polynomial_dimension),
+            polynomial_rank: Some(evidence.polynomial_rank),
+            quotient_construction: Some(evidence.quotient_construction),
+            quotient_factorization: Some(evidence.quotient_factorization.clone()),
+            retained_modes: Some(evidence.quotient_factorization.retained_modes),
+            truncated_modes: Some(evidence.quotient_factorization.truncated_modes),
+            problem_regularization_applied: evidence.problem_regularization_applied,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -345,6 +403,14 @@ pub(crate) struct VerifiedCanonicalMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RepresentationFailure {
+    AuditedBuild {
+        evidence: Box<RepresentationBuildEvidence>,
+        failure: Box<RepresentationFailure>,
+    },
+    AuditedFactorization {
+        evidence: Box<QuotientFactorizationEvidence>,
+        failure: Box<RepresentationFailure>,
+    },
     EmptyRepresenterSpan,
     Capacity(Box<CapacityExceededEvidence>),
     InvalidSolveCoordinateTransform {
@@ -442,6 +508,63 @@ pub(crate) enum RepresentationFailure {
     },
 }
 
+impl RepresentationFailure {
+    pub(crate) fn audited(self, evidence: RepresentationBuildEvidence) -> RepresentationFailure {
+        match self {
+            Self::AuditedBuild { .. } => self,
+            _ => Self::AuditedBuild {
+                evidence: Box::new(evidence),
+                failure: Box::new(self),
+            },
+        }
+    }
+
+    pub(crate) fn root_cause(&self) -> &RepresentationFailure {
+        match self {
+            Self::AuditedBuild { failure, .. } | Self::AuditedFactorization { failure, .. } => {
+                failure.root_cause()
+            }
+            _ => self,
+        }
+    }
+
+    pub(crate) fn build_evidence(&self) -> Option<&RepresentationBuildEvidence> {
+        match self {
+            Self::AuditedBuild { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
+    fn with_factorization_evidence(
+        self,
+        evidence: QuotientFactorizationEvidence,
+    ) -> RepresentationFailure {
+        Self::AuditedFactorization {
+            evidence: Box::new(evidence),
+            failure: Box::new(self),
+        }
+    }
+
+    fn factorization_evidence(&self) -> Option<&QuotientFactorizationEvidence> {
+        match self {
+            Self::AuditedBuild { failure, .. } => failure.factorization_evidence(),
+            Self::AuditedFactorization { evidence, .. } => Some(evidence),
+            _ => None,
+        }
+    }
+
+    fn completed_quotient_modes(&self) -> Option<usize> {
+        match self.root_cause() {
+            Self::QuotientPivotRequiresPrecisionRescue { pivot_index, .. }
+            | Self::QuotientFactorizationNotPositive { pivot_index, .. } => Some(*pivot_index),
+            Self::QuotientPrecisionRescueGrayZone { evidence, .. }
+            | Self::QuotientRankDeficient { evidence, .. }
+            | Self::QuotientNegativeCurvature { evidence, .. } => Some(evidence.first_mode),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AlgebraicAnalysisStage {
     PolynomialRank,
@@ -516,7 +639,7 @@ impl CubicRepresentation {
         field_energy_normalization: FieldEnergyNormalization,
     ) -> Result<(Self, CanonicalCubicFieldForm), RepresentationFailure> {
         let representation =
-            Self::new_with_normalization(fitting_uses, metric, field_energy_normalization)?;
+            Self::new_with_audit(fitting_uses, metric, field_energy_normalization)?;
         let field_form = representation.solver_field_form();
         Ok((representation, field_form))
     }
@@ -533,54 +656,82 @@ impl CubicRepresentation {
         metric: GlobalAnisotropyMetric,
         field_energy_normalization: FieldEnergyNormalization,
     ) -> Result<Self, RepresentationFailure> {
+        Self::new_with_audit(fitting_uses, metric, field_energy_normalization)
+            .map_err(|failure| failure.root_cause().clone())
+    }
+
+    fn new_with_audit(
+        fitting_uses: Vec<FunctionalUse>,
+        metric: GlobalAnisotropyMetric,
+        field_energy_normalization: FieldEnergyNormalization,
+    ) -> Result<Self, RepresentationFailure> {
+        let mut build_evidence = RepresentationBuildEvidence::new();
         if fitting_uses.is_empty() {
-            return Err(RepresentationFailure::EmptyRepresenterSpan);
+            return Err(RepresentationFailure::EmptyRepresenterSpan.audited(build_evidence));
         }
         let functionals = fitting_uses
             .iter()
             .map(|usage| usage.functional().clone())
             .collect::<Vec<_>>();
         let (coordinates, standard_functionals, polynomial) =
-            assemble_polynomial_pairing(&functionals)?;
+            assemble_polynomial_pairing(&functionals)
+                .map_err(|failure| failure.audited(build_evidence.clone()))?;
+        build_evidence.representer_count = Some(functionals.len());
+        build_evidence.failure_stage = RepresentationBuildStage::PolynomialPairing;
+        build_evidence.last_completed_stage = RepresentationBuildStage::RepresenterAssembly;
+        build_evidence.polynomial_dimension = Some(polynomial.columns);
         let (singular_values, polynomial_rank, polynomial_rank_evidence) =
-            verify_polynomial_rank(&polynomial, &functionals, &coordinates)?;
+            verify_polynomial_rank(&polynomial, &functionals, &coordinates)
+                .map_err(|failure| failure.audited(build_evidence.clone()))?;
+        build_evidence.failure_stage = RepresentationBuildStage::HouseholderQuotient;
+        build_evidence.last_completed_stage = RepresentationBuildStage::PolynomialPairing;
+        build_evidence.polynomial_rank = Some(polynomial_rank);
         let kernel = assemble_kernel_pairing(&standard_functionals, &metric);
-        let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank)?;
+        let null_space = HouseholderNullSpace::new(&polynomial, polynomial_rank)
+            .map_err(|failure| failure.audited(build_evidence.clone()))?;
         let (mut reduced, trailing_polynomial, canonical_responses, quotient_construction) =
-            implicit_quotient_congruence(&kernel, &polynomial, &null_space)?;
+            implicit_quotient_congruence(&kernel, &polynomial, &null_space)
+                .map_err(|failure| failure.audited(build_evidence.clone()))?;
+        build_evidence.quotient_construction = Some(quotient_construction);
         let null_space_defect = quotient_construction.null_space_defect;
-        if null_space_defect > EQUALITY_KKT_POLICY_V2.null_space_defect_limit {
+        if null_space_defect > EXECUTED_NUMERICAL_POLICY.null_space_defect_limit {
             return Err(RepresentationFailure::NullSpaceDefect {
                 observed: null_space_defect,
-                limit: EQUALITY_KKT_POLICY_V2.null_space_defect_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.null_space_defect_limit,
+            }
+            .audited(build_evidence));
         }
         if quotient_construction.householder_orthogonality_error
-            > EQUALITY_KKT_POLICY_V2.quotient_householder_orthogonality_limit
+            > EXECUTED_NUMERICAL_POLICY.quotient_householder_orthogonality_limit
         {
             return Err(RepresentationFailure::HouseholderOrthogonalityContract {
                 observed: quotient_construction.householder_orthogonality_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_householder_orthogonality_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_householder_orthogonality_limit,
+            }
+            .audited(build_evidence));
         }
         if quotient_construction.canonical_response_round_trip_error
-            > EQUALITY_KKT_POLICY_V2.quotient_canonical_response_round_trip_limit
+            > EXECUTED_NUMERICAL_POLICY.quotient_canonical_response_round_trip_limit
         {
             return Err(RepresentationFailure::CanonicalResponseRoundTripContract {
                 observed: quotient_construction.canonical_response_round_trip_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_canonical_response_round_trip_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_canonical_response_round_trip_limit,
+            }
+            .audited(build_evidence));
         }
         let reduced_symmetry_defect = normalized_symmetry_defect(&reduced);
-        let symmetry_defect_limit = EQUALITY_KKT_POLICY_V2.reduced_symmetry_multiplier
+        let symmetry_defect_limit = EXECUTED_NUMERICAL_POLICY.reduced_symmetry_multiplier
             * f64::EPSILON
             * reduced.rows.max(reduced.columns) as f64;
         if reduced_symmetry_defect > symmetry_defect_limit {
             return Err(RepresentationFailure::ReducedSymmetryContract {
                 observed: reduced_symmetry_defect,
                 limit: symmetry_defect_limit,
-            });
+            }
+            .audited(build_evidence));
         }
+        build_evidence.failure_stage = RepresentationBuildStage::QuotientFactorization;
+        build_evidence.last_completed_stage = RepresentationBuildStage::HouseholderQuotient;
         symmetrize(&mut reduced);
         let field_energy_scale = field_energy_normalization.factor() / coordinates.length().powi(3);
         let quotient_energy_gram =
@@ -598,16 +749,34 @@ impl CubicRepresentation {
             &trailing_polynomial,
             &canonical_responses,
             Some(&rescue_source),
-        )?;
+        )
+        .map_err(|failure| {
+            if let Some(evidence) = failure.factorization_evidence() {
+                build_evidence.quotient_factorization = Some(evidence.clone());
+                build_evidence.retained_modes = Some(evidence.retained_modes);
+                build_evidence.truncated_modes = Some(evidence.truncated_modes);
+            } else if let Some(completed_modes) = failure.completed_quotient_modes() {
+                build_evidence.retained_modes = Some(completed_modes);
+                build_evidence.truncated_modes = Some(0);
+            }
+            failure.audited(build_evidence.clone())
+        })?;
         let quotient_factorization = energy_basis.evidence.clone();
+        build_evidence.failure_stage = RepresentationBuildStage::ResponseAssembly;
+        build_evidence.last_completed_stage = RepresentationBuildStage::QuotientFactorization;
+        build_evidence.quotient_factorization = Some(quotient_factorization.clone());
+        build_evidence.retained_modes = Some(quotient_factorization.retained_modes);
+        build_evidence.truncated_modes = Some(quotient_factorization.truncated_modes);
         let (reduced_largest_singular_value, reduced_smallest_singular_value) =
             quotient_mode_risk_estimates(&reduced, &energy_basis, field_energy_scale);
-        let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial)?;
-        if affine_reproduction_error > EQUALITY_KKT_POLICY_V2.affine_reproduction_limit {
+        let affine_reproduction_error = affine_reproduction_error(&kernel, &polynomial)
+            .map_err(|failure| failure.audited(build_evidence.clone()))?;
+        if affine_reproduction_error > EXECUTED_NUMERICAL_POLICY.affine_reproduction_limit {
             return Err(RepresentationFailure::AffineReproductionContract {
                 observed: affine_reproduction_error,
-                limit: EQUALITY_KKT_POLICY_V2.affine_reproduction_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.affine_reproduction_limit,
+            }
+            .audited(build_evidence));
         }
         Ok(Self {
             fitting_uses,
@@ -637,6 +806,7 @@ impl CubicRepresentation {
                 solve_coordinate_center: coordinates.center(),
                 solve_coordinate_length: coordinates.length(),
                 degenerate_extent: coordinates.degenerate_extent(),
+                problem_regularization_applied: false,
             },
             field_energy_normalization,
         })
@@ -780,7 +950,7 @@ impl CubicRepresentation {
         let side_condition = PhysicalSideConditionEvidence {
             components: physical_side_components,
             physical_tolerances: self.coordinates.to_physical_side_condition_tolerances(
-                [EQUALITY_KKT_POLICY_V2.side_condition_limit; POLYNOMIAL_DIMENSION],
+                [EXECUTED_NUMERICAL_POLICY.side_condition_limit; POLYNOMIAL_DIMENSION],
             ),
             standard_components: standard_side_components,
             recovered_standard_components: recovered_standard_side,
@@ -836,13 +1006,18 @@ pub(crate) fn preflight_polynomial_analysis_failure(
         .iter()
         .map(|usage| usage.functional().clone())
         .collect::<Vec<_>>();
+    let mut evidence = RepresentationBuildEvidence::new();
     let (coordinates, _, polynomial) = match assemble_polynomial_pairing(&functionals) {
         Ok(pairing) => pairing,
-        Err(failure) => return Some(failure),
+        Err(failure) => return Some(failure.audited(evidence)),
     };
+    evidence.representer_count = Some(functionals.len());
+    evidence.failure_stage = RepresentationBuildStage::PolynomialPairing;
+    evidence.last_completed_stage = RepresentationBuildStage::RepresenterAssembly;
+    evidence.polynomial_dimension = Some(polynomial.columns);
     match verify_polynomial_rank(&polynomial, &functionals, &coordinates) {
         Ok(_) => None,
-        Err(failure) => Some(failure),
+        Err(failure) => Some(failure.audited(evidence)),
     }
 }
 
@@ -1362,7 +1537,7 @@ fn canonical_polynomial_mode_residual(
             solver_invoked: false,
         });
     }
-    if residual > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if residual > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         return Err(RepresentationFailure::AlgebraicAnalysisFailure {
             stage: AlgebraicAnalysisStage::PolynomialRank,
             solver_invoked: false,
@@ -1726,7 +1901,7 @@ impl EnergyOrthonormalQuotientBasis {
                 if factors.dynamic_regularization_count != 0 {
                     return Err(RepresentationFailure::QuotientLltContract {
                         observed: f64::INFINITY,
-                        limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
+                        limit: EXECUTED_NUMERICAL_POLICY.quotient_llt_backward_error_limit,
                     });
                 }
                 let lower = retained_lower_triangle(factors.lower.as_ref());
@@ -1790,35 +1965,38 @@ impl EnergyOrthonormalQuotientBasis {
 
         let permuted_gram = permute_symmetric(gram, &permutation);
         let normalized_backward_error = normalized_llt_backward_error(&permuted_gram, &lower);
+        let factorization_evidence = QuotientFactorizationEvidence {
+            quotient_dimension: dimension,
+            retained_modes: dimension,
+            truncated_modes: 0,
+            unregularized_llt_count: 1,
+            full_spectrum_analysis_count: 0,
+            normalized_backward_error,
+            pivot_intervals,
+            field_energy_identity_error: 0.0,
+            side_condition_error: 0.0,
+            recovery_round_trip_error: 0.0,
+            canonical_response_round_trip_error: 0.0,
+            kernel_ridge_applied: false,
+            gram_jitter_applied: false,
+            mode_truncation_applied: false,
+            precision_rescue,
+        };
         if !normalized_backward_error.is_finite()
-            || normalized_backward_error > EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit
+            || normalized_backward_error
+                > EXECUTED_NUMERICAL_POLICY.quotient_llt_backward_error_limit
         {
             return Err(RepresentationFailure::QuotientLltContract {
                 observed: normalized_backward_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_llt_backward_error_limit,
+            }
+            .with_factorization_evidence(factorization_evidence));
         }
 
         let provisional = Self {
             lower,
             permutation,
-            evidence: QuotientFactorizationEvidence {
-                quotient_dimension: dimension,
-                retained_modes: dimension,
-                truncated_modes: 0,
-                unregularized_llt_count: 1,
-                full_spectrum_analysis_count: 0,
-                normalized_backward_error,
-                pivot_intervals,
-                field_energy_identity_error: 0.0,
-                side_condition_error: 0.0,
-                recovery_round_trip_error: 0.0,
-                canonical_response_round_trip_error: 0.0,
-                kernel_ridge_applied: false,
-                gram_jitter_applied: false,
-                mode_truncation_applied: false,
-                precision_rescue,
-            },
+            evidence: factorization_evidence,
         };
 
         let solver_probe = (0..dimension)
@@ -1831,26 +2009,38 @@ impl EnergyOrthonormalQuotientBasis {
                 }
             })
             .collect::<Vec<_>>();
-        let householder_probe = provisional.to_householder_coordinates(&solver_probe)?;
-        let recovered_probe = provisional.to_solver_coordinates(&householder_probe)?;
+        let householder_probe = provisional
+            .to_householder_coordinates(&solver_probe)
+            .map_err(|failure| failure.with_factorization_evidence(provisional.evidence.clone()))?;
+        let recovered_probe = provisional
+            .to_solver_coordinates(&householder_probe)
+            .map_err(|failure| failure.with_factorization_evidence(provisional.evidence.clone()))?;
         let recovery_round_trip_error = relative_slice_error(&recovered_probe, &solver_probe);
         if recovery_round_trip_error
-            > EQUALITY_KKT_POLICY_V2.quotient_basis_recovery_round_trip_limit
+            > EXECUTED_NUMERICAL_POLICY.quotient_basis_recovery_round_trip_limit
         {
+            let mut evidence = provisional.evidence.clone();
+            evidence.recovery_round_trip_error = recovery_round_trip_error;
             return Err(RepresentationFailure::QuotientRecoveryRoundTripContract {
                 observed: recovery_round_trip_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_basis_recovery_round_trip_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_recovery_round_trip_limit,
+            }
+            .with_factorization_evidence(evidence));
         }
 
         let field_energy_identity_error =
             quotient_field_energy_identity_error(&permuted_gram, &provisional.lower);
-        if field_energy_identity_error > EQUALITY_KKT_POLICY_V2.quotient_field_energy_identity_limit
+        if field_energy_identity_error
+            > EXECUTED_NUMERICAL_POLICY.quotient_field_energy_identity_limit
         {
+            let mut evidence = provisional.evidence.clone();
+            evidence.recovery_round_trip_error = recovery_round_trip_error;
+            evidence.field_energy_identity_error = field_energy_identity_error;
             return Err(RepresentationFailure::QuotientFieldEnergyIdentityContract {
                 observed: field_energy_identity_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_field_energy_identity_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_field_energy_identity_limit,
+            }
+            .with_factorization_evidence(evidence));
         }
 
         let side_condition_error = (0..trailing_polynomial.columns)
@@ -1866,11 +2056,16 @@ impl EnergyOrthonormalQuotientBasis {
                     .fold(0.0_f64, f64::max)
             })
             .fold(0.0_f64, f64::max);
-        if side_condition_error > EQUALITY_KKT_POLICY_V2.quotient_basis_side_condition_limit {
+        if side_condition_error > EXECUTED_NUMERICAL_POLICY.quotient_basis_side_condition_limit {
+            let mut evidence = provisional.evidence.clone();
+            evidence.recovery_round_trip_error = recovery_round_trip_error;
+            evidence.field_energy_identity_error = field_energy_identity_error;
+            evidence.side_condition_error = side_condition_error;
             return Err(RepresentationFailure::QuotientSideConditionContract {
                 observed: side_condition_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_basis_side_condition_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_side_condition_limit,
+            }
+            .with_factorization_evidence(evidence));
         }
 
         let canonical_response_round_trip_error = (0..canonical_responses.columns)
@@ -1886,16 +2081,23 @@ impl EnergyOrthonormalQuotientBasis {
                     &quotient_response,
                 ))
             })
-            .collect::<Result<Vec<_>, RepresentationFailure>>()?
+            .collect::<Result<Vec<_>, RepresentationFailure>>()
+            .map_err(|failure| failure.with_factorization_evidence(provisional.evidence.clone()))?
             .into_iter()
             .fold(0.0_f64, f64::max);
         if canonical_response_round_trip_error
-            > EQUALITY_KKT_POLICY_V2.quotient_basis_response_round_trip_limit
+            > EXECUTED_NUMERICAL_POLICY.quotient_basis_response_round_trip_limit
         {
+            let mut evidence = provisional.evidence.clone();
+            evidence.recovery_round_trip_error = recovery_round_trip_error;
+            evidence.field_energy_identity_error = field_energy_identity_error;
+            evidence.side_condition_error = side_condition_error;
+            evidence.canonical_response_round_trip_error = canonical_response_round_trip_error;
             return Err(RepresentationFailure::QuotientResponseRoundTripContract {
                 observed: canonical_response_round_trip_error,
-                limit: EQUALITY_KKT_POLICY_V2.quotient_basis_response_round_trip_limit,
-            });
+                limit: EXECUTED_NUMERICAL_POLICY.quotient_basis_response_round_trip_limit,
+            }
+            .with_factorization_evidence(evidence));
         }
 
         Ok(Self {
@@ -2239,7 +2441,7 @@ fn recomputed_lower_for_rescue(
                 if residual <= 0.0 || !residual.is_finite() {
                     return Err(RepresentationFailure::QuotientLltContract {
                         observed: f64::INFINITY,
-                        limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
+                        limit: EXECUTED_NUMERICAL_POLICY.quotient_llt_backward_error_limit,
                     });
                 }
                 residual.sqrt()
@@ -2249,7 +2451,7 @@ fn recomputed_lower_for_rescue(
             if !coordinate.is_finite() {
                 return Err(RepresentationFailure::QuotientLltContract {
                     observed: f64::INFINITY,
-                    limit: EQUALITY_KKT_POLICY_V2.quotient_llt_backward_error_limit,
+                    limit: EXECUTED_NUMERICAL_POLICY.quotient_llt_backward_error_limit,
                 });
             }
             lower.set(row, column, coordinate);
@@ -3812,11 +4014,11 @@ impl CubicEqualityCore {
             .count()
             .checked_add(POLYNOMIAL_DIMENSION)
             .unwrap_or(usize::MAX);
-        plan_equality_capacity(primal_variables, equality_constraints).map_err(|failure| {
-            CubicEqualityFailure::Representation(Box::new(RepresentationFailure::Capacity(
-                Box::new(failure),
-            )))
-        })?;
+        plan_equality_capacity_after_representation(
+            primal_variables,
+            equality_constraints,
+            &solver_form.representation_evidence,
+        )?;
         #[cfg(test)]
         if let Some(failure) = take_injected_kkt_failure() {
             return Err(CubicEqualityFailure::Backend {
@@ -3827,6 +4029,21 @@ impl CubicEqualityCore {
         let (assembly, backend) = solve_standard_form(&solver_form)?;
         recover_and_verify(representation, solver_form, problem, assembly, backend)
     }
+}
+
+fn plan_equality_capacity_after_representation(
+    primal_variables: usize,
+    equality_constraints: usize,
+    representation: &CpdEvidence,
+) -> Result<(), CubicEqualityFailure> {
+    plan_equality_capacity(primal_variables, equality_constraints)
+        .map(|_| ())
+        .map_err(|failure| {
+            let evidence = RepresentationBuildEvidence::completed(representation);
+            CubicEqualityFailure::Representation(Box::new(
+                RepresentationFailure::Capacity(Box::new(failure)).audited(evidence),
+            ))
+        })
 }
 
 fn solve_standard_form(
@@ -4238,7 +4455,7 @@ fn recover_and_verify(
     let objective_round_trip_error = (total_objective - standard_total_objective).abs()
         / standard_total_objective.abs().max(1.0);
     let objective_verified =
-        objective_round_trip_error <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit;
+        objective_round_trip_error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit;
     let relation_tolerances = canonical_relation_tolerances(
         characteristic_length,
         &problem,
@@ -4313,28 +4530,28 @@ fn recover_and_verify(
     if !side_condition.is_within_policy() {
         reasons.push(RecoveryVerificationFailureReason::SideConditionViolation);
     }
-    if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if side_condition.round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::SideConditionRoundTripViolation);
     }
     if !hard_residuals_within_tolerance(&problem, &hard_equalities, &relation_tolerances) {
         reasons.push(RecoveryVerificationFailureReason::HardEqualityViolation);
     }
-    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if polynomial_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::PolynomialRoundTripViolation);
     }
-    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if field_coefficient_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::FieldCoefficientRoundTripViolation);
     }
-    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if field_energy_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::FieldEnergyRoundTripViolation);
     }
-    if whitening_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if whitening_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::WhiteningRoundTripViolation);
     }
     if !objective_verified {
         reasons.push(RecoveryVerificationFailureReason::ObjectiveRoundTripViolation);
     }
-    if tolerance_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if tolerance_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(RecoveryVerificationFailureReason::ToleranceRoundTripViolation);
     }
     if !reasons.is_empty() {
@@ -4461,10 +4678,10 @@ fn canonical_relation_tolerances(
             );
             let relation_reference_scale =
                 (equality.target - equality.constant_shift_response() * gauge_offset).abs();
-            let physical_tolerance = EQUALITY_KKT_POLICY_V2
+            let physical_tolerance = EXECUTED_NUMERICAL_POLICY
                 .canonical_characteristic_tolerance_multiplier
                 * characteristic_scale
-                + EQUALITY_KKT_POLICY_V2.canonical_relation_reference_tolerance_multiplier
+                + EXECUTED_NUMERICAL_POLICY.canonical_relation_reference_tolerance_multiplier
                     * relation_reference_scale;
             let standard_tolerance = physical_tolerance;
             let kkt_row = assembly
@@ -5084,6 +5301,31 @@ mod tests {
         assert_eq!(solution.assembly.hard_equalities, 10);
         assert_eq!(solution.backend.capacity.kkt_dimension, 28);
         assert!(solution.backend.normalized_backward_error <= 1.0e-11);
+        let capacity_failure = plan_equality_capacity_after_representation(
+            usize::MAX,
+            usize::MAX,
+            &solution.representation,
+        )
+        .expect_err("overflowing capacity must retain completed representation evidence");
+        let CubicEqualityFailure::Representation(failure) = capacity_failure else {
+            panic!("capacity rejection must remain a representation failure");
+        };
+        let build = failure
+            .build_evidence()
+            .expect("completed representation evidence must survive capacity rejection");
+        assert_eq!(build.failure_stage, RepresentationBuildStage::Backend);
+        assert_eq!(
+            build.last_completed_stage,
+            RepresentationBuildStage::ResponseAssembly
+        );
+        assert_eq!(
+            build
+                .quotient_construction
+                .as_ref()
+                .map(|evidence| evidence.quotient_dimension),
+            Some(6)
+        );
+        assert!(build.quotient_factorization.is_some());
         for ((recovered, expected_usage), expected_target) in solution
             .hard_equalities
             .iter()
@@ -5634,7 +5876,7 @@ mod tests {
         assert!(solution.side_condition.round_trip_error <= 1.0e-11);
         assert_ne!(
             solution.side_condition.physical_tolerances[1],
-            EQUALITY_KKT_POLICY_V2.side_condition_limit
+            EXECUTED_NUMERICAL_POLICY.side_condition_limit
         );
     }
 

@@ -22,7 +22,7 @@ use crate::functional::{
     DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, GroupId, ResidualId,
     UsageProvenance,
 };
-use crate::numerical::{EQUALITY_KKT_POLICY_V2, NumericalPolicyId};
+use crate::numerical::{EXECUTED_NUMERICAL_POLICY, NumericalPolicyId};
 #[cfg(test)]
 use std::cell::RefCell;
 
@@ -178,7 +178,7 @@ pub(crate) struct QpAttemptPlan {
 impl QpAttemptPlan {
     fn georbf_v2() -> Self {
         Self {
-            numerical_policy: EQUALITY_KKT_POLICY_V2.id,
+            numerical_policy: EXECUTED_NUMERICAL_POLICY.id,
             profiles: [
                 ClarabelAttemptProfile::Standard,
                 ClarabelAttemptProfile::Robust,
@@ -1011,8 +1011,8 @@ fn scale_qp_form(form: &ConvexQpForm) -> Result<ScaledQpForm, CubicExecutionFail
     let mut constraint_rhs = original_rhs.clone();
     let mut cumulative_variable_exponents = vec![0_i32; form.variables];
     let mut cumulative_constraint_exponents = vec![0_i32; constraints_count];
-    let mut rounds = Vec::with_capacity(EQUALITY_KKT_POLICY_V2.ruiz_rounds);
-    for _ in 0..EQUALITY_KKT_POLICY_V2.ruiz_rounds {
+    let mut rounds = Vec::with_capacity(EXECUTED_NUMERICAL_POLICY.ruiz_rounds);
+    for _ in 0..EXECUTED_NUMERICAL_POLICY.ruiz_rounds {
         let variable_exponents = (0..form.variables)
             .map(|column| {
                 let hessian_norm = (0..form.variables)
@@ -1070,7 +1070,7 @@ fn scale_qp_form(form: &ConvexQpForm) -> Result<ScaledQpForm, CubicExecutionFail
     if cumulative_variable_exponents
         .iter()
         .chain(&cumulative_constraint_exponents)
-        .any(|exponent| exponent.abs() > EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit)
+        .any(|exponent| exponent.abs() > EXECUTED_NUMERICAL_POLICY.ruiz_cumulative_exponent_limit)
     {
         return Err(CubicExecutionFailure::Assembly(
             QpAssemblyFailureReason::ScalingLimitExceeded,
@@ -1106,7 +1106,7 @@ fn scale_qp_form(form: &ConvexQpForm) -> Result<ScaledQpForm, CubicExecutionFail
         &original_rhs,
     );
     if !round_trip_error.is_finite()
-        || round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+        || round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
     {
         return Err(CubicExecutionFailure::Assembly(
             QpAssemblyFailureReason::ScalingLimitExceeded,
@@ -1137,8 +1137,8 @@ fn bounded_ruiz_exponent(norm: f64, cumulative: i32) -> Result<i32, CubicExecuti
     }
     let desired = (-0.5 * norm.log2()).round();
     let desired = desired.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
-    let round_limit = EQUALITY_KKT_POLICY_V2.ruiz_single_round_exponent_limit;
-    let cumulative_limit = EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit;
+    let round_limit = EXECUTED_NUMERICAL_POLICY.ruiz_single_round_exponent_limit;
+    let cumulative_limit = EXECUTED_NUMERICAL_POLICY.ruiz_cumulative_exponent_limit;
     Ok(desired.clamp(-round_limit, round_limit).clamp(
         -cumulative_limit - cumulative,
         cumulative_limit - cumulative,
@@ -1153,7 +1153,7 @@ fn count_saturated_qp_rows(
     variable_exponents: &[i32],
     constraint_exponents: &[i32],
 ) -> usize {
-    let limit = EQUALITY_KKT_POLICY_V2.ruiz_cumulative_exponent_limit;
+    let limit = EXECUTED_NUMERICAL_POLICY.ruiz_cumulative_exponent_limit;
     let variable_count = (0..variables)
         .filter(|column| {
             let norm = (0..variables)
@@ -1371,12 +1371,12 @@ fn execute_qp_attempts(
                 .to_ascii_lowercase()
                 .contains(clarabel_backend::DIRECT_SOLVER)
             && internal_scaling_error.is_finite()
-            && internal_scaling_error <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit;
+            && internal_scaling_error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit;
         let threads_verified =
             candidate.attempt.actual_threads == clarabel_backend::REQUESTED_THREADS;
         let residual_verified = residuals.is_some_and(|residuals| {
             residuals.is_finite()
-                && residuals.maximum() <= EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit
+                && residuals.maximum() <= EXECUTED_NUMERICAL_POLICY.convex_backend_residual_limit
         });
         let infeasibility_certificate =
             (finite && threads_verified && fingerprint_verified && infeasibility_termination)
@@ -1476,7 +1476,8 @@ fn execute_qp_attempts(
                 Some(QpAttemptFailureReason::BackendResidualExceeded)
             )
             && residuals.is_some_and(|residuals| {
-                residuals.maximum() <= EQUALITY_KKT_POLICY_V2.convex_standard_retry_residual_limit
+                residuals.maximum()
+                    <= EXECUTED_NUMERICAL_POLICY.convex_standard_retry_residual_limit
             });
         if (matches!(candidate.attempt.termination, ClarabelTermination::Solved)
             && !retryable_standard_residual)
@@ -1494,7 +1495,7 @@ fn execute_qp_attempts(
             return Err(CubicExecutionFailure::BackendContract {
                 attempts,
                 observed,
-                limit: EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit,
+                limit: EXECUTED_NUMERICAL_POLICY.convex_backend_residual_limit,
             });
         }
     }
@@ -1535,7 +1536,7 @@ fn validate_primal_infeasibility_certificate(
     )?;
     if !provenance_verified
         || !recovery_round_trip_error.is_finite()
-        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+        || recovery_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
     {
         return None;
     }
@@ -1660,7 +1661,7 @@ fn validate_recession_certificate(
     )?;
     if !provenance_verified
         || !recovery_round_trip_error.is_finite()
-        || recovery_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+        || recovery_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
     {
         return None;
     }
@@ -1737,15 +1738,15 @@ fn validate_primal_infeasibility_ray(
         stationarity_residual,
         dual_cone_violation,
         separation_margin,
-        residual_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_residual_limit * matrix_scale,
-        separation_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_separation_limit * rhs_scale,
+        residual_limit: EXECUTED_NUMERICAL_POLICY.convex_certificate_residual_limit * matrix_scale,
+        separation_limit: EXECUTED_NUMERICAL_POLICY.convex_certificate_separation_limit * rhs_scale,
         recovery_round_trip_error: 0.0,
         provenance_verified: false,
         witness_relations: Vec::new(),
     };
     (evidence.finite
         && (evidence.normalized_ray_norm - 1.0).abs()
-            <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+            <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
         && evidence.stationarity_residual <= evidence.residual_limit
         && evidence.dual_cone_violation <= evidence.residual_limit
         && evidence.separation_margin >= evidence.separation_limit)
@@ -1822,15 +1823,15 @@ fn validate_recession_ray(
         hessian_null_residual,
         constraint_ray_violation,
         descent_margin,
-        residual_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_residual_limit,
-        separation_limit: EQUALITY_KKT_POLICY_V2.convex_certificate_separation_limit,
+        residual_limit: EXECUTED_NUMERICAL_POLICY.convex_certificate_residual_limit,
+        separation_limit: EXECUTED_NUMERICAL_POLICY.convex_certificate_separation_limit,
         recovery_round_trip_error: 0.0,
         provenance_verified: false,
         sources: Vec::new(),
     };
     (evidence.finite
         && (evidence.normalized_ray_norm - 1.0).abs()
-            <= EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+            <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
         && evidence.hessian_null_residual <= evidence.residual_limit
         && evidence.constraint_ray_violation <= evidence.residual_limit
         && evidence.descent_margin >= evidence.separation_limit)
@@ -2258,12 +2259,12 @@ fn recover_and_verify_qp(
 
     let physical_standard_form_violation = physical_residuals.primal;
     if !physical_residuals.is_finite()
-        || physical_residuals.maximum() > EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit
+        || physical_residuals.maximum() > EXECUTED_NUMERICAL_POLICY.convex_backend_residual_limit
     {
         return Err(CubicExecutionFailure::BackendContract {
             attempts,
             observed: physical_residuals.maximum(),
-            limit: EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit,
+            limit: EXECUTED_NUMERICAL_POLICY.convex_backend_residual_limit,
         });
     }
     let backend_slack_mismatch = affine_inequalities
@@ -2414,7 +2415,7 @@ fn recover_and_verify_qp(
     if !side_condition.is_within_policy() {
         reasons.push(QpRecoveryFailureReason::SideConditionViolation);
     }
-    if side_condition.round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if side_condition.round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::SideConditionRoundTripViolation);
     }
     if !hard_residuals_within_tolerance(&problem, &hard_equalities, &hard_relation_tolerances) {
@@ -2434,28 +2435,28 @@ fn recover_and_verify_qp(
     // coordinate-recovery round trip.  Judge its solve residual with the
     // backend residual policy; the independent physical relation check above
     // still uses the tighter relation tolerance.
-    if backend_slack_mismatch > EQUALITY_KKT_POLICY_V2.convex_backend_residual_limit {
+    if backend_slack_mismatch > EXECUTED_NUMERICAL_POLICY.convex_backend_residual_limit {
         reasons.push(QpRecoveryFailureReason::BackendSlackMismatch);
     }
-    if reduction_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if reduction_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ReductionRoundTripViolation);
     }
-    if candidate_scaling_round_trip > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if candidate_scaling_round_trip > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ScalingRoundTripViolation);
     }
-    if polynomial_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if polynomial_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::PolynomialRoundTripViolation);
     }
-    if field_coefficient_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if field_coefficient_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::FieldCoefficientRoundTripViolation);
     }
-    if field_energy_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if field_energy_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::FieldEnergyRoundTripViolation);
     }
-    if whitening_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if whitening_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::WhiteningRoundTripViolation);
     }
-    if objective_round_trip_error > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit {
+    if objective_round_trip_error > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit {
         reasons.push(QpRecoveryFailureReason::ObjectiveRoundTripViolation);
     }
     if !reasons.is_empty() {
@@ -2784,9 +2785,10 @@ fn relation_tolerance(
         FunctionalDimension::FieldValuePerLength => field_scale / characteristic_length,
     };
     let relation_reference_scale = (target - constant_shift_response * gauge_offset).abs();
-    let physical_tolerance = EQUALITY_KKT_POLICY_V2.canonical_characteristic_tolerance_multiplier
+    let physical_tolerance = EXECUTED_NUMERICAL_POLICY
+        .canonical_characteristic_tolerance_multiplier
         * characteristic_scale
-        + EQUALITY_KKT_POLICY_V2.canonical_relation_reference_tolerance_multiplier
+        + EXECUTED_NUMERICAL_POLICY.canonical_relation_reference_tolerance_multiplier
             * relation_reference_scale;
     CanonicalRelationToleranceEvidence {
         dimension,
@@ -3469,7 +3471,7 @@ mod tests {
         .expect_err("a missing affine mode must stop before the QP backend");
 
         match failure.root_cause() {
-            CubicExecutionFailure::Representation(failure) => match failure.as_ref() {
+            CubicExecutionFailure::Representation(failure) => match failure.root_cause() {
                 RepresentationFailure::PolynomialRankDeficient { mode, .. } => {
                     assert_eq!(mode.residual, 0.0);
                     assert!(!mode.execution.solver_invoked);
@@ -3520,7 +3522,7 @@ mod tests {
                 );
                 assert!(
                     evidence.scaling_round_trip_error
-                        > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+                        > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
                 );
                 assert!(evidence.no_model_produced);
             }
@@ -3545,7 +3547,7 @@ mod tests {
                 );
                 assert!(
                     evidence.reduction_round_trip_error
-                        > EQUALITY_KKT_POLICY_V2.recovery_round_trip_limit
+                        > EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
                 );
                 assert!(evidence.no_model_produced);
             }
