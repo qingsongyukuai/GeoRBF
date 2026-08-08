@@ -155,11 +155,29 @@ fn two_product(left: f64, right: f64) -> (f64, f64) {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct DoubleDoubleCubicJet {
+pub(crate) struct DoubleDoubleCubicJet {
     value: DoubleDouble,
     gradient_x: [DoubleDouble; 3],
     gradient_y: [DoubleDouble; 3],
     mixed_xy: [[DoubleDouble; 3]; 3],
+}
+
+impl DoubleDoubleCubicJet {
+    pub(crate) fn value(self) -> DoubleDouble {
+        self.value
+    }
+
+    pub(crate) fn gradient_x(self) -> [DoubleDouble; 3] {
+        self.gradient_x
+    }
+
+    pub(crate) fn gradient_y(self) -> [DoubleDouble; 3] {
+        self.gradient_y
+    }
+
+    pub(crate) fn mixed_xy(self) -> [[DoubleDouble; 3]; 3] {
+        self.mixed_xy
+    }
 }
 
 pub(crate) fn cubic_pairing_dd(
@@ -221,7 +239,11 @@ pub(crate) fn cubic_pairing_dd_certified(
     CertifiedDoubleDouble::new(pairing, absolute_scale, operations)
 }
 
-fn cubic_jet_dd(x: [f64; 3], y: [f64; 3], metric: [[f64; 3]; 3]) -> DoubleDoubleCubicJet {
+pub(crate) fn cubic_jet_dd(
+    x: [f64; 3],
+    y: [f64; 3],
+    metric: [[f64; 3]; 3],
+) -> DoubleDoubleCubicJet {
     let delta =
         std::array::from_fn(|axis| DoubleDouble::from(x[axis]) - DoubleDouble::from(y[axis]));
     if delta.into_iter().all(DoubleDouble::is_zero) {

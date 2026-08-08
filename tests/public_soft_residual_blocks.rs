@@ -83,6 +83,19 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+fn assert_query_components_equivalent(actual: [f64; 3], expected: [f64; 3]) {
+    let field_scale = actual
+        .into_iter()
+        .chain(expected)
+        .map(f64::abs)
+        .fold(1.0_f64, f64::max);
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        let sample_reference_scale = actual.abs().max(expected.abs());
+        let tolerance = 1.0e-12 * field_scale + 1.0e-11 * sample_reference_scale;
+        assert_close(actual, expected, tolerance);
+    }
+}
+
 #[test]
 fn covariance_and_independent_vector_soft_inputs_have_checked_public_boundaries() {
     let covariance =
@@ -204,7 +217,10 @@ fn euclidean_soft_gradient_is_one_ordered_vector_residual_block() {
     assert_eq!(assessment.quadratic_penalty(), Some(penalty));
     assert_eq!(assessment.covariance(), None);
     let sampled = fit.model().evaluate(location).unwrap().gradient();
-    assert_eq!(assessment.recovered_gradient(), sampled);
+    assert_query_components_equivalent(
+        assessment.recovered_gradient().components(),
+        sampled.components(),
+    );
     let residual = assessment.residual().components();
     for ((actual, recovered), expected) in residual
         .into_iter()
@@ -613,7 +629,10 @@ fn cross_member_covariance_reports_one_group_objective_without_member_losses() {
         .unwrap()
         .gradient()
         .components();
-    assert_eq!(group.members()[0].recovered_components(), gradient);
+    assert_query_components_equivalent(
+        <[f64; 3]>::try_from(group.members()[0].recovered_components()).unwrap(),
+        gradient,
+    );
     let tangent_gradient = fit
         .model()
         .evaluate(tangent_location)

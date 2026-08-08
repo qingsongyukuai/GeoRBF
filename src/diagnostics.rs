@@ -1901,6 +1901,59 @@ impl BackendFactorizationRegularizationEvidence {
     }
 }
 
+/// Recovery certificate for the immutable generalized-RBF query expansion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VerifiedQueryRepresentationEvidence {
+    verified: bool,
+    all_source_response_verified: bool,
+    pi1_side_condition_verified: bool,
+    field_energy_round_trip_verified: bool,
+    basis_round_trip_error: f64,
+}
+
+impl VerifiedQueryRepresentationEvidence {
+    pub(crate) fn new(
+        verified: bool,
+        all_source_response_verified: bool,
+        pi1_side_condition_verified: bool,
+        field_energy_round_trip_verified: bool,
+        basis_round_trip_error: f64,
+    ) -> Self {
+        Self {
+            verified,
+            all_source_response_verified,
+            pi1_side_condition_verified,
+            field_energy_round_trip_verified,
+            basis_round_trip_error,
+        }
+    }
+
+    /// Reports whether this exact expansion is eligible for model queries.
+    pub fn verified(self) -> bool {
+        self.verified
+    }
+
+    /// Reports complete canonical-source response recovery.
+    pub fn all_source_response_verified(self) -> bool {
+        self.all_source_response_verified
+    }
+
+    /// Reports acceptance of the complete physical Pi1 side condition.
+    pub fn pi1_side_condition_verified(self) -> bool {
+        self.pi1_side_condition_verified
+    }
+
+    /// Reports recovery of the same FieldEnergy from solver and query bases.
+    pub fn field_energy_round_trip_verified(self) -> bool {
+        self.field_energy_round_trip_verified
+    }
+
+    /// Returns the maximum polynomial/coefficient basis recovery error.
+    pub fn basis_round_trip_error(self) -> f64 {
+        self.basis_round_trip_error
+    }
+}
+
 /// One representation evidence bundle, available on both successful and failed fits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepresentationEvidence {
@@ -1925,6 +1978,7 @@ pub struct RepresentationEvidence {
     unregularized_canonical_recovery_verified: bool,
     problem_regularization_applied: bool,
     backend_factorization_regularization: Box<[BackendFactorizationRegularizationEvidence]>,
+    verified_query_representation: Option<VerifiedQueryRepresentationEvidence>,
 }
 
 pub(crate) struct RepresentationEvidenceParts {
@@ -1950,6 +2004,7 @@ pub(crate) struct RepresentationEvidenceParts {
     pub(crate) problem_regularization_applied: bool,
     pub(crate) backend_factorization_regularization:
         Vec<BackendFactorizationRegularizationEvidence>,
+    pub(crate) verified_query_representation: Option<VerifiedQueryRepresentationEvidence>,
 }
 
 impl RepresentationEvidence {
@@ -1977,6 +2032,7 @@ impl RepresentationEvidence {
                 .unregularized_canonical_recovery_verified,
             problem_regularization_applied: parts.problem_regularization_applied,
             backend_factorization_regularization: parts.backend_factorization_regularization.into(),
+            verified_query_representation: parts.verified_query_representation,
         }
     }
 
@@ -2101,6 +2157,11 @@ impl RepresentationEvidence {
         &self,
     ) -> &[BackendFactorizationRegularizationEvidence] {
         &self.backend_factorization_regularization
+    }
+
+    /// Returns the verified expansion owned by a successfully recovered model.
+    pub fn verified_query_representation(&self) -> Option<&VerifiedQueryRepresentationEvidence> {
+        self.verified_query_representation.as_ref()
     }
 }
 

@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread;
 
+use georbf::fit::FitSuccess;
 use georbf::geometry::{
     FieldUnitLabel, Handedness, InputCoordinateFrame, LengthUnitLabel, Point3, Vector3,
 };
@@ -66,6 +67,38 @@ fn fit_affine_model() -> SolvedModel {
         .unwrap()
         .into_parts()
         .0
+}
+
+fn fit_cancellation_model() -> FitSuccess {
+    let frame = InputCoordinateFrame::try_new(
+        ["x", "y", "z"],
+        Handedness::Right,
+        LengthUnitLabel::new("m"),
+    )
+    .unwrap();
+    let mut builder = ProblemBuilder::new(frame, FieldUnitLabel::new("field-unit"));
+    for (index, (location, value)) in [
+        (point(0.0, 0.0, 0.0), 2.196_152_422_706_632),
+        (point(1.0, 0.0, 0.0), -0.828_427_124_746_190_1),
+        (point(0.0, 1.0, 0.0), -0.828_427_124_746_190_1),
+        (point(0.0, 0.0, 1.0), -0.828_427_124_746_190_1),
+        (point(1.0, 1.0, 1.0), 1.907_023_471_174_693_5),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        builder
+            .add(
+                FieldValueObservation::try_new(
+                    SourceId::new(format!("cancellation-{index}")),
+                    location,
+                    value,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    builder.build().unwrap().fit().unwrap()
 }
 
 fn assert_samples_equivalent(actual: FieldSample, expected: FieldSample) {
@@ -258,4 +291,65 @@ fn model_retains_its_problem_contract_across_query_and_fit_resource_plans() {
         automatic.report().problem_size().center_coefficients(),
         exact.report().problem_size().center_coefficients()
     );
+}
+
+#[test]
+fn recovered_field_publishes_verified_query_representation_evidence() {
+    let fit = fit_cancellation_model();
+    let representation = fit.report().representation_evidence();
+    let query = representation
+        .verified_query_representation()
+        .expect("a successful fit publishes its verified query representation");
+
+    assert!(query.verified());
+    assert!(query.all_source_response_verified());
+    assert!(query.pi1_side_condition_verified());
+    assert!(query.field_energy_round_trip_verified());
+    assert!(query.basis_round_trip_error() <= 1.0e-11);
+}
+
+#[test]
+fn cancellation_queries_escalate_the_same_field_and_remain_batch_equivalent() {
+    let fit = fit_cancellation_model();
+    let model = fit.model();
+    let query = point(100.0, 100.0, 100.0);
+    let expected_value: f64 = 516.725_594_529_481_5;
+    let expected_gradient: [f64; 3] = [1.732_060_494_437_222_7; 3];
+
+    let single = model
+        .evaluate(query)
+        .expect("precision escalation reliably sums the verified field");
+    let batch = model.evaluate_batch(&[query, query]).unwrap();
+
+    assert_eq!(batch, vec![single, single]);
+    let value_tolerance = 1.0e-12 * expected_value.abs().max(1.0) + 1.0e-11 * expected_value.abs();
+    assert!((single.value() - expected_value).abs() <= value_tolerance);
+    for (component, expected) in single
+        .gradient()
+        .components()
+        .into_iter()
+        .zip(expected_gradient)
+    {
+        let tolerance = 1.0e-12 * expected_value.abs().max(1.0) + 1.0e-11 * expected.abs();
+        assert!((component - expected).abs() <= tolerance);
+    }
+}
+
+#[test]
+fn unresolved_query_cancellation_is_structured_and_batch_atomic() {
+    let model = fit_cancellation_model().into_parts().0;
+    let safe = point(0.25, 0.25, 0.25);
+    let unresolved = point(1.0e110, 1.0e110, 1.0e110);
+
+    let single = model
+        .evaluate(unresolved)
+        .expect_err("bounded precision cannot certify the cancelled observables");
+    assert_eq!(single.reason(), QueryErrorReason::NumericalIndeterminate);
+    assert_eq!(single.point_index(), None);
+
+    let batch = model
+        .evaluate_batch(&[safe, unresolved, safe])
+        .expect_err("one indeterminate point rejects the logical batch atomically");
+    assert_eq!(batch.reason(), QueryErrorReason::NumericalIndeterminate);
+    assert_eq!(batch.point_index(), Some(1));
 }

@@ -2109,7 +2109,7 @@ fn recover_and_verify_qp(
         recovered_representation.solver_round_trip_error
     };
     let standard_coefficients = recovered_representation.standard_coefficients;
-    let field = recovered_representation.field;
+    let mut field = recovered_representation.field;
     let side_condition = recovered_representation.side_condition;
     let polynomial_round_trip_error = recovered_representation.polynomial_round_trip_error;
     let field_coefficient_round_trip_error =
@@ -2473,6 +2473,11 @@ fn recover_and_verify_qp(
             attempts,
         );
     }
+
+    field.finalize_verified_query_representation(
+        field_scale,
+        polynomial_round_trip_error.max(field_coefficient_round_trip_error),
+    );
 
     Ok(CubicExecutionSolution {
         plan,

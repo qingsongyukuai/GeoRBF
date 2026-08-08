@@ -6,13 +6,16 @@ use std::fmt;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use crate::cubic_equality::{FieldSample as RecoveredFieldSample, RecoveredCubicField};
+use crate::cubic_equality::{
+    FieldSample as RecoveredFieldSample, QuerySampleFailure, RecoveredCubicField,
+};
 use crate::functional::GroupId;
 use crate::geometry::{Point3, Vector3};
 use crate::problem::ProblemSnapshot;
 
 const QUERY_SCRATCH_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 const QUERY_CHUNK_TARGET_BYTES: u64 = 64 * 1024;
+type RecoveredQueryResult = Result<RecoveredFieldSample, QuerySampleFailure>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueryPlan {
@@ -46,7 +49,7 @@ fn plan_query_capacity(point_count: usize) -> Result<QueryPlan, QueryPlanningFai
         });
     }
 
-    let bytes_per_recovered_sample = size_of::<RecoveredFieldSample>() as u64;
+    let bytes_per_recovered_sample = size_of::<RecoveredQueryResult>() as u64;
     let minimum_scratch_bytes = output_bytes
         .checked_add(bytes_per_recovered_sample)
         .ok_or(QueryPlanningFailure::ArithmeticOverflow)?;
@@ -100,6 +103,16 @@ fn checked_field_sample(sample: RecoveredFieldSample) -> Result<FieldSample, Que
     })
 }
 
+fn query_field_sample(
+    field: &RecoveredCubicField,
+    point: Point3,
+) -> Result<FieldSample, QueryError> {
+    let sample = field
+        .reliable_sample(point.components())
+        .map_err(QueryError::from_sample_failure)?;
+    checked_field_sample(sample)
+}
+
 /// An owning, immutable, cheaply cloned solved field model.
 #[derive(Clone)]
 pub struct SolvedModel {
@@ -129,7 +142,7 @@ impl SolvedModel {
 
     /// Evaluates field value and complete gradient together at one point.
     pub fn evaluate(&self, point: Point3) -> Result<FieldSample, QueryError> {
-        checked_field_sample(self.inner.field.sample(point.components()))
+        query_field_sample(&self.inner.field, point)
     }
 
     /// Evaluates an ordered logical batch of points atomically.
@@ -143,17 +156,19 @@ impl SolvedModel {
         for chunk in points.chunks(plan.chunk_len) {
             let recovered_samples = chunk
                 .iter()
-                .map(|point| self.inner.field.sample(point.components()))
+                .map(|point| self.inner.field.reliable_sample(point.components()))
                 .collect::<Vec<_>>();
             debug_assert!(
-                (recovered_samples.len() * size_of::<RecoveredFieldSample>()) as u64
+                (recovered_samples.len() * size_of::<RecoveredQueryResult>()) as u64
                     <= plan.chunk_scratch_bytes
             );
             for sample in recovered_samples {
                 let index = samples.len();
-                samples.push(
-                    checked_field_sample(sample).map_err(|error| error.with_point_index(index))?,
-                );
+                let sample = sample
+                    .map_err(QueryError::from_sample_failure)
+                    .and_then(checked_field_sample)
+                    .map_err(|error| error.with_point_index(index))?;
+                samples.push(sample);
             }
         }
         Ok(samples)
@@ -202,6 +217,8 @@ impl FieldSample {
 pub enum QueryErrorReason {
     /// Evaluation overflowed or otherwise produced a non-finite observable.
     NonFiniteResult,
+    /// Bounded precision escalation could not certify a finite observable.
+    NumericalIndeterminate,
     /// Checked atomic-batch scratch planning exceeded its resource envelope.
     CapacityExceeded,
 }
@@ -243,6 +260,20 @@ impl QueryError {
         self
     }
 
+    fn from_sample_failure(failure: QuerySampleFailure) -> Self {
+        Self {
+            reason: match failure {
+                QuerySampleFailure::NonFiniteResult => QueryErrorReason::NonFiniteResult,
+                QuerySampleFailure::NumericalIndeterminate => {
+                    QueryErrorReason::NumericalIndeterminate
+                }
+            },
+            point_index: None,
+            planned_scratch_bytes: None,
+            scratch_limit_bytes: None,
+        }
+    }
+
     fn from_planning_failure(failure: QueryPlanningFailure) -> Self {
         let (planned_scratch_bytes, scratch_limit_bytes) = match failure {
             QueryPlanningFailure::ArithmeticOverflow => (None, QUERY_SCRATCH_LIMIT_BYTES),
@@ -270,6 +301,13 @@ impl fmt::Display for QueryError {
             (QueryErrorReason::NonFiniteResult, None) => {
                 formatter.write_str("model evaluation did not produce finite observables")
             }
+            (QueryErrorReason::NumericalIndeterminate, Some(index)) => write!(
+                formatter,
+                "model evaluation at batch index {index} remained numerically indeterminate"
+            ),
+            (QueryErrorReason::NumericalIndeterminate, None) => {
+                formatter.write_str("model evaluation remained numerically indeterminate")
+            }
             (QueryErrorReason::CapacityExceeded, _) => {
                 formatter.write_str("logical query batch exceeds the query scratch capacity")
             }
@@ -294,7 +332,7 @@ mod tests {
         assert!(guarantee.chunk_scratch_bytes > 0);
 
         let bytes_per_sample = size_of::<FieldSample>() as u64;
-        let bytes_per_recovered_sample = size_of::<crate::cubic_equality::FieldSample>() as u64;
+        let bytes_per_recovered_sample = size_of::<super::RecoveredQueryResult>() as u64;
         assert_eq!(
             guarantee.scratch_bytes,
             100_000 * bytes_per_sample + guarantee.chunk_scratch_bytes
@@ -302,13 +340,17 @@ mod tests {
         let maximum_points =
             ((QUERY_SCRATCH_LIMIT_BYTES - bytes_per_recovered_sample) / bytes_per_sample) as usize;
         let boundary = plan_query_capacity(maximum_points)
-            .expect("the exact scratch boundary remains admissible");
-        assert_eq!(boundary.scratch_bytes, QUERY_SCRATCH_LIMIT_BYTES);
+            .expect("the largest batch retaining one query-result slot remains admissible");
+        assert!(boundary.scratch_bytes <= QUERY_SCRATCH_LIMIT_BYTES);
+
+        let first_rejected_bytes =
+            (maximum_points as u64 + 1) * bytes_per_sample + bytes_per_recovered_sample;
+        assert!(first_rejected_bytes > QUERY_SCRATCH_LIMIT_BYTES);
 
         assert_eq!(
             plan_query_capacity(maximum_points + 1),
             Err(QueryPlanningFailure::ScratchLimitExceeded {
-                planned_scratch_bytes: QUERY_SCRATCH_LIMIT_BYTES + bytes_per_recovered_sample,
+                planned_scratch_bytes: first_rejected_bytes,
                 limit_bytes: QUERY_SCRATCH_LIMIT_BYTES,
             })
         );

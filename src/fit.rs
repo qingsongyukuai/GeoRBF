@@ -53,6 +53,7 @@ use crate::diagnostics::{
     SideConditionEvidence, SolveAttemptKind, SolveAttemptRecord, SolveAttemptRecordParts,
     SolveAttemptTermination, SolveCoordinateFailureReason, UnidentifiedAdditiveGaugeEvidence,
     UninformativeSharedLevelSetEvidence, UnresolvedAxialNormalEvidence,
+    VerifiedQueryRepresentationEvidence,
 };
 use crate::functional::{
     CanonicalFunctional, FunctionalDimension, FunctionalRepresenterSpan, FunctionalTerm,
@@ -72,7 +73,7 @@ use crate::kkt::{
     SolveAttemptTermination as InternalTermination, WorkspacePhase as InternalWorkspacePhase,
 };
 use crate::model::SolvedModel;
-use crate::numerical::NumericalPolicyId;
+use crate::numerical::{EXECUTED_NUMERICAL_POLICY, NumericalPolicyId};
 use crate::observation::{
     CovarianceGroupMember, CovarianceMatrix, FieldValueConfiguration, GradientConfiguration,
     MinimumNormalSlope, MinimumNormalSlopeConfiguration, MinimumNormalSlopeEnforcement,
@@ -1496,6 +1497,42 @@ impl FitReport {
         recovered_source_ids.sort();
         recovered_source_ids.dedup();
 
+        let verified_query_representation =
+            self.canonical_acceptance.as_ref().and_then(|acceptance| {
+                let all_source_response_verified = self
+                    .all_source_recovery
+                    .as_ref()
+                    .is_some_and(AllSourceRecoveryEvidence::verified);
+                let pi1_side_condition_verified = acceptance.side_condition().is_some_and(|side| {
+                    side.components()
+                        .into_iter()
+                        .zip(side.tolerances())
+                        .all(|(component, tolerance)| component.abs() <= tolerance)
+                        && side.round_trip_error()
+                            <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
+                });
+                let field_energy_round_trip_verified = acceptance
+                    .field_energy_round_trip_error()
+                    .is_some_and(|error| {
+                        error <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit
+                    });
+                let basis_round_trip_error = acceptance
+                    .polynomial_round_trip_error()?
+                    .max(acceptance.field_coefficient_round_trip_error()?);
+                Some(VerifiedQueryRepresentationEvidence::new(
+                    acceptance.accepted()
+                        && all_source_response_verified
+                        && pi1_side_condition_verified
+                        && field_energy_round_trip_verified
+                        && basis_round_trip_error
+                            <= EXECUTED_NUMERICAL_POLICY.recovery_round_trip_limit,
+                    all_source_response_verified,
+                    pi1_side_condition_verified,
+                    field_energy_round_trip_verified,
+                    basis_round_trip_error,
+                ))
+            });
+
         RepresentationEvidence::new(RepresentationEvidenceParts {
             numerical_policy: self.numerical_policy,
             failure_stage,
@@ -1548,6 +1585,7 @@ impl FitReport {
                 .iter()
                 .map(SolveAttemptRecord::backend_factorization_regularization)
                 .collect(),
+            verified_query_representation,
         })
     }
 
