@@ -5,6 +5,7 @@ use georbf::observation::{
 };
 use georbf::problem::{BuildError, BuilderConfigurationError};
 use georbf::problem::{FitConfiguration, ThreadBudget};
+use georbf::relation::FieldValueBound;
 use georbf::{Point3, ProblemBuilder, SourceId};
 use std::num::NonZeroUsize;
 
@@ -363,6 +364,93 @@ fn duplicate_soft_evidence_retains_independent_residuals_and_loss_contributions(
         duplicated_fit.report().total_objective().unwrap(),
         combined_fit.report().total_objective().unwrap(),
         1.0e-11,
+    );
+}
+
+fn hard_and_duplicate_soft_problem(use_convex_qp: bool) -> georbf::fit::FitSuccess {
+    let shared_location = Point3::try_new(0.2, -0.3, 0.4).unwrap();
+    let mut problem = manufactured_problem();
+    problem
+        .add(
+            FieldValueObservation::try_new(
+                SourceId::new("hard-shared-functional"),
+                shared_location,
+                1.25,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    for (source, weight) in [("soft-light", 1.0), ("soft-heavy", 3.0)] {
+        problem
+            .add(
+                FieldValueObservation::try_with_quadratic_penalty(
+                    SourceId::new(source),
+                    shared_location,
+                    2.0,
+                    QuadraticPenalty::try_new(weight).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    if use_convex_qp {
+        problem
+            .add(
+                FieldValueBound::try_lower(
+                    SourceId::new("qp-route"),
+                    Point3::try_new(-1.0, -1.0, -1.0).unwrap(),
+                    -100.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    problem
+        .set_field_energy_normalization(FieldEnergyNormalization::try_new(3.0).unwrap())
+        .unwrap();
+    problem.build().unwrap().fit().unwrap()
+}
+
+#[test]
+fn equality_kkt_and_convex_qp_keep_hard_and_duplicate_soft_semantics_separate() {
+    let equality = hard_and_duplicate_soft_problem(false);
+    let qp = hard_and_duplicate_soft_problem(true);
+
+    for fit in [&equality, &qp] {
+        let report = fit.report();
+        let assessments = report.soft_field_values();
+        assert_eq!(report.problem_size().scalar_soft_relations(), 2);
+        assert_eq!(report.problem_size().quadratic_objective_terms(), 2);
+        assert_eq!(assessments.len(), 2);
+        assert_eq!(assessments[0].source_id(), &SourceId::new("soft-heavy"));
+        assert_eq!(assessments[1].source_id(), &SourceId::new("soft-light"));
+
+        for assessment in assessments {
+            assert_close(assessment.recovered_value(), 1.25, 1.0e-8);
+            assert_close(assessment.residual(), -0.75, 1.0e-8);
+            let weight = assessment.quadratic_penalty().unwrap().weight();
+            assert_close(assessment.loss(), 0.5 * weight * 0.75_f64.powi(2), 1.0e-8);
+        }
+        assert_close(
+            report.total_objective().unwrap(),
+            0.5 * report.field_energy().unwrap()
+                + assessments
+                    .iter()
+                    .map(|assessment| assessment.loss())
+                    .sum::<f64>(),
+            1.0e-8,
+        );
+        assert!(report.canonical_acceptance().unwrap().objective_verified());
+        assert!(report.hard_relations().iter().any(|relation| {
+            relation.source_id() == &SourceId::new("hard-shared-functional")
+                && relation.residual().abs() <= relation.tolerance()
+        }));
+    }
+
+    assert_close(
+        equality.report().total_objective().unwrap(),
+        qp.report().total_objective().unwrap(),
+        1.0e-8,
     );
 }
 

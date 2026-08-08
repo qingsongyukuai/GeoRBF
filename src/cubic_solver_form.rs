@@ -724,6 +724,82 @@ pub(crate) struct CanonicalSoftObjectiveBlock {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalSoftRecoveryRelation {
+    pub(crate) canonical_index: usize,
+    pub(crate) provenance: UsageProvenance,
+    pub(crate) residual: ResidualId,
+    pub(crate) objective_index: usize,
+    pub(crate) objective_component: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CanonicalSoftRecoveryGraph {
+    /// Soft rows are deliberately retained one-for-one until an objective-
+    /// preserving compression has its own exact proof and recovery map.
+    pub(crate) retained_rows: Vec<usize>,
+    pub(crate) relations: Vec<CanonicalSoftRecoveryRelation>,
+    rows: Vec<CanonicalSoftSolverRow>,
+    objectives: Vec<CanonicalSoftObjectiveBlock>,
+}
+
+impl CanonicalSoftRecoveryGraph {
+    fn build(rows: &[CanonicalSoftSolverRow], objectives: &[CanonicalSoftObjectiveBlock]) -> Self {
+        let relations = objectives
+            .iter()
+            .flat_map(|objective| {
+                objective.canonical_indices.iter().copied().enumerate().map(
+                    move |(objective_component, canonical_index)| {
+                        let row = &rows[canonical_index].row;
+                        CanonicalSoftRecoveryRelation {
+                            canonical_index,
+                            provenance: row.provenance.clone(),
+                            residual: row.residual.clone(),
+                            objective_index: objective.objective_index,
+                            objective_component,
+                        }
+                    },
+                )
+            })
+            .collect();
+        Self {
+            retained_rows: (0..rows.len()).collect(),
+            relations,
+            rows: rows.to_vec(),
+            objectives: objectives.to_vec(),
+        }
+    }
+
+    fn verifies(
+        &self,
+        rows: &[CanonicalSoftSolverRow],
+        objectives: &[CanonicalSoftObjectiveBlock],
+    ) -> bool {
+        self.retained_rows.iter().copied().eq(0..rows.len())
+            && self.rows == rows
+            && self.objectives == objectives
+            && self.relations.len() == rows.len()
+            && self.relations.iter().enumerate().all(|(index, relation)| {
+                let Some(row) = rows.get(relation.canonical_index) else {
+                    return false;
+                };
+                let Some(objective) = objectives.get(relation.objective_index) else {
+                    return false;
+                };
+                relation.canonical_index == index
+                    && relation.provenance == row.row.provenance
+                    && relation.residual == row.row.residual
+                    && objective.objective_index == relation.objective_index
+                    && objective
+                        .canonical_indices
+                        .get(relation.objective_component)
+                        == Some(&relation.canonical_index)
+                    && objective.residuals.get(relation.objective_component)
+                        == Some(&relation.residual)
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CanonicalCubicSolverForm {
     pub(crate) standard_field_variables: usize,
     pub(crate) quotient_field_variables: usize,
@@ -740,6 +816,7 @@ pub(crate) struct CanonicalCubicSolverForm {
     pub(crate) affine_rows: Vec<CanonicalAffineSolverRow>,
     pub(crate) soft_rows: Vec<CanonicalSoftSolverRow>,
     pub(crate) soft_objectives: Vec<CanonicalSoftObjectiveBlock>,
+    pub(crate) soft_recovery: CanonicalSoftRecoveryGraph,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -868,7 +945,7 @@ impl CanonicalCubicSolverForm {
             .collect::<Result<Vec<_>, RepresentationFailure>>()?;
 
         let mut canonical_offset = 0;
-        let soft_objectives = problem
+        let soft_objectives: Vec<CanonicalSoftObjectiveBlock> = problem
             .soft_objectives
             .iter()
             .enumerate()
@@ -890,6 +967,8 @@ impl CanonicalCubicSolverForm {
                 }
             })
             .collect();
+        let soft_recovery = CanonicalSoftRecoveryGraph::build(&soft_rows, &soft_objectives);
+        debug_assert!(soft_recovery.verifies(&soft_rows, &soft_objectives));
 
         Ok(Self {
             standard_field_variables,
@@ -907,6 +986,7 @@ impl CanonicalCubicSolverForm {
             affine_rows,
             soft_rows,
             soft_objectives,
+            soft_recovery,
         })
     }
 
@@ -937,6 +1017,11 @@ impl CanonicalCubicSolverForm {
         self.hard_recovery.verifies(&self.symbolic_hard_rows)
     }
 
+    pub(crate) fn verifies_soft_recovery(&self) -> bool {
+        self.soft_recovery
+            .verifies(&self.soft_rows, &self.soft_objectives)
+    }
+
     pub(crate) fn field_energy(&self, coordinate_layout: CubicFieldCoordinateLayout) -> &[f64] {
         match coordinate_layout {
             CubicFieldCoordinateLayout::Standard => &self.standard_field_energy,
@@ -950,11 +1035,17 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        SymbolicAffineColumn, SymbolicAffineRow, SymbolicFieldComponent, build_hard_recovery_graph,
+        CanonicalSoftObjectiveBlock, CanonicalSoftRecoveryGraph, CanonicalSoftSolverRow,
+        CanonicalSolverRow, SymbolicAffineColumn, SymbolicAffineRow, SymbolicFieldComponent,
+        build_hard_recovery_graph,
     };
-    use crate::cubic_equality::CanonicalHardSourceRecovery;
+    use crate::cubic_equality::{
+        CanonicalHardSourceRecovery, CanonicalSoftLoss, CanonicalSoftResidualBlockKind,
+        CanonicalSoftResidualMemberKind,
+    };
     use crate::functional::{
-        FunctionalDimension, RelationId, ResidualId, SemanticRolePath, SourceId, UsageProvenance,
+        DerivedBlockId, DerivedColumnId, DerivedRowId, FunctionalDimension, RelationId, ResidualId,
+        SemanticRolePath, SourceId, UsageProvenance,
     };
 
     fn provenance(source: &str, role: &str) -> UsageProvenance {
@@ -1061,5 +1152,57 @@ mod tests {
         assert_eq!(graph.relations[1].provenance, second);
         assert_eq!(graph.relations[1].target, -2.0);
         assert!(graph.verifies(&rows));
+    }
+
+    #[test]
+    fn soft_recovery_rejects_objective_or_source_association_changes() {
+        let soft_provenance = provenance("soft-a", "field-value-observation/value");
+        let residual = soft_provenance.residual().clone();
+        let rows = vec![CanonicalSoftSolverRow {
+            row: CanonicalSolverRow {
+                canonical_index: 0,
+                response: None,
+                latent_coefficients: Vec::new(),
+                source_provenances: vec![soft_provenance.clone()],
+                derived_block: DerivedBlockId::from_residual(&residual),
+                residual: residual.clone(),
+                derived_row: DerivedRowId::from_residual(&residual),
+                derived_column: Some(DerivedColumnId::from_residual(&residual)),
+                dimension: FunctionalDimension::FieldValue,
+                target: 2.0,
+                provenance: soft_provenance,
+            },
+        }];
+        let objectives = vec![CanonicalSoftObjectiveBlock {
+            objective_index: 0,
+            canonical_indices: vec![0],
+            residuals: vec![residual],
+            loss: CanonicalSoftLoss::QuadraticPenalty { weight: 2.0 },
+            precision: vec![2.0],
+            whitening: vec![2.0_f64.sqrt()],
+            inverse_whitening: vec![1.0 / 2.0_f64.sqrt()],
+            covariance_group: None,
+            block_kind: CanonicalSoftResidualBlockKind::Independent(
+                CanonicalSoftResidualMemberKind::FieldValue,
+            ),
+        }];
+        let graph = CanonicalSoftRecoveryGraph::build(&rows, &objectives);
+        assert!(graph.verifies(&rows, &objectives));
+
+        let mut changed_objective = objectives.clone();
+        changed_objective[0].loss = CanonicalSoftLoss::QuadraticPenalty { weight: 3.0 };
+        assert!(!graph.verifies(&rows, &changed_objective));
+
+        let mut changed_source = rows.clone();
+        changed_source[0].row.provenance = provenance("soft-b", "field-value-observation/value");
+        assert!(!graph.verifies(&changed_source, &objectives));
+
+        let mut changed_target = rows.clone();
+        changed_target[0].row.target = 3.0;
+        assert!(!graph.verifies(&changed_target, &objectives));
+
+        let mut changed_dimension = rows.clone();
+        changed_dimension[0].row.dimension = FunctionalDimension::FieldValuePerLength;
+        assert!(!graph.verifies(&changed_dimension, &objectives));
     }
 }

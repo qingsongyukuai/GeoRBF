@@ -2410,6 +2410,7 @@ fn verifies_qp_form_provenance(
     let variable_layout =
         canonical_form.variable_layout(coordinate_layout, form.soft_violation_variables);
     if !canonical_form.verifies_hard_recovery()
+        || !canonical_form.verifies_soft_recovery()
         || form.polynomial_variables != POLYNOMIAL_DIMENSION
         || form.semantic_latents != canonical_form.semantic_latents
         || form.hard_equality_rows.len() != form.equality_constraints

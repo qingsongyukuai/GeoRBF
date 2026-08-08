@@ -3978,6 +3978,7 @@ fn verifies_assembled_provenance_and_rows(
     let variable_layout = solver_form.variable_layout(CubicFieldCoordinateLayout::Standard, 0);
     let solver_equalities = solver_form.solver_hard_rows().collect::<Vec<_>>();
     if !solver_form.verifies_hard_recovery()
+        || !solver_form.verifies_soft_recovery()
         || assembly.hard_equality_rows.len() != solver_equalities.len()
         || assembly.soft_objective_blocks.len() != solver_form.soft_objectives.len()
         || backend.equality_multipliers.len() != assembly.side_conditions + assembly.hard_equalities
