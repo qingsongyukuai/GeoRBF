@@ -42,3 +42,17 @@
 - Parity 证据：T01 的离散 parity 证据仅为冻结声明/定义/调用点与清单的集合核对；未建立 T03 oracle、T04 fixture 或数值 golden，未宣称数值 parity。
 - 性能证据：不适用；T01 不实现或基准测试算法，未作性能判断。
 - 后续发现：公开 API 工厂为五个显式分支，而 `GRBF_Modelling_Methods::get_method` 的 Greedy 工厂无显式 Vector Field 分支；若干内联常量体、抛出体、仅声明符号、`SetTangentConstraints` 的实际调用目标、批量状态检查/共享可变核与状态位初始化等事实已映射到既有 T02/T30/T31，未提前分类或修复。下一任务固定为 T02。
+
+## T02 — 逐符号能力分类
+
+- 日期：2026-08-13。
+- 状态：完成。
+- Surfe reference：按优先级解析到被忽略的 `.cache/surfe-reference`；`git rev-parse HEAD` 精确为 `290dbe0ab344f4258a4935f05cad0f153f0f69a4`，reference 工作树干净。
+- 阅读的 Surfe 源码：完整复核 `surfe_lib/*.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、`math_lib/*.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、`surfe_pybindings/pybindings.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 和 `test/main.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的声明、定义与活动调用点。重点逐体核对 `basis.cpp` 的 15 类核方法、`modeling_methods.cpp` 的 `GRBF_Modelling_Methods::{check_input_data,run_greedy_algorithm}`、五模型 60 个覆写槽、三个完整 `convert_modified_kernel_to_rbf_kernel`、`continuous_property.cpp` 全部覆写、`surfe_api.cpp` 的状态/setter/批量入口、`modelling_input.cpp` 的空输入与 Greedy residual selector，以及 `grbf_exceptions.h` 的 23 个具体错误类别和 `SurfeExceptions` wrapper。
+- 修改文件：`docs/port/symbol-classification.md`、`docs/port/compatibility.md`、`docs/port/STATE.json`、`docs/port/JOURNAL.md`。
+- 核心实现：无 Rust 或 C++ 算法实现。为 T01 清单建立互斥的 `I/P/T/U/D/V/X` 逐符号分类，每项记录定义/调用证据、可观察缺口和唯一既有任务归属；把源级缺陷同步到兼容策略，未修改算法、未新增任务。
+- 验证命令：`git -C .cache/surfe-reference rev-parse HEAD/status --short`；`find` 核对 30 个范围文件；Perl 去注释限定符号提取与 `rg` 反向检索；从 T01 清单提取代码标识符并反向检索分类表；表驱动核对 13 个完整核的 208 个 `.cpp` 公式和 13 个内联 clone、`R/AR` 的 30 个哨兵导数符号、五模型 60 个覆写槽；`rg` 搜索 TODO/空体/恒定返回/throw/调用点；`jq` 状态序列校验；`git diff --check`。
+- 验证结果：全部通过。源级集合核对覆盖 501 个 T01 代码标识符 token 和 432 个去注释限定定义/调用 token；完整核共 221 个公式/clone 符号，`R/AR` 为 24 个字面 `throw -666` 体加 6 个间接别名；`run_greedy_algorithm` 只有声明/定义文件，三个完整 reconstruction 函数零调用，`use_greedy` 的五处命中均是声明、入参、默认值或写入，没有消费点。
+- Parity 证据：T02 只固定源码能力/不可达/缺陷分类；未建立或运行 T03 C++ oracle，未生成 T04 golden，未宣称数值 parity。
+- 性能证据：不适用；T02 不实现或基准测试算法，未作性能判断。
+- 后续发现：`Parameters::use_greedy` 和 `GRBF_Modelling_Methods::run_greedy_algorithm` 不可达归 T31；Single/Lajaunie/Stratigraphic 的完整 reconstruction 函数不可达归 T21；状态、约束路由、越界和共享可变 kernel 问题分别归既有 T26/T27/T29/T30/T31。T01 文本的“22 个异常”是计数笔误，实际列出 23 个；计划提示的 `Point::operator==` 在冻结声明/定义中不存在，真实同点符号是 `collocated`。以上均映射到既有任务或清单更正，未创建新任务。下一任务固定为 T03。

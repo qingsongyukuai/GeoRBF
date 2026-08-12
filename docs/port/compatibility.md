@@ -89,6 +89,30 @@ T00 阅读 `surfe_lib/surfe_api.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
 
 这些发现不创建新任务，也不允许 T00 提前实现修复。
 
+### T02 源码分类结果
+
+T02 已在 `symbol-classification.md` 对冻结声明、定义和活动调用集做双向核对。
+以下仍是源级事实，必须由 T03 oracle 和各归属任务的兼容用例固定：
+
+- `surfe_lib/surfe_api.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的
+  `Surfe_API::SetTangentConstraints`、`Surfe_API(int)`、两个 bool setter 和批量评估路径
+  分别显示错误约束目标、未初始化状态读取、忽略入参和 stale-state/数据竞争。
+- `surfe_lib/modeling_methods.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的
+  `GRBF_Modelling_Methods::run_greedy_algorithm` 以及三个模型的
+  `convert_modified_kernel_to_rbf_kernel` 都没有冻结公开根调用边；有完整函数体不等于可用能力。
+- `surfe_lib/basis.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 中 `R/AR` 的 30 个导数
+  符号直接或间接进入整数 `-666` 哨兵；其他 13 个具体核的同名方法定义完整。
+- `surfe_lib/modelling_input.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的
+  `spatial_metrics` 对空输入仍成功，而 Greedy tangent residual selector 在特定分支漏返回；
+  后者的唯一上游不可达。
+- `surfe_lib/continuous_property.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的 RHS 循环、
+  `surfe_lib/stratigraphic_surfaces.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的重复 pair
+  生成，以及四模型共享可变 kernel 的向量评估均已标为缺陷；Rust 路径必须
+  在不改变有效串行数值定义的前提下消除越界和数据竞争。
+
+T02 没有运行 C++ oracle、生成 golden 或定义新语义；上述项仍分别由
+T12/T21/T26/T27/T29/T30/T31 关闭，不创建新任务。
+
 ## 状态、批量与并发语义
 
 `Surfe_API::ComputeInterpolant` 的可观察流水线为约束清洗、输入处理、方法参数、basis
