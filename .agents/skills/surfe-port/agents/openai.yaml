@@ -1,0 +1,7 @@
+interface:
+  display_name: "Surfe Port"
+  short_description: "Continue one persisted Surfe-to-GeoRBF migration task"
+  default_prompt: "$surfe-port continue"
+
+policy:
+  allow_implicit_invocation: false
