@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "protocol": {
+    "name": "georbf-surfe-oracle",
+    "version": 1,
+    "transport": "utf8-json-lines",
+    "request_cardinality": "one-request-one-response",
+    "normal_stdout": "exactly-one-json-object-followed-by-lf",
+    "diagnostics": "stderr-only"
+  },
+  "source": {
+    "repository": "https://github.com/MichaelHillier/surfe.git",
+    "commit": "290dbe0ab344f4258a4935f05cad0f153f0f69a4",
+    "reference_priority": [
+      "SURFE_REFERENCE_DIR",
+      "../surfe",
+      ".cache/surfe-reference"
+    ],
+    "allowed_oracle_locations": [
+      ".cache/surfe-oracle",
+      "outside-repository"
+    ],
+    "reference_must_be_clean": true,
+    "reference_algorithm_modification_allowed": false
+  },
+  "request_envelope": {
+    "ordered_fields": [
+      "protocol",
+      "protocol_version",
+      "request_id",
+      "source_commit",
+      "operation",
+      "input",
+      "evidence"
+    ],
+    "required": {
+      "protocol": "georbf-surfe-oracle",
+      "protocol_version": 1,
+      "request_id": "non-empty ASCII string unique within one invocation",
+      "source_commit": "290dbe0ab344f4258a4935f05cad0f153f0f69a4",
+      "operation": [
+        "identity",
+        "kernel.evaluate",
+        "model.run",
+        "solver.run",
+        "error.probe"
+      ],
+      "input": "operation-specific object",
+      "evidence": "ordered array of requested evidence group names"
+    },
+    "unknown_field_policy": "reject"
+  },
+  "response_envelope": {
+    "ordered_fields": [
+      "protocol",
+      "protocol_version",
+      "request_id",
+      "source",
+      "operation",
+      "status",
+      "result",
+      "error"
+    ],
+    "source_fields": [
+      "repository",
+      "commit"
+    ],
+    "status_values": [
+      "ok",
+      "error"
+    ],
+    "ok_invariant": "result is an object and error is null",
+    "error_invariant": "result is null and error is an object"
+  },
+  "numeric_encoding": {
+    "scalar_type": "IEEE-754 binary64 JSON number",
+    "finite_format": "locale-independent max_digits10; preserve negative zero as -0.0",
+    "non_finite": {
+      "encoding": "tagged object",
+      "ordered_fields": [
+        "number_kind"
+      ],
+      "values": [
+        "nan",
+        "positive_infinity",
+        "negative_infinity"
+      ]
+    },
+    "f32_intermediate": "widen to binary64 after the frozen binary32 operation and add storage=f32 to the containing evidence object",
+    "matrix": {
+      "ordered_fields": [
+        "rows",
+        "cols",
+        "order",
+        "data"
+      ],
+      "order": "row_major",
+      "length_invariant": "data.length == rows * cols"
+    },
+    "vector": {
+      "ordered_fields": [
+        "length",
+        "data"
+      ],
+      "length_invariant": "data.length == length"
+    }
+  },
+  "operations": {
+    "identity": {
+      "input_fields": [],
+      "result_fields": [
+        "source",
+        "build",
+        "capabilities"
+      ]
+    },
+    "kernel.evaluate": {
+      "input_fields": [
+        "kernel",
+        "shape_parameter",
+        "anisotropy",
+        "point_1",
+        "point_2",
+        "point_1_direction",
+        "point_2_direction",
+        "interface_groups"
+      ],
+      "evidence_groups": [
+        "kernel_value",
+        "first_derivatives",
+        "mixed_hessian",
+        "anisotropy",
+        "functionals",
+        "modified_kernel"
+      ],
+      "result_fields": [
+        "kernel",
+        "points",
+        "kernel_value",
+        "first_derivatives",
+        "mixed_hessian",
+        "anisotropy",
+        "functionals",
+        "modified_kernel"
+      ]
+    },
+    "model.run": {
+      "input_fields": [
+        "case",
+        "model",
+        "parameters",
+        "constraints",
+        "evaluation_points"
+      ],
+      "model_values": [
+        "single_surface",
+        "lajaunie",
+        "stratigraphic_horizons",
+        "continuous_property",
+        "vector_field"
+      ],
+      "evidence_groups": [
+        "normalized_constraints",
+        "grouping",
+        "layout",
+        "interpolation_matrix",
+        "equality_matrix",
+        "inequality_matrix",
+        "rhs",
+        "solve",
+        "predictions"
+      ],
+      "result_fields": [
+        "normalized_constraints",
+        "grouping",
+        "layout",
+        "interpolation_matrix",
+        "equality_matrix",
+        "inequality_matrix",
+        "rhs",
+        "solve",
+        "predictions"
+      ]
+    },
+    "solver.run": {
+      "input_fields": [
+        "solver",
+        "interpolation_matrix",
+        "equality_matrix",
+        "inequality_matrix",
+        "equality_rhs",
+        "inequality_rhs",
+        "range_rhs"
+      ],
+      "solver_values": [
+        "partial_pivot_lu",
+        "predictor_corrector_qp",
+        "loqo_restricted_range"
+      ],
+      "result_fields": [
+        "branch",
+        "attempted",
+        "success",
+        "weights",
+        "residuals",
+        "feasibility",
+        "objective",
+        "complementarity",
+        "iterations"
+      ]
+    },
+    "error.probe": {
+      "input_fields": [
+        "entrypoint",
+        "arguments",
+        "state"
+      ],
+      "result_fields": [],
+      "expected_status": "error"
+    }
+  },
+  "evidence_catalog": {
+    "kernel_value": [
+      "basis"
+    ],
+    "first_derivatives": [
+      "point_1.dx",
+      "point_1.dy",
+      "point_1.dz",
+      "point_2.dx",
+      "point_2.dy",
+      "point_2.dz"
+    ],
+    "mixed_hessian": [
+      "xx",
+      "xy",
+      "xz",
+      "yx",
+      "yy",
+      "yz",
+      "zx",
+      "zy",
+      "zz"
+    ],
+    "anisotropy": [
+      "enabled",
+      "storage",
+      "transform",
+      "global_plunge",
+      "scaled_radius"
+    ],
+    "functionals": [
+      "value_value",
+      "value_planar_x",
+      "value_planar_y",
+      "value_planar_z",
+      "planar_x_value",
+      "planar_y_value",
+      "planar_z_value",
+      "value_tangent",
+      "tangent_value",
+      "planar_planar",
+      "tangent_tangent",
+      "planar_tangent",
+      "tangent_planar"
+    ],
+    "modified_kernel": [
+      "unisolvent_source_indices",
+      "lagrangian_coefficients",
+      "functionals"
+    ],
+    "normalized_constraints": [
+      "interface",
+      "planar",
+      "tangent",
+      "inequality"
+    ],
+    "grouping": [
+      "interface_iso_values",
+      "interface_group_source_indices",
+      "interface_reference_source_indices",
+      "increment_pairs",
+      "stratigraphic_pairs"
+    ],
+    "layout": [
+      "rows",
+      "cols",
+      "row_labels",
+      "column_labels",
+      "partitions",
+      "polynomial_terms"
+    ],
+    "rhs": [
+      "equality",
+      "inequality",
+      "lower",
+      "upper",
+      "ranges"
+    ],
+    "solve": [
+      "branch",
+      "attempted",
+      "success",
+      "weights",
+      "residual_l2",
+      "relative_residual",
+      "equality_residual_linf",
+      "inequality_violation_linf",
+      "objective",
+      "complementarity",
+      "iterations"
+    ],
+    "predictions": [
+      "point",
+      "scalar",
+      "gradient"
+    ]
+  },
+  "error_object": {
+    "ordered_fields": [
+      "stage",
+      "category",
+      "upstream_type",
+      "message",
+      "causes"
+    ],
+    "stage_values": [
+      "request",
+      "configuration",
+      "constraint_ingest",
+      "preprocess",
+      "basis",
+      "assembly",
+      "solve",
+      "reconstruction",
+      "evaluation",
+      "oracle"
+    ],
+    "category_rule": "stable symbolic category; never infer parity from message text",
+    "message_rule": "diagnostic only",
+    "causes_rule": "outermost-to-innermost ordered array"
+  },
+  "determinism": {
+    "environment": {
+      "OMP_NUM_THREADS": "1",
+      "LC_ALL": "C",
+      "TZ": "UTC"
+    },
+    "input_order": "preserved unless the frozen source explicitly sorts",
+    "object_field_order": "the ordered_fields declarations in this manifest",
+    "array_order": "frozen source order",
+    "timestamps_allowed": false,
+    "absolute_paths_allowed": false,
+    "repeatability_check": "run the identical request twice and require byte-for-byte equal stdout"
+  },
+  "t03_smoke": {
+    "request_id": "t03-smoke-001",
+    "operation": "model.run",
+    "case": "single_surface_linear_smoke",
+    "required_evidence": [
+      "layout",
+      "interpolation_matrix",
+      "rhs",
+      "solve",
+      "predictions"
+    ],
+    "assertions": {
+      "status": "ok",
+      "matrix_shape": [
+        11,
+        11
+      ],
+      "rhs_length": 11,
+      "weights_length": 11,
+      "finite_numbers": true,
+      "residual_l2_max": 1e-12,
+      "repeat_stdout_bytes": "equal"
+    }
+  }
+}
