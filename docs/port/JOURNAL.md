@@ -28,3 +28,17 @@
 - Parity 证据：T00 只完成不可漂移的 source/license/scope 判定基线；固定提交和许可证内容已逐字节验证。按计划尚未构建 T03 oracle、T04 fixture 或执行数值 parity，未将其误报为通过。
 - 性能证据：不适用；T00 不进行性能判断或性能声明。
 - 后续发现：`Surfe_API::SetTangentConstraints` 调用 planar 添加入口、`Surfe_API(int)` 未显式初始化全部状态布尔值、`SetRegressionSmoothing`/`SetGreedyAlgorithm` 无条件启用等源码观察已登记到既有 T02/T30/T31 核验范围；未创建任务或提前修复。下一任务固定为 T01。
+
+## T01 — 建立完整 C++ 清单、调用链、数据流和依赖图
+
+- 日期：2026-08-13。
+- 状态：完成。
+- Surfe reference：按优先级解析到被忽略的 `.cache/surfe-reference`；`git rev-parse HEAD` 再次确认 `290dbe0ab344f4258a4935f05cad0f153f0f69a4`，reference 工作树无修改。
+- 阅读的 Surfe 源码：完整审计 `surfe_lib/*.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、`math_lib/*.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、`surfe_pybindings/pybindings.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的核心适配调用、`test/main.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`，并读取根 `CMakeLists.txt@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 以固定 Eigen/OpenMP/pybind11 与可选 Qt/VTK/geo_builder 边界。重点逐体核对 `Surfe_API` 两个工厂和拟合/评估入口、`GRBF_Modelling_Methods::{get_method,setup_basis_functions,run_greedy_algorithm}`、五模型的全部虚函数覆写、`RBFKernel`/`Modified_Kernel` 组合、三个 solver 与 `Math_methods` QP 路径。
+- 修改文件：`docs/port/inventory.md`、`docs/port/call-graph.md`、`docs/port/data-flow.md`、`docs/port/STATE.json`、`docs/port/JOURNAL.md`。
+- 核心实现：无 Rust 算法。建立 30 个范围文件的逐文件清单、类型/字段/逐符号清单、五模型和 12 个纯虚槽覆写矩阵；记录 API/Greedy 双工厂、从约束到分组/pair/layout/matrix/RHS/weights/scalar/gradient 的字段级流、LU/QP/LOQO/重建路径、裸指针所有权，以及 Eigen/CMake/OpenMP/pybind11/Qt/VTK/geo_builder 的迁移/替代/排除判定。
+- 验证命令：`git -C .cache/surfe-reference rev-parse HEAD` 与 clean-status；`find` 枚举范围文件并用 `rg -F` 将每个 `path@commit` 与文档双向核对；`rg` 提取 class/struct/enum；Perl 去注释后提取限定符号并以 `rg` 核对清单；表驱动检查五模型在公开工厂中的分支和每个模型头中的 12 个覆写；检查三份交付物包含调用者、被调用者、状态所有者、全部 layout、依赖处置和后续任务归属；`git diff --check` 与 staged 变更范围检查。
+- 验证结果：全部 T01 门槛通过；28 个核心 `.h/.cpp` 加 pybindings/test 两个范围文件均有准确提交路径，源码类型、枚举、去注释限定符号、五个公开工厂分支和 60 个模型覆写槽核对无缺口；三份文档明确入口、调用关系、字段所有者及每项依赖的迁移/Rust 替代/排除判定。额外的非门槛 C++ 编译探针因 reference 的 Eigen submodule 未初始化而未运行，未把它记录为构建通过；T01 的固定验收不要求构建，T03 oracle 构建仍必须独立取得实测证据。
+- Parity 证据：T01 的离散 parity 证据仅为冻结声明/定义/调用点与清单的集合核对；未建立 T03 oracle、T04 fixture 或数值 golden，未宣称数值 parity。
+- 性能证据：不适用；T01 不实现或基准测试算法，未作性能判断。
+- 后续发现：公开 API 工厂为五个显式分支，而 `GRBF_Modelling_Methods::get_method` 的 Greedy 工厂无显式 Vector Field 分支；若干内联常量体、抛出体、仅声明符号、`SetTangentConstraints` 的实际调用目标、批量状态检查/共享可变核与状态位初始化等事实已映射到既有 T02/T30/T31，未提前分类或修复。下一任务固定为 T02。
