@@ -22,6 +22,7 @@ include = [
     "/tests/layouts.rs",
     "/tests/modified_kernel.rs",
     "/tests/anisotropic_kernels.rs",
+    "/tests/assembly.rs",
     "/tests/isotropic_kernels.rs",
     "/tests/polynomial.rs",
     "/tests/protocols.rs",

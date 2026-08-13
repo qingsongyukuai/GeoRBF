@@ -6,10 +6,11 @@
 //! cleaning/grouping, spatial helpers, fixed-order polynomial bases, and
 //! isotropic radial kernels, frozen global anisotropy, modified kernels, and
 //! model-independent linear functionals plus deterministic five-model
-//! row/column layouts.
+//! row/column layouts and dense system assembly.
 //! Mathematical and modelling modules are added in the dependency order fixed
 //! by the port plan.
 
+mod assembly;
 mod constraints;
 mod error;
 mod functional;
@@ -22,6 +23,10 @@ mod parameters;
 mod polynomial;
 mod spatial;
 
+pub use assembly::{
+    assemble_system, AssembledSystem, AssemblyConstraints, AssemblyError, BoundedConstraintSystem,
+    ConstraintSystem, DenseMatrix, DenseVector,
+};
 pub use constraints::{
     CollocationRemoval, Constraints, Inequality, Interface, InterfaceGrouping, Planar, Polarity,
     Tangent,

@@ -285,6 +285,32 @@ Hessian、9 项 Tangent 组合和 zero-distance 的 16 项，共 82 个 binary64
 也由同一确定性 probe 记录。交换对称、消去性质和两层中央有限差分同时通过，未装配
 完整系统、未生成 T32 正式 fixture，也未宣称全局 parity。
 
+### T17 矩阵、RHS 与 smoothing 装配
+
+- 稠密矩阵按 T16 的同一行列标签以 row-major binary64 存储；约束块由 T15 泛函逐项
+  求值。Difference/Difference 保留冻结 `(v1-v2)-(v3-v4)` 括号，polynomial block
+  保留源码的 `P/PT/0`、完整或截去常数项的顺序和 tangent 三项乘加次序。
+- 普通 QP 保留 Single Surface inequality level 的逐行正负号、Stratigraphic 的前缀
+  inequality/后缀 equality 切片和各自 RHS。restricted-range 保留
+  `b <= A*x <= b+r`，并在装配前以冻结 `process_input_data` 的角度/level 参数计算
+  interface、normal 与 tangent bounds；没有把 bounds 改写成另一种优化定义。
+- Regression smoothing 不是向对角线加 nugget。冻结源码先完成全部核/polynomial
+  装配，再把 Single Surface 的 inequality+interface 对角项、Lajaunie 的 same-level
+  increment 对角项直接替换为 `K((0,0,0),(0,0,smoothing_amount))`。即使 amount 为零
+  也执行替换；Stratigraphic、Continuous Property 和 Vector Field 忽略该参数。
+- `Continuous_Property` 的私有 polynomial helpers 在冻结可达参数路径中因
+  `poly_term=false/n_poly_terms=0` 不被调用，且其 `.size()` 维数检查存在源级问题；T17
+  只装配实际可达的 interface value block，没有借机臆增 polynomial 能力。其最终可达性
+  仍由既有 T27 复核。
+- `AssemblyError` 保留冻结 matrix/equality/inequality 阶段类别，并让 `R/AR` 缺失导数
+  继续作为 `KernelError::LinearDerivativeUnavailable` 可见；modified-basis layout 与
+  普通核（或反向）的不一致被安全拒绝，不让调用者得到静默错误矩阵。
+
+T17 冻结 probe 对五模型普通路径、Single/Stratigraphic 普通 QP、三模型 restricted-range
+和两种 smoothing 路径的完整矩阵与所有 RHS/bounds 做 row-major binary64 位哈希；Rust
+全部精确匹配，并另行检查标签、分区、P/PT/0、符号、数值对称性和 smoothing 边界。
+本任务不求解系统，不宣称 T18–T20 solver 或 T32 全局 parity 已完成。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
