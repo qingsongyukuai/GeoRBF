@@ -3,13 +3,15 @@
 //!
 //! The crate currently exposes Surfe-compatible parameters, stable error
 //! categories, safe geological constraint values, and deterministic constraint
-//! cleaning/grouping, spatial helpers, and fixed-order polynomial bases.
+//! cleaning/grouping, spatial helpers, fixed-order polynomial bases, and
+//! isotropic radial kernels.
 //! Mathematical and modelling modules are added in the dependency order fixed
 //! by the port plan.
 
 mod constraints;
 mod error;
 mod geometry;
+mod kernel;
 mod ordering;
 mod parameters;
 mod polynomial;
@@ -21,6 +23,7 @@ pub use constraints::{
 };
 pub use error::Error;
 pub use geometry::{ConstraintError, Point};
+pub use kernel::{IsotropicKernel, KernelError, KernelEvaluation};
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{
     Axis, DerivativePoint, FirstDerivative, InputParameters, InternalParameters, ModelType,

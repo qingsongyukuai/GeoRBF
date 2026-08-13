@@ -177,6 +177,35 @@ poly_dy,poly_dz}` 和
 Kronecker 恒等式、导数和任意点求值均保持冻结数值语义。Modified Kernel 的消费仍归
 T14，本任务没有提前实现核消去组合。
 
+## T12 isotropic 核、导数和源码冲突
+
+T12 完整核对了
+`surfe_lib/basis.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `RBFKernel::{radius,basis_pt_pt,basis_pt_planar_x,basis_planar_x_pt,
+basis_pt_planar_y,basis_planar_y_pt,basis_pt_planar_z,basis_planar_z_pt,
+basis_planar_planar}`，以及九个普通核 `Cubic/Gaussian/MQ/MQ3/TPS/IMQ/R/
+WendlandC2/MaternC4::{basis,dx_p1,dx_p2,dy_p1,dy_p2,dz_p1,dz_p2,dxx,dxy,
+dxz,dyx,dyy,dyz,dzx,dzy,dzz}`：
+
+- 半径严格包含 `x/y/z/c` 四个差值；公开一阶导数和混合 Hessian 仍只作用于 x/y/z。
+  Gaussian 对参数平方，MQ/MQ3/IMQ 将参数直接加到 `r²`，WendlandC2 将参数作为
+  cutoff，MaternC4 将其作为尺度；GeoRBF 不在核层偷偷重解释参数。
+- Cubic、Gaussian、MQ、MQ3、TPS、IMQ、WendlandC2 和 MaternC4 的两点一阶导数与
+  3×3 mixed Hessian 均按冻结表达式和符号移植。WendlandC2 只在 `radius > cutoff`
+  时提前返回正零；恰在支撑边界仍执行源码公式，因此保留其可观察 signed-zero 结果。
+- `R::basis` 可达并返回四维半径，但 `R` 的 12 个直接导数体抛整数 `-666`，另外三个
+  Hessian 别名转入同一哨兵；冻结源码没有可供 parity 的线性核导数。GeoRBF 保留
+  value 能力，并以稳定的 `KernelError::LinearDerivativeUnavailable` 安全替代未被
+  `std::exception` 捕获的整数异常，不臆造数学导数或宣称九核导数均已实现。
+- TPS 与 WendlandC2 的对角 Hessian 源表达式在 `c1 != c2` 时没有把 `c_delta²` 加入
+  所有链式项，因此与对完整四维径向函数做有限差分冲突。公开 Surfe 约束构造的
+  `c` 固定为零；GeoRBF 对标准 `c1=c2` 路径同时满足源码、解析恒等式和有限差分，
+  对显式不同 `c` 则保留冻结 hexfloat 结果并用兼容测试记录，不静默“修正”源码。
+
+冻结 probe 覆盖九核 separated/zero/near、非零 `c_delta`、Wendland 支撑内/边界/外和
+oblique interior；其全部有效结果与 Rust 测试逐位一致。各向异性、Modified Kernel 和
+统一 Value/Planar/Tangent 泛函仍分别归 T13、T14、T15，没有在 T12 提前实现。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
