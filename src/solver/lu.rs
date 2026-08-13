@@ -262,13 +262,14 @@ fn solve_dense_partial_pivot_lu_with_validation(
     // Eigen's dynamic column-major UnitLower vector solve updates the tail of
     // the RHS after each nonzero entry.
     let size = weights.len();
+    let packed_data = factorization.packed_lu.data();
     let mut column = 0;
     while column < size {
         if weights[column] != 0.0 {
             let multiplier = weights[column];
             let mut row = column + 1;
             while row < size {
-                weights[row] -= multiplier * packed(&factorization, row, column);
+                weights[row] -= multiplier * packed_data[row * size + column];
                 row += 1;
             }
         }
@@ -281,11 +282,11 @@ fn solve_dense_partial_pivot_lu_with_validation(
     while remaining != 0 {
         let pivot = remaining - 1;
         if weights[pivot] != 0.0 {
-            weights[pivot] /= packed(&factorization, pivot, pivot);
+            weights[pivot] /= packed_data[pivot * size + pivot];
             let solved = weights[pivot];
             let mut row = 0;
             while row < pivot {
-                weights[row] -= solved * packed(&factorization, row, pivot);
+                weights[row] -= solved * packed_data[row * size + pivot];
                 row += 1;
             }
         }
@@ -365,70 +366,84 @@ fn factorize(matrix: &DenseMatrix) -> LuFactorizationEvidence {
     let mut pivot_values = Vec::with_capacity(size);
     let mut exact_zero_pivot = None;
 
-    let mut pivot_column = 0;
-    while pivot_column < size {
-        let mut pivot_row = pivot_column;
-        let mut biggest = packed_lu
-            .get(pivot_column, pivot_column)
-            .expect("validated square matrix")
-            .abs();
-        let mut candidate = pivot_column + 1;
-        while candidate < size {
-            let score = packed_lu
-                .get(candidate, pivot_column)
-                .expect("validated square matrix")
-                .abs();
-            if score > biggest {
-                biggest = score;
-                pivot_row = candidate;
+    {
+        let data = packed_lu.data_mut();
+        let mut pivot_column = 0;
+        while pivot_column < size {
+            let mut pivot_row = pivot_column;
+            let mut biggest = data[pivot_column * size + pivot_column].abs();
+            let mut candidate = pivot_column + 1;
+            while candidate < size {
+                let score = data[candidate * size + pivot_column].abs();
+                if score > biggest {
+                    biggest = score;
+                    pivot_row = candidate;
+                }
+                candidate += 1;
             }
-            candidate += 1;
-        }
-        row_transpositions.push(pivot_row);
+            row_transpositions.push(pivot_row);
 
-        if biggest != 0.0 {
-            if pivot_row != pivot_column {
-                swap_rows(&mut packed_lu, pivot_column, pivot_row);
+            let divide_lower_column = biggest != 0.0;
+            if divide_lower_column {
+                if pivot_row != pivot_column {
+                    let first_start = pivot_column * size;
+                    let second_start = pivot_row * size;
+                    let mut column = 0;
+                    while column < size {
+                        data.swap(first_start + column, second_start + column);
+                        column += 1;
+                    }
+                }
+            } else if exact_zero_pivot.is_none() {
+                exact_zero_pivot = Some(pivot_column);
             }
-            let pivot = packed_lu
-                .get(pivot_column, pivot_column)
-                .expect("validated square matrix");
-            let mut row = pivot_column + 1;
-            while row < size {
-                let value = packed_lu
-                    .get(row, pivot_column)
-                    .expect("validated square matrix")
-                    / pivot;
-                packed_lu.set(row, pivot_column, value);
-                row += 1;
-            }
-        } else if exact_zero_pivot.is_none() {
-            exact_zero_pivot = Some(pivot_column);
-        }
+            let pivot = data[pivot_column * size + pivot_column];
 
-        let mut row = pivot_column + 1;
-        while row < size {
-            let lower = packed_lu
-                .get(row, pivot_column)
-                .expect("validated square matrix");
-            let mut column = pivot_column + 1;
-            while column < size {
-                let value = packed_lu.get(row, column).expect("validated square matrix")
-                    - lower
-                        * packed_lu
-                            .get(pivot_column, column)
-                            .expect("validated square matrix");
-                packed_lu.set(row, column, value);
-                column += 1;
+            let pivot_start = pivot_column * size;
+            let tail_start = pivot_column + 1;
+            let trailing_start = tail_start * size;
+            let (through_pivot, trailing_rows) = data.split_at_mut(trailing_start);
+            let pivot_tail = &through_pivot[pivot_start + tail_start..pivot_start + size];
+            let mut row_groups = trailing_rows.chunks_exact_mut(4 * size);
+            for group in &mut row_groups {
+                let (first, remaining) = group.split_at_mut(size);
+                let (second, remaining) = remaining.split_at_mut(size);
+                let (third, fourth) = remaining.split_at_mut(size);
+                if divide_lower_column {
+                    first[pivot_column] /= pivot;
+                    second[pivot_column] /= pivot;
+                    third[pivot_column] /= pivot;
+                    fourth[pivot_column] /= pivot;
+                }
+                let lowers = [
+                    first[pivot_column],
+                    second[pivot_column],
+                    third[pivot_column],
+                    fourth[pivot_column],
+                ];
+                let mut offset = 0;
+                while offset < pivot_tail.len() {
+                    let pivot_value = pivot_tail[offset];
+                    let column = tail_start + offset;
+                    first[column] -= lowers[0] * pivot_value;
+                    second[column] -= lowers[1] * pivot_value;
+                    third[column] -= lowers[2] * pivot_value;
+                    fourth[column] -= lowers[3] * pivot_value;
+                    offset += 1;
+                }
             }
-            row += 1;
+            for current_row in row_groups.into_remainder().chunks_exact_mut(size) {
+                if divide_lower_column {
+                    current_row[pivot_column] /= pivot;
+                }
+                let lower = current_row[pivot_column];
+                for (value, pivot_value) in current_row[tail_start..].iter_mut().zip(pivot_tail) {
+                    *value -= lower * *pivot_value;
+                }
+            }
+            pivot_values.push(data[pivot_column * size + pivot_column]);
+            pivot_column += 1;
         }
-        pivot_values.push(
-            packed_lu
-                .get(pivot_column, pivot_column)
-                .expect("validated square matrix"),
-        );
-        pivot_column += 1;
     }
 
     let permutation = eigen_permutation_indices(&row_transpositions);
@@ -438,17 +453,6 @@ fn factorize(matrix: &DenseMatrix) -> LuFactorizationEvidence {
         pivot_values,
         exact_zero_pivot,
         packed_lu,
-    }
-}
-
-fn swap_rows(matrix: &mut DenseMatrix, first: usize, second: usize) {
-    let mut column = 0;
-    while column < matrix.cols() {
-        let left = matrix.get(first, column).expect("row in bounds");
-        let right = matrix.get(second, column).expect("row in bounds");
-        matrix.set(first, column, right);
-        matrix.set(second, column, left);
-        column += 1;
     }
 }
 
@@ -468,13 +472,6 @@ fn eigen_permutation_indices(transpositions: &[usize]) -> Vec<usize> {
     inverse
 }
 
-fn packed(evidence: &LuFactorizationEvidence, row: usize, column: usize) -> f64 {
-    evidence
-        .packed_lu
-        .get(row, column)
-        .expect("factorization indices are in bounds")
-}
-
 fn residual_evidence(
     matrix: &DenseMatrix,
     right_hand_side: &[f64],
@@ -487,9 +484,10 @@ fn residual_evidence(
     while row < matrix.rows() {
         let mut prediction = 0.0;
         let mut row_sum = 0.0;
+        let matrix_row = matrix.row(row).expect("matrix row in bounds");
         let mut column = 0;
-        while column < matrix.cols() {
-            let coefficient = matrix.get(row, column).expect("matrix index in bounds");
+        while column < matrix_row.len() {
+            let coefficient = matrix_row[column];
             prediction += coefficient * weights[column];
             row_sum += coefficient.abs();
             column += 1;

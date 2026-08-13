@@ -11,7 +11,7 @@ use std::fmt::{self, Write};
 use crate::{
     constraint_layout, model, Axis, ConstraintError, ConstraintLayout, Constraints, Error,
     FunctionalKernel, KernelError, LayoutDof, LayoutPointRef, LinearFunctional, ModelType,
-    Parameters, Point, PolynomialBasis, PolynomialOrder,
+    Parameters, Point, PolynomialBasis, PolynomialOrder, RbfKernel, SourceConstraintCounts,
 };
 
 /// Row-major, owned, pure-Rust dense matrix.
@@ -52,6 +52,10 @@ impl DenseMatrix {
 
     pub fn data(&self) -> &[f64] {
         &self.data
+    }
+
+    pub(crate) fn data_mut(&mut self) -> &mut [f64] {
+        &mut self.data
     }
 
     pub fn get(&self, row: usize, column: usize) -> Option<f64> {
@@ -326,6 +330,25 @@ pub fn assemble_system(
 ) -> Result<AssembledSystem, AssemblyError> {
     let layout = constraint_layout(parameters.model_type, constraints, parameters)
         .map_err(AssemblyError::Surfe)?;
+    assemble_system_with_layout(layout, constraints, parameters, kernel)
+}
+
+/// Assemble a system from an already validated deterministic layout.
+///
+/// This is the same T17 path as [`assemble_system`], but allows preprocessing
+/// and matrix assembly to be measured or scheduled separately without
+/// rebuilding the layout.
+pub fn assemble_system_with_layout(
+    layout: ConstraintLayout,
+    constraints: &Constraints,
+    parameters: &Parameters,
+    kernel: FunctionalKernel<'_>,
+) -> Result<AssembledSystem, AssemblyError> {
+    if layout.model() != parameters.model_type
+        || layout.source_counts() != SourceConstraintCounts::from_constraints(constraints)
+    {
+        return Err(AssemblyError::Surfe(Error::InterpolationMatrixFailure));
+    }
     let (interpolation_matrix, smoothing_value) =
         assemble_matrix_for_layout(&layout, constraints, parameters, kernel)?;
 
@@ -375,16 +398,15 @@ pub(crate) fn assemble_matrix_for_layout(
         .take(constraint_count)
         .map(|dof| functional_for_dof(dof, constraints))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut interpolation_matrix = DenseMatrix::zeros(layout.matrix_size(), layout.matrix_size());
-    for (row, row_functional) in functionals.iter().enumerate() {
-        for (column, column_functional) in functionals.iter().enumerate() {
-            interpolation_matrix.set(
-                row,
-                column,
-                kernel.apply(row_functional, column_functional)?,
-            );
+    let mut interpolation_matrix = match kernel {
+        FunctionalKernel::Isotropic(isotropic)
+            if layout.model() == ModelType::SingleSurface
+                && isotropic.kind() == RbfKernel::Cubic =>
+        {
+            assemble_single_surface_cubic_constraint_block(layout, constraints, *isotropic)?
         }
-    }
+        _ => assemble_generic_constraint_block(layout, &functionals, kernel)?,
+    };
     insert_polynomial_blocks(
         layout,
         constraints,
@@ -395,6 +417,155 @@ pub(crate) fn assemble_matrix_for_layout(
     let smoothing_value =
         apply_regression_smoothing(layout, parameters, kernel, &mut interpolation_matrix)?;
     Ok((interpolation_matrix, smoothing_value))
+}
+
+fn assemble_generic_constraint_block(
+    layout: &ConstraintLayout,
+    functionals: &[LinearFunctional],
+    kernel: FunctionalKernel<'_>,
+) -> Result<DenseMatrix, KernelError> {
+    let size = layout.matrix_size();
+    let mut matrix = DenseMatrix::zeros(size, size);
+    let data = matrix.data_mut();
+    for (row, row_functional) in functionals.iter().enumerate() {
+        for (column, column_functional) in functionals.iter().enumerate() {
+            data[row * size + column] = kernel.apply(row_functional, column_functional)?;
+        }
+    }
+    Ok(matrix)
+}
+
+/// Cache the common radius for each geometric pair in the dominant frozen
+/// Single Surface/Cubic path. The formulas and per-cell accumulation order are
+/// identical to `FunctionalKernel::apply`; only redundant radius work is
+/// removed.
+fn assemble_single_surface_cubic_constraint_block(
+    layout: &ConstraintLayout,
+    constraints: &Constraints,
+    kernel: crate::IsotropicKernel,
+) -> Result<DenseMatrix, KernelError> {
+    let value_count = constraints.inequalities.len() + constraints.interfaces.len();
+    let planar_count = constraints.planars.len();
+    let tangent_count = constraints.tangents.len();
+    let planar_start = value_count;
+    let tangent_start = planar_start + 3 * planar_count;
+    debug_assert_eq!(tangent_start + tangent_count, layout.constraint_dof_count());
+
+    let size = layout.matrix_size();
+    let mut matrix = DenseMatrix::zeros(size, size);
+    let data = matrix.data_mut();
+
+    for row in 0..value_count {
+        let first = single_surface_value_point(constraints, row);
+        for column in 0..value_count {
+            let second = single_surface_value_point(constraints, column);
+            data[row * size + column] = kernel.basis(first, second);
+        }
+        for (planar_index, planar) in constraints.planars.iter().enumerate() {
+            let derivatives = kernel.first_derivative_vector(
+                first,
+                planar.point(),
+                crate::DerivativePoint::Second,
+            )?;
+            let column = planar_start + 3 * planar_index;
+            data[row * size + column] = derivatives[0];
+            data[row * size + column + 1] = derivatives[1];
+            data[row * size + column + 2] = derivatives[2];
+        }
+        for (tangent_index, tangent) in constraints.tangents.iter().enumerate() {
+            let derivatives = kernel.first_derivative_vector(
+                first,
+                tangent.point(),
+                crate::DerivativePoint::Second,
+            )?;
+            let direction = tangent.vector();
+            data[row * size + tangent_start + tangent_index] = derivatives[0] * direction[0]
+                + derivatives[1] * direction[1]
+                + derivatives[2] * direction[2];
+        }
+    }
+
+    for (planar_index, planar) in constraints.planars.iter().enumerate() {
+        let row = planar_start + 3 * planar_index;
+        for column in 0..value_count {
+            let second = single_surface_value_point(constraints, column);
+            let derivatives = kernel.first_derivative_vector(
+                planar.point(),
+                second,
+                crate::DerivativePoint::First,
+            )?;
+            data[row * size + column] = derivatives[0];
+            data[(row + 1) * size + column] = derivatives[1];
+            data[(row + 2) * size + column] = derivatives[2];
+        }
+        for (column_index, column_planar) in constraints.planars.iter().enumerate() {
+            let hessian = kernel.mixed_hessian(planar.point(), column_planar.point())?;
+            let column = planar_start + 3 * column_index;
+            for component in 0..3 {
+                data[(row + component) * size + column] = hessian[component][0];
+                data[(row + component) * size + column + 1] = hessian[component][1];
+                data[(row + component) * size + column + 2] = hessian[component][2];
+            }
+        }
+        for (tangent_index, tangent) in constraints.tangents.iter().enumerate() {
+            let hessian = kernel.mixed_hessian(planar.point(), tangent.point())?;
+            let direction = tangent.vector();
+            let column = tangent_start + tangent_index;
+            for component in 0..3 {
+                data[(row + component) * size + column] = direction[0] * hessian[component][0]
+                    + direction[1] * hessian[component][1]
+                    + direction[2] * hessian[component][2];
+            }
+        }
+    }
+
+    for (tangent_index, tangent) in constraints.tangents.iter().enumerate() {
+        let row = tangent_start + tangent_index;
+        let first_direction = tangent.vector();
+        for column in 0..value_count {
+            let second = single_surface_value_point(constraints, column);
+            let derivatives = kernel.first_derivative_vector(
+                tangent.point(),
+                second,
+                crate::DerivativePoint::First,
+            )?;
+            data[row * size + column] = derivatives[0] * first_direction[0]
+                + derivatives[1] * first_direction[1]
+                + derivatives[2] * first_direction[2];
+        }
+        for (planar_index, planar) in constraints.planars.iter().enumerate() {
+            let hessian = kernel.mixed_hessian(tangent.point(), planar.point())?;
+            let column = planar_start + 3 * planar_index;
+            for component in 0..3 {
+                data[row * size + column + component] = first_direction[0] * hessian[0][component]
+                    + first_direction[1] * hessian[1][component]
+                    + first_direction[2] * hessian[2][component];
+            }
+        }
+        for (column_index, column_tangent) in constraints.tangents.iter().enumerate() {
+            let hessian = kernel.mixed_hessian(tangent.point(), column_tangent.point())?;
+            let second_direction = column_tangent.vector();
+            data[row * size + tangent_start + column_index] =
+                first_direction[0] * second_direction[0] * hessian[0][0]
+                    + first_direction[0] * second_direction[1] * hessian[0][1]
+                    + first_direction[0] * second_direction[2] * hessian[0][2]
+                    + first_direction[1] * second_direction[0] * hessian[1][0]
+                    + first_direction[1] * second_direction[1] * hessian[1][1]
+                    + first_direction[1] * second_direction[2] * hessian[1][2]
+                    + first_direction[2] * second_direction[0] * hessian[2][0]
+                    + first_direction[2] * second_direction[1] * hessian[2][1]
+                    + first_direction[2] * second_direction[2] * hessian[2][2];
+        }
+    }
+
+    Ok(matrix)
+}
+
+fn single_surface_value_point(constraints: &Constraints, index: usize) -> &Point {
+    constraints.inequalities.get(index).map_or_else(
+        || constraints.interfaces[index - constraints.inequalities.len()].point(),
+        |constraint| constraint.point(),
+    )
 }
 
 fn validate_kernel_kind(

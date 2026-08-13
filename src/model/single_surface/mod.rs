@@ -21,11 +21,11 @@ use crate::{
     solve_loqo_qp_with_options, solve_predictor_corrector_qp_with_options, AnisotropicKernel,
     AnisotropyError, AssembledSystem, AssemblyConstraints, AssemblyError, Axis,
     BoundedConstraintSystem, CollocationRemoval, ConstraintSystem, Constraints, DenseMatrix,
-    DenseVector, Error, FunctionalKernel, Interface, InterfaceGrouping, IsotropicKernel,
-    KernelError, LayoutDof, LinearFunctional, LoqoOptions, LoqoSolution, LoqoSolveError,
-    LuSolution, LuSolveError, ModelType, ModifiedKernel, Parameters, Point, QpOptions, QpSolution,
-    QpSolveError, ReconstructionAssemblyError, ReconstructionError, ReconstructionResult,
-    ReconstructionStage,
+    DenseVector, DerivativePoint, Error, FunctionalKernel, Interface, InterfaceGrouping,
+    IsotropicKernel, KernelError, LayoutDof, LinearFunctional, LoqoOptions, LoqoSolution,
+    LoqoSolveError, LuSolution, LuSolveError, ModelType, ModifiedKernel, Parameters, Point,
+    QpOptions, QpSolution, QpSolveError, RbfKernel, ReconstructionAssemblyError,
+    ReconstructionError, ReconstructionResult, ReconstructionStage,
 };
 
 pub(crate) mod assembly;
@@ -61,6 +61,52 @@ impl OrdinaryKernel {
         match self {
             Self::Isotropic(kernel) => FunctionalKernel::Isotropic(kernel),
             Self::Anisotropic(kernel) => FunctionalKernel::Anisotropic(kernel),
+        }
+    }
+
+    fn basis(&self, first: &Point, second: &Point) -> f64 {
+        match self {
+            Self::Isotropic(kernel) => kernel.basis(first, second),
+            Self::Anisotropic(kernel) => kernel.basis(first, second),
+        }
+    }
+
+    fn first_derivative_vector(
+        &self,
+        first: &Point,
+        second: &Point,
+        with_respect_to: DerivativePoint,
+    ) -> Result<[f64; 3], KernelError> {
+        match self {
+            Self::Isotropic(kernel) => {
+                kernel.first_derivative_vector(first, second, with_respect_to)
+            }
+            Self::Anisotropic(kernel) => Ok([
+                kernel.first_derivative(first, second, with_respect_to, Axis::X)?,
+                kernel.first_derivative(first, second, with_respect_to, Axis::Y)?,
+                kernel.first_derivative(first, second, with_respect_to, Axis::Z)?,
+            ]),
+        }
+    }
+
+    fn mixed_hessian(&self, first: &Point, second: &Point) -> Result<[[f64; 3]; 3], KernelError> {
+        match self {
+            Self::Isotropic(kernel) => kernel.mixed_hessian(first, second),
+            Self::Anisotropic(kernel) => {
+                let axes = [Axis::X, Axis::Y, Axis::Z];
+                let mut hessian = [[0.0; 3]; 3];
+                for (row, first_axis) in axes.into_iter().enumerate() {
+                    for (column, second_axis) in axes.into_iter().enumerate() {
+                        hessian[row][column] = kernel.mixed_second_derivative(
+                            first,
+                            second,
+                            first_axis,
+                            second_axis,
+                        )?;
+                    }
+                }
+                Ok(hessian)
+            }
         }
     }
 
@@ -201,30 +247,44 @@ impl SingleSurfaceLinearModel {
     /// Evaluate the scalar field with the frozen category-by-category sum
     /// order from `Single_Surface::eval_scalar_interpolant_at_point`.
     pub fn evaluate_scalar(&self, point: &Point) -> Result<f64, SingleSurfaceLinearError> {
-        let kernel = self.kernel.functional();
+        if let OrdinaryKernel::Isotropic(kernel) = self.kernel {
+            if kernel.kind() == RbfKernel::Cubic {
+                return Ok(self.evaluate_scalar_cubic(point, kernel));
+            }
+        }
+
         let weights = self.solution.weights().values();
-        let query = LinearFunctional::value(point.clone());
         let mut interface_sum = 0.0;
         for (index, interface) in self.constraints.interfaces.iter().enumerate() {
-            let functional = LinearFunctional::value(interface.point().clone());
-            interface_sum += weights[index] * kernel.apply(&query, &functional)?;
+            interface_sum += weights[index] * self.kernel.basis(point, interface.point());
         }
 
         let planar_offset = self.constraints.interfaces.len();
         let mut planar_sum = 0.0;
         for (index, planar) in self.constraints.planars.iter().enumerate() {
-            for (component, axis) in [Axis::X, Axis::Y, Axis::Z].into_iter().enumerate() {
-                let functional = LinearFunctional::derivative(planar.point().clone(), axis);
-                planar_sum += weights[planar_offset + 3 * index + component]
-                    * kernel.apply(&query, &functional)?;
+            let derivatives = self.kernel.first_derivative_vector(
+                point,
+                planar.point(),
+                DerivativePoint::Second,
+            )?;
+            for (component, derivative) in derivatives.into_iter().enumerate() {
+                planar_sum += weights[planar_offset + 3 * index + component] * derivative;
             }
         }
 
         let tangent_offset = planar_offset + 3 * self.constraints.planars.len();
         let mut tangent_sum = 0.0;
         for (index, tangent) in self.constraints.tangents.iter().enumerate() {
-            let functional = LinearFunctional::tangent(tangent.clone());
-            tangent_sum += weights[tangent_offset + index] * kernel.apply(&query, &functional)?;
+            let derivatives = self.kernel.first_derivative_vector(
+                point,
+                tangent.point(),
+                DerivativePoint::Second,
+            )?;
+            let direction = tangent.vector();
+            tangent_sum += weights[tangent_offset + index]
+                * (derivatives[0] * direction[0]
+                    + derivatives[1] * direction[1]
+                    + derivatives[2] * direction[2]);
         }
 
         let polynomial_offset = tangent_offset + self.constraints.tangents.len();
@@ -240,31 +300,82 @@ impl SingleSurfaceLinearModel {
         Ok((((0.0 + interface_sum) + planar_sum) + tangent_sum) + polynomial_sum)
     }
 
+    fn evaluate_scalar_cubic(&self, point: &Point, kernel: IsotropicKernel) -> f64 {
+        let weights = self.solution.weights().values();
+        let mut interface_sum = 0.0;
+        for (index, interface) in self.constraints.interfaces.iter().enumerate() {
+            let (radius, _) = kernel.cubic_radius_and_deltas(point, interface.point());
+            interface_sum += weights[index] * radius * radius * radius;
+        }
+
+        let planar_offset = self.constraints.interfaces.len();
+        let mut planar_sum = 0.0;
+        for (index, planar) in self.constraints.planars.iter().enumerate() {
+            let (radius, deltas) = kernel.cubic_radius_and_deltas(point, planar.point());
+            let at_first = [
+                3.0 * radius * deltas[0],
+                3.0 * radius * deltas[1],
+                3.0 * radius * deltas[2],
+            ];
+            planar_sum += weights[planar_offset + 3 * index] * -at_first[0];
+            planar_sum += weights[planar_offset + 3 * index + 1] * -at_first[1];
+            planar_sum += weights[planar_offset + 3 * index + 2] * -at_first[2];
+        }
+
+        let tangent_offset = planar_offset + 3 * self.constraints.planars.len();
+        let mut tangent_sum = 0.0;
+        for (index, tangent) in self.constraints.tangents.iter().enumerate() {
+            let (radius, deltas) = kernel.cubic_radius_and_deltas(point, tangent.point());
+            let at_first = [
+                3.0 * radius * deltas[0],
+                3.0 * radius * deltas[1],
+                3.0 * radius * deltas[2],
+            ];
+            let direction = tangent.vector();
+            tangent_sum += weights[tangent_offset + index]
+                * (-at_first[0] * direction[0]
+                    + -at_first[1] * direction[1]
+                    + -at_first[2] * direction[2]);
+        }
+
+        let polynomial_offset = tangent_offset + self.constraints.tangents.len();
+        let basis = crate::assembly::polynomial_basis(
+            ModelType::SingleSurface,
+            self.parameters.polynomial_order,
+        );
+        let mut polynomial_sum = 0.0;
+        for (index, value) in basis.values(point).into_iter().enumerate() {
+            polynomial_sum += weights[polynomial_offset + index] * value;
+        }
+
+        (((0.0 + interface_sum) + planar_sum) + tangent_sum) + polynomial_sum
+    }
+
     /// Evaluate the spatial gradient with the frozen component and summation
     /// order from `Single_Surface::eval_vector_interpolant_at_point`.
     pub fn evaluate_gradient(&self, point: &Point) -> Result<[f64; 3], SingleSurfaceLinearError> {
-        let axes = [Axis::X, Axis::Y, Axis::Z];
-        let kernel = self.kernel.functional();
         let weights = self.solution.weights().values();
-        let queries = axes.map(|axis| LinearFunctional::derivative(point.clone(), axis));
         let mut interface_sums = [0.0; 3];
         for (index, interface) in self.constraints.interfaces.iter().enumerate() {
-            let functional = LinearFunctional::value(interface.point().clone());
+            let derivatives = self.kernel.first_derivative_vector(
+                point,
+                interface.point(),
+                DerivativePoint::First,
+            )?;
             for component in 0..3 {
-                interface_sums[component] +=
-                    weights[index] * kernel.apply(&queries[component], &functional)?;
+                interface_sums[component] += weights[index] * derivatives[component];
             }
         }
 
         let planar_offset = self.constraints.interfaces.len();
         let mut planar_sums = [0.0; 3];
         for (index, planar) in self.constraints.planars.iter().enumerate() {
+            let hessian = self.kernel.mixed_hessian(point, planar.point())?;
             for row_component in 0..3 {
-                for (column_component, axis) in axes.into_iter().enumerate() {
-                    let functional = LinearFunctional::derivative(planar.point().clone(), axis);
+                for column_component in 0..3 {
                     planar_sums[row_component] += weights
                         [planar_offset + 3 * index + column_component]
-                        * kernel.apply(&queries[row_component], &functional)?;
+                        * hessian[row_component][column_component];
                 }
             }
         }
@@ -272,10 +383,13 @@ impl SingleSurfaceLinearModel {
         let tangent_offset = planar_offset + 3 * self.constraints.planars.len();
         let mut tangent_sums = [0.0; 3];
         for (index, tangent) in self.constraints.tangents.iter().enumerate() {
-            let functional = LinearFunctional::tangent(tangent.clone());
+            let hessian = self.kernel.mixed_hessian(point, tangent.point())?;
+            let direction = tangent.vector();
             for component in 0..3 {
                 tangent_sums[component] += weights[tangent_offset + index]
-                    * kernel.apply(&queries[component], &functional)?;
+                    * (direction[0] * hessian[component][0]
+                        + direction[1] * hessian[component][1]
+                        + direction[2] * hessian[component][2]);
             }
         }
 

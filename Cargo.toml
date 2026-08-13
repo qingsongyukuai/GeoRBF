@@ -12,6 +12,7 @@ include = [
     "/Cargo.lock",
     "/LICENSE",
     "/src/**",
+    "/benches/**",
     "/tests/common/**",
     "/tests/constraints_geometry.rs",
     "/tests/fixtures/schema/**",
@@ -43,11 +44,16 @@ include = [
     "/tests/api_compat.rs",
     "/tests/error_compat.rs",
     "/tests/greedy.rs",
+    "/tests/performance_harness.rs",
     "/tests/spatial.rs",
 ]
 
 [lib]
 path = "src/lib.rs"
+
+[[bench]]
+name = "surfe_performance"
+harness = false
 
 [dependencies]
 

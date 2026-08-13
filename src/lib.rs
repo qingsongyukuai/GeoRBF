@@ -34,8 +34,8 @@ mod solver;
 mod spatial;
 
 pub use assembly::{
-    assemble_system, AssembledSystem, AssemblyConstraints, AssemblyError, BoundedConstraintSystem,
-    ConstraintSystem, DenseMatrix, DenseVector,
+    assemble_system, assemble_system_with_layout, AssembledSystem, AssemblyConstraints,
+    AssemblyError, BoundedConstraintSystem, ConstraintSystem, DenseMatrix, DenseVector,
 };
 pub use builder::{BuildError, Builder};
 pub use constraints::{

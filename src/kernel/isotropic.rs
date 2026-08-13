@@ -103,6 +103,11 @@ impl IsotropicKernel {
         self.parameter
     }
 
+    pub(crate) fn cubic_radius_and_deltas(self, first: &Point, second: &Point) -> (f64, [f64; 3]) {
+        debug_assert_eq!(self.kind, RbfKernel::Cubic);
+        radius_and_deltas(first, second)
+    }
+
     /// Frozen `basis_pt_pt`, including the fourth coordinate in the radius.
     pub fn basis(self, first: &Point, second: &Point) -> f64 {
         let (radius, _) = radius_and_deltas(first, second);
@@ -199,6 +204,34 @@ impl IsotropicKernel {
             DerivativePoint::First => derivative_at_first,
             DerivativePoint::Second => -derivative_at_first,
         })
+    }
+
+    /// All three spatial first derivatives with one cached Cubic radius.
+    ///
+    /// Other kernels retain their already frozen per-component expressions.
+    pub fn first_derivative_vector(
+        self,
+        first: &Point,
+        second: &Point,
+        with_respect_to: DerivativePoint,
+    ) -> Result<[f64; 3], KernelError> {
+        if self.kind == RbfKernel::Cubic {
+            let (radius, deltas) = radius_and_deltas(first, second);
+            let at_first = [
+                3.0 * radius * deltas[0],
+                3.0 * radius * deltas[1],
+                3.0 * radius * deltas[2],
+            ];
+            return Ok(match with_respect_to {
+                DerivativePoint::First => at_first,
+                DerivativePoint::Second => [-at_first[0], -at_first[1], -at_first[2]],
+            });
+        }
+        Ok([
+            self.first_derivative(first, second, with_respect_to, Axis::X)?,
+            self.first_derivative(first, second, with_respect_to, Axis::Y)?,
+            self.first_derivative(first, second, with_respect_to, Axis::Z)?,
+        ])
     }
 
     /// A mixed spatial derivative, first by point 1 and then by point 2.
@@ -340,26 +373,47 @@ impl IsotropicKernel {
         self.mixed_second_derivative(first, second, first_axis, second_axis)
     }
 
-    pub fn evaluate(self, first: &Point, second: &Point) -> Result<KernelEvaluation, KernelError> {
-        let mut first_at_first = [0.0; 3];
-        let mut first_at_second = [0.0; 3];
-        let mut mixed_hessian = [[0.0; 3]; 3];
-        for axis in [Axis::X, Axis::Y, Axis::Z] {
-            let index = axis_index(axis);
-            first_at_first[index] =
-                self.first_derivative(first, second, DerivativePoint::First, axis)?;
-            first_at_second[index] =
-                self.first_derivative(first, second, DerivativePoint::Second, axis)?;
-            for second_axis in [Axis::X, Axis::Y, Axis::Z] {
-                mixed_hessian[index][axis_index(second_axis)] =
-                    self.mixed_second_derivative(first, second, axis, second_axis)?;
+    /// Complete row-by-column mixed Hessian with one cached Cubic radius.
+    pub fn mixed_hessian(
+        self,
+        first: &Point,
+        second: &Point,
+    ) -> Result<[[f64; 3]; 3], KernelError> {
+        if self.kind == RbfKernel::Cubic {
+            let (radius, deltas) = radius_and_deltas(first, second);
+            let mut hessian = [[0.0; 3]; 3];
+            for row in 0..3 {
+                for column in row..3 {
+                    let value = if radius == 0.0 {
+                        0.0
+                    } else if row == column {
+                        -3.0 * (((deltas[row] * deltas[row]) / radius) + radius)
+                    } else {
+                        -3.0 * ((deltas[row] * deltas[column]) / radius)
+                    };
+                    hessian[row][column] = value;
+                    hessian[column][row] = value;
+                }
+            }
+            return Ok(hessian);
+        }
+        let axes = [Axis::X, Axis::Y, Axis::Z];
+        let mut hessian = [[0.0; 3]; 3];
+        for (row, first_axis) in axes.into_iter().enumerate() {
+            for (column, second_axis) in axes.into_iter().enumerate() {
+                hessian[row][column] =
+                    self.mixed_second_derivative(first, second, first_axis, second_axis)?;
             }
         }
+        Ok(hessian)
+    }
+
+    pub fn evaluate(self, first: &Point, second: &Point) -> Result<KernelEvaluation, KernelError> {
         Ok(KernelEvaluation::from_components(
             self.basis(first, second),
-            first_at_first,
-            first_at_second,
-            mixed_hessian,
+            self.first_derivative_vector(first, second, DerivativePoint::First)?,
+            self.first_derivative_vector(first, second, DerivativePoint::Second)?,
+            self.mixed_hessian(first, second)?,
         ))
     }
 
