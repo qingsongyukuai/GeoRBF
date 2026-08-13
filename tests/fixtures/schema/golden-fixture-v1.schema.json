@@ -1,0 +1,652 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://georbf.invalid/schema/golden-fixture-v1.schema.json",
+  "title": "GeoRBF frozen Surfe golden fixture v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "fixture_id",
+    "source",
+    "generation",
+    "dataset",
+    "comparison",
+    "request",
+    "expected"
+  ],
+  "properties": {
+    "schema": {
+      "const": "georbf-surfe-golden"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "fixture_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._/-]+$"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "generation": {
+      "$ref": "#/$defs/generation"
+    },
+    "dataset": {
+      "$ref": "#/$defs/dataset"
+    },
+    "comparison": {
+      "$ref": "#/$defs/comparison"
+    },
+    "request": {
+      "$ref": "#/$defs/request"
+    },
+    "expected": {
+      "$ref": "#/$defs/response"
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "oracle_protocol",
+        "oracle_protocol_version"
+      ],
+      "properties": {
+        "repository": {
+          "const": "https://github.com/MichaelHillier/surfe.git"
+        },
+        "commit": {
+          "const": "290dbe0ab344f4258a4935f05cad0f153f0f69a4"
+        },
+        "oracle_protocol": {
+          "const": "georbf-surfe-oracle"
+        },
+        "oracle_protocol_version": {
+          "const": 1
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "environment",
+        "platform",
+        "precision"
+      ],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "OMP_NUM_THREADS",
+            "LC_ALL",
+            "TZ"
+          ],
+          "properties": {
+            "OMP_NUM_THREADS": {
+              "const": "1"
+            },
+            "LC_ALL": {
+              "const": "C"
+            },
+            "TZ": {
+              "const": "UTC"
+            }
+          }
+        },
+        "platform": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "os",
+            "arch",
+            "compiler",
+            "libc",
+            "endianness"
+          ],
+          "properties": {
+            "os": {
+              "type": "string",
+              "minLength": 1
+            },
+            "arch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "compiler": {
+              "type": "string",
+              "minLength": 1
+            },
+            "libc": {
+              "type": "string",
+              "minLength": 1
+            },
+            "endianness": {
+              "enum": [
+                "little",
+                "big"
+              ]
+            }
+          }
+        },
+        "precision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "default",
+            "anisotropy_intermediate",
+            "serialization",
+            "matrix_order"
+          ],
+          "properties": {
+            "default": {
+              "const": "binary64"
+            },
+            "anisotropy_intermediate": {
+              "const": "binary32"
+            },
+            "serialization": {
+              "const": "max_digits10"
+            },
+            "matrix_order": {
+              "const": "row_major"
+            }
+          }
+        }
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "coverage",
+        "request_line_sha256",
+        "response_line_sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coverage": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "identity",
+              "kernel_value",
+              "first_derivatives",
+              "mixed_hessian",
+              "anisotropy",
+              "modified_kernel",
+              "normalized_constraints",
+              "grouping",
+              "layout",
+              "interpolation_matrix",
+              "equality_matrix",
+              "inequality_matrix",
+              "rhs",
+              "lu",
+              "qp",
+              "loqo",
+              "scalar_field",
+              "gradient_field",
+              "objective",
+              "iteration_evidence",
+              "error"
+            ]
+          }
+        },
+        "request_line_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "response_line_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_rule",
+        "numeric_rules",
+        "diagnostic_paths",
+        "weight_policy",
+        "error_message_policy",
+        "acceptance"
+      ],
+      "properties": {
+        "default_rule": {
+          "const": "exact"
+        },
+        "numeric_rules": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "class"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "class": {
+                "$ref": "#/$defs/numericClass"
+              }
+            }
+          }
+        },
+        "diagnostic_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "/expected/error/message",
+              "/expected/result/solve/weights/*"
+            ]
+          }
+        },
+        "weight_policy": {
+          "enum": [
+            "diagnostic_only",
+            "residual_feasibility_predictions"
+          ]
+        },
+        "error_message_policy": {
+          "const": "diagnostic_only"
+        },
+        "acceptance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required_finite",
+            "residual_l2_max",
+            "relative_residual_max",
+            "equality_residual_linf_max",
+            "inequality_violation_linf_max",
+            "prediction_witnesses_required"
+          ],
+          "properties": {
+            "required_finite": {
+              "type": "boolean"
+            },
+            "residual_l2_max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "relative_residual_max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "equality_residual_linf_max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "inequality_violation_linf_max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "prediction_witnesses_required": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "weight_policy": {
+            "const": "residual_feasibility_predictions"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "acceptance": {
+            "properties": {
+              "required_finite": {
+                "const": true
+              },
+              "residual_l2_max": {
+                "type": "number"
+              },
+              "relative_residual_max": {
+                "type": "number"
+              },
+              "equality_residual_linf_max": {
+                "type": "number"
+              },
+              "inequality_violation_linf_max": {
+                "type": "number"
+              },
+              "prediction_witnesses_required": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "protocol_version",
+        "request_id",
+        "source_commit",
+        "operation",
+        "input",
+        "evidence"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "georbf-surfe-oracle"
+        },
+        "protocol_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[ -~]+$"
+        },
+        "source_commit": {
+          "const": "290dbe0ab344f4258a4935f05cad0f153f0f69a4"
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "input": {
+          "type": "object"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "protocol_version",
+        "request_id",
+        "source",
+        "operation",
+        "status",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "georbf-surfe-oracle"
+        },
+        "protocol_version": {
+          "const": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "commit"
+          ],
+          "properties": {
+            "repository": {
+              "const": "https://github.com/MichaelHillier/surfe.git"
+            },
+            "commit": {
+              "const": "290dbe0ab344f4258a4935f05cad0f153f0f69a4"
+            }
+          }
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "result": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "ok"
+            },
+            "result": {
+              "type": "object"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "error"
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "category",
+        "upstream_type",
+        "message",
+        "causes"
+      ],
+      "properties": {
+        "stage": {
+          "enum": [
+            "request",
+            "configuration",
+            "constraint_ingest",
+            "preprocess",
+            "basis",
+            "assembly",
+            "solve",
+            "reconstruction",
+            "evaluation",
+            "oracle"
+          ]
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upstream_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      }
+    },
+    "encodedNumber": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "number_kind"
+          ],
+          "properties": {
+            "number_kind": {
+              "enum": [
+                "nan",
+                "positive_infinity",
+                "negative_infinity"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "cols",
+        "order",
+        "data"
+      ],
+      "properties": {
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cols": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "order": {
+          "const": "row_major"
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/encodedNumber"
+          }
+        }
+      }
+    },
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "length",
+        "data"
+      ],
+      "properties": {
+        "length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/encodedNumber"
+          }
+        }
+      }
+    },
+    "operation": {
+      "enum": [
+        "identity",
+        "kernel.evaluate",
+        "model.run",
+        "solver.run",
+        "error.probe"
+      ]
+    },
+    "numericClass": {
+      "enum": [
+        "kernel_value",
+        "first_derivative",
+        "mixed_hessian",
+        "anisotropy_f32",
+        "modified_kernel",
+        "matrix_rhs",
+        "solver_residual",
+        "solver_feasibility",
+        "prediction_scalar",
+        "prediction_gradient",
+        "solver_objective",
+        "iteration_numeric"
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
