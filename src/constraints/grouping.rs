@@ -98,7 +98,7 @@ impl Constraints {
 fn distinct_levels_descending(levels: impl IntoIterator<Item = f64>) -> Vec<f64> {
     let mut distinct = Vec::new();
     for level in levels {
-        if !distinct.iter().any(|existing| *existing == level) {
+        if !distinct.contains(&level) {
             distinct.push(level);
         }
     }

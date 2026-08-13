@@ -680,7 +680,10 @@ fn retained_difference_layout(source: &ConstraintLayout, model: ModelType) -> Co
     let mut dofs = source.dofs()[..constraint_count].to_vec();
     dofs.extend((0..polynomial_count).map(|index| LayoutDof::PolynomialTerm { index }));
     let mut roles = vec![LayoutRole::Equality; constraint_count];
-    roles.extend(std::iter::repeat(LayoutRole::Polynomial).take(polynomial_count));
+    roles.extend(std::iter::repeat_n(
+        LayoutRole::Polynomial,
+        polynomial_count,
+    ));
     let mut sections = source.sections().to_vec();
     sections.push(section(
         LayoutSectionKind::Polynomial,

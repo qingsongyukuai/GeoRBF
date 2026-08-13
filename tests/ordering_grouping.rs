@@ -87,7 +87,7 @@ fn point_order_and_collocation_match_frozen_surfe_boundaries() {
         Ordering::Less
     );
 
-    let mut points = vec![
+    let mut points = [
         Point::with_c(0.0, -1.0, 0.0, 11.0).unwrap(),
         Point::new(1.0, 0.0, 0.0).unwrap(),
         Point::new(0.0, -1.0, -1.0).unwrap(),

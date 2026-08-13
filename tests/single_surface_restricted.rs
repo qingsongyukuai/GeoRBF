@@ -194,7 +194,9 @@ fn restricted_path_exposes_bounds_loqo_reconstruction_and_final_field() {
         assert_close(actual, f64::from_bits(expected), 1.0e-9, 1.0e-8);
     }
     assert_eq!(
-        model.evaluate_scalars(&[witness.clone()]).unwrap(),
+        model
+            .evaluate_scalars(std::slice::from_ref(&witness))
+            .unwrap(),
         vec![scalar]
     );
     assert_eq!(

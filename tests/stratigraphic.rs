@@ -376,7 +376,9 @@ fn three_level_ordinary_fit_matches_frozen_source_and_conversion_goldens() {
         1.0e-8,
     );
     assert_eq!(
-        model.evaluate_scalars(&[point.clone()]).unwrap(),
+        model
+            .evaluate_scalars(std::slice::from_ref(&point))
+            .unwrap(),
         vec![final_field[0]]
     );
     assert_eq!(
@@ -483,7 +485,9 @@ fn restricted_fit_matches_all_bounds_loqo_conversion_and_final_field() {
         1.0e-8,
     );
     assert_eq!(
-        model.evaluate_scalars(&[point.clone()]).unwrap(),
+        model
+            .evaluate_scalars(std::slice::from_ref(&point))
+            .unwrap(),
         vec![final_field[0]]
     );
     assert_eq!(

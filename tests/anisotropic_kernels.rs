@@ -107,9 +107,9 @@ fn construction_exposes_f32_anisotropy_evidence_and_rejects_fewer_than_two_plana
     assert!(eigenvalues.into_iter().all(f32::is_finite));
     assert!(transform.into_iter().flatten().all(f32::is_finite));
     assert!(plunge.into_iter().all(f32::is_finite));
-    for row in 0..3 {
-        for column in 0..3 {
-            assert!((transform[row][column] - transform[column][row]).abs() <= 2.0e-6);
+    for (row, transform_row) in transform.iter().enumerate() {
+        for (column, value) in transform_row.iter().enumerate() {
+            assert!((*value - transform[column][row]).abs() <= 2.0e-6);
         }
     }
     let plunge_norm = plunge

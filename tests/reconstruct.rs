@@ -158,7 +158,8 @@ fn single_qp_weights_reconstruct_every_constraint_then_resolve_with_lu() {
     let parameters = single_parameters();
     let ordinary = IsotropicKernel::new(RbfKernel::Cubic, 2.0);
     let modified =
-        ModifiedKernel::from_isotropic(ordinary, &[constraints.interfaces.clone()]).unwrap();
+        ModifiedKernel::from_isotropic(ordinary, std::slice::from_ref(&constraints.interfaces))
+            .unwrap();
     let qp_system =
         assemble_system(&constraints, &parameters, FunctionalKernel::from(&modified)).unwrap();
     let weights = DenseVector::from_values(vec![0.125, -0.25, 0.5, 0.75, -0.375, 0.2, -0.1, 0.3]);
@@ -237,7 +238,8 @@ fn lajaunie_reconstruction_retains_pairs_and_forces_three_polynomial_terms() {
     };
     let ordinary = IsotropicKernel::new(RbfKernel::Cubic, 2.0);
     let modified =
-        ModifiedKernel::from_isotropic(ordinary, &[constraints.interfaces.clone()]).unwrap();
+        ModifiedKernel::from_isotropic(ordinary, std::slice::from_ref(&constraints.interfaces))
+            .unwrap();
     let source =
         assemble_system(&constraints, &parameters, FunctionalKernel::from(&modified)).unwrap();
     assert_eq!(source.layout().constraint_dof_count(), 6);
@@ -337,7 +339,8 @@ fn reconstruction_failures_preserve_source_qp_reassembly_and_lu_stages() {
     let parameters = single_parameters();
     let ordinary = IsotropicKernel::new(RbfKernel::Cubic, 2.0);
     let modified =
-        ModifiedKernel::from_isotropic(ordinary, &[constraints.interfaces.clone()]).unwrap();
+        ModifiedKernel::from_isotropic(ordinary, std::slice::from_ref(&constraints.interfaces))
+            .unwrap();
     let source =
         assemble_system(&constraints, &parameters, FunctionalKernel::from(&modified)).unwrap();
     let weights = DenseVector::from_values(vec![0.0; source.layout().constraint_dof_count()]);
@@ -403,9 +406,11 @@ fn reconstruction_failures_preserve_source_qp_reassembly_and_lu_stages() {
         polynomial_order: 1,
         ..Parameters::default()
     };
-    let lajaunie_modified =
-        ModifiedKernel::from_isotropic(ordinary, &[lajaunie_constraints.interfaces.clone()])
-            .unwrap();
+    let lajaunie_modified = ModifiedKernel::from_isotropic(
+        ordinary,
+        std::slice::from_ref(&lajaunie_constraints.interfaces),
+    )
+    .unwrap();
     let qp = solve_and_reconstruct(
         &lajaunie_constraints,
         &invalid_bounds,
@@ -423,7 +428,8 @@ fn high_level_single_path_keeps_the_qp_solution_as_evidence() {
     let parameters = single_parameters();
     let ordinary = IsotropicKernel::new(RbfKernel::Cubic, 2.0);
     let modified =
-        ModifiedKernel::from_isotropic(ordinary, &[constraints.interfaces.clone()]).unwrap();
+        ModifiedKernel::from_isotropic(ordinary, std::slice::from_ref(&constraints.interfaces))
+            .unwrap();
     let result = solve_and_reconstruct(
         &constraints,
         &parameters,
@@ -454,7 +460,8 @@ fn single_conversion_keeps_active_and_inactive_inequalities_in_source_order() {
     let parameters = single_parameters();
     let ordinary = IsotropicKernel::new(RbfKernel::Cubic, 2.0);
     let modified =
-        ModifiedKernel::from_isotropic(ordinary, &[constraints.interfaces.clone()]).unwrap();
+        ModifiedKernel::from_isotropic(ordinary, std::slice::from_ref(&constraints.interfaces))
+            .unwrap();
     let result = solve_and_reconstruct(
         &constraints,
         &parameters,
@@ -500,7 +507,8 @@ fn lajaunie_non_first_order_records_the_frozen_reassembly_failure() {
     };
     let ordinary = IsotropicKernel::new(RbfKernel::Cubic, 2.0);
     let modified =
-        ModifiedKernel::from_isotropic(ordinary, &[constraints.interfaces.clone()]).unwrap();
+        ModifiedKernel::from_isotropic(ordinary, std::slice::from_ref(&constraints.interfaces))
+            .unwrap();
     let source =
         assemble_system(&constraints, &parameters, FunctionalKernel::from(&modified)).unwrap();
     let weights = DenseVector::from_values(vec![0.1; source.layout().constraint_dof_count()]);
@@ -527,8 +535,11 @@ fn frozen_cpp_reconstruction_matrix_rhs_lu_and_field_golden() {
 
     let single_constraints = single_constraints();
     let single_parameters = single_parameters();
-    let single_modified =
-        ModifiedKernel::from_isotropic(ordinary, &[single_constraints.interfaces.clone()]).unwrap();
+    let single_modified = ModifiedKernel::from_isotropic(
+        ordinary,
+        std::slice::from_ref(&single_constraints.interfaces),
+    )
+    .unwrap();
     let single_source = assemble_system(
         &single_constraints,
         &single_parameters,
@@ -620,9 +631,11 @@ fn frozen_cpp_reconstruction_matrix_rhs_lu_and_field_golden() {
         shape_parameter: 2.0,
         ..Parameters::default()
     };
-    let lajaunie_modified =
-        ModifiedKernel::from_isotropic(ordinary, &[lajaunie_constraints.interfaces.clone()])
-            .unwrap();
+    let lajaunie_modified = ModifiedKernel::from_isotropic(
+        ordinary,
+        std::slice::from_ref(&lajaunie_constraints.interfaces),
+    )
+    .unwrap();
     let lajaunie_source = assemble_system(
         &lajaunie_constraints,
         &lajaunie_parameters,

@@ -181,7 +181,7 @@ impl ContinuousPropertyModel {
                     weights[index] * kernel.apply(&queries[component], &source)?;
             }
         }
-        Ok(interface_sums.map(|sum| (((sum + 0.0) + 0.0) + 0.0)))
+        Ok(interface_sums.map(|sum| ((sum + 0.0) + 0.0) + 0.0))
     }
 
     pub fn evaluate_scalars(&self, points: &[Point]) -> Result<Vec<f64>, ContinuousPropertyError> {
