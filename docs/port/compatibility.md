@@ -488,6 +488,42 @@ restricted/modified/reconstruct 路径只能由后继 T24 关闭。
 T24 没有把显式 reconstruction 误报成冻结公开 API 自动行为，也没有开始 T25 Lajaunie 的
 reference/increment/iso-value 模型入口。
 
+## T25 Lajaunie reference / increment / iso-value
+
+- Lajaunie 在四类别独立清洗后按 exact level 降序建立 interface 数据。每个 level 的
+  reference 是该层清洗后首点；singleton 仍保留在 `interface_test_points` 和最终 iso-value
+  输出中，但不进入 increment groups。每个多点层严格按 `reference - group[k]`、`k=1..n-1`
+  生成 difference，自由度顺序随后是 `planar(x,y,z) -> tangent -> truncated polynomial`。
+  GeoRBF 同时保留 grouping、reference index、difference dof 和 source level 证据，不用绝对
+  value rows 替换 increment，也不按容差合并 level。
+- 冻结 `Lajaunie_Approach::get_method_parameters` 无条件把 `n_inequality=0`；公开
+  `Surfe_API::ComputeInterpolant` 也不调用基类 `check_input_data`。因此传入 inequality 会参与
+  自己类别的排序/去重并保留在输入快照中，却不产生普通 QP row、RHS 或场贡献。T25 的
+  C++ probe 实测有/无同组 inequality 的 matrix、RHS、weights、iso values 和 field 完全相同；
+  GeoRBF 没有为对称性臆造 Lajaunie ordinary inequality QP。
+- 普通路径使用 ordinary isotropic/全局各向异性核、same-level difference matrix、截去常数项
+  的 0/1/2 阶 polynomial、可选 regression smoothing 和 T18 LU。求解后对每个 level 的
+  reference point 依序评估 scalar，并以该值覆盖输出 `interface_iso_values`；输入 interface
+  自身的 source level 不被改写。单点/批量 scalar 与 gradient 保持 increment、planar、tangent、
+  polynomial 的冻结分组和累加次序。
+- restricted-range 路径对每个 difference 使用
+  `[-interface_uncertainty,+interface_uncertainty]`，对 planar/tangent 使用冻结角度 bounds，
+  并以 Modified Kernel 和 T20 LOQO 求 source field；source solve 后先执行一次 iso-value 更新。
+  与 T21/T24 相同，冻结公开 `ComputeInterpolant` 不调用完整
+  `convert_modified_kernel_to_rbf_kernel`，T25 将该函数体作为显式安全操作保留：所有 source
+  dof 继续保留，difference 两端 level、planar normal 和 tangent inner product 由 source field
+  更新，强制三项 polynomial 后以 ordinary RBF 再装配并执行第二次 LU，最后再次更新 iso
+  values。结果明确区分 source Modified field/iso values 与 reconstructed ordinary field/iso
+  values，不把显式 conversion 误报为冻结公开自动行为。
+- 错误保持 wrong model、no interface、no increment pair、anisotropy/Modified-basis、source
+  assembly、LOQO、reassembly、LU 和 evaluation 阶段。Lajaunie conversion 强制
+  `n_poly_terms=3` 却仍按输入 polynomial order 创建 basis 的冻结矛盾继续由 T21 规则处理：
+  非一阶 restricted 输入在 reassembly 阶段安全失败。显式 LOQO options 只提供安全迭代上限，
+  不放宽停止或 T20 后验可行性门槛。
+
+T25 没有开始 Stratigraphic Horizons 的层序、岩性 inequality 或最小层间约束；这些仍严格归
+固定后继 T26。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

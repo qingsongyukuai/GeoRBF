@@ -49,6 +49,11 @@ pub use layout::{
     constraint_layout, ConstraintLayout, DifferenceKind, IndexRange, LayoutDof, LayoutPartitions,
     LayoutPointRef, LayoutRole, LayoutSection, LayoutSectionKind, SourceConstraintCounts,
 };
+pub use model::lajaunie::{
+    fit_lajaunie_linear, fit_lajaunie_restricted, fit_lajaunie_restricted_with_options,
+    LajaunieIsoValueEvidence, LajaunieLinearError, LajaunieLinearModel,
+    LajaunieRestrictedBoundEvidence, LajaunieRestrictedError, LajaunieRestrictedModel,
+};
 pub use model::reconstruct::{
     reconstruct_from_qp_weights, solve_and_reconstruct, ReconstructionAssemblyError,
     ReconstructionDofMapping, ReconstructionError, ReconstructionPredictionWitness,
