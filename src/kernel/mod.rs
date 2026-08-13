@@ -3,6 +3,8 @@
 mod anisotropy;
 mod derivatives;
 mod isotropic;
+mod modified;
 
 pub use anisotropy::{AnisotropicKernel, AnisotropyError};
 pub use isotropic::{IsotropicKernel, KernelError, KernelEvaluation};
+pub use modified::ModifiedKernel;

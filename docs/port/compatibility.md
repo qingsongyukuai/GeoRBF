@@ -244,6 +244,47 @@ binary64 输出与 Rust 逐位一致。单位协方差极限、退化/`0.0001f` 
 缩放、支持矩阵对称性质及两层有限差分同时通过。Modified Kernel 和统一线性泛函仍分别
 归 T14/T15，T13 没有提前实现。
 
+## T14 Modified Kernel 全组合与固定对角语义
+
+T14 完整核对了
+`surfe_lib/basis.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `Modified_Kernel::{Modified_Kernel,basis_pt_pt,basis_pt_planar_x,
+basis_planar_x_pt,basis_pt_planar_y,basis_planar_y_pt,basis_pt_planar_z,
+basis_planar_z_pt,basis_pt_tangent,basis_tangent_pt,basis_planar_planar,
+basis_tangent_tangent,basis_planar_tangent,basis_tangent_planar}` 及复制/析构边界，
+并补充核对
+`surfe_lib/modeling_methods.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `GRBF_Modelling_Methods::setup_basis_functions` 构造异常包装：
+
+- GeoRBF 直接复用 T11 的四项 Lagrangian basis 与 T12/T13 的普通/各向异性核。
+  value、分别作用于第一/第二点的三项梯度和 row-by-column 3×3 mixed Hessian 均保留
+  冻结源码的 `base - t1 - t2 + t3 + t4` 以及 j/k 累加顺序。Hessian 的 `t4`
+  特别保留源码的 `p2(k) * K(Uj,Uk) * p1(j)` 乘法次序；交换因子会使部分结果产生
+  1–2 个 binary64 ULP 的可观察差异。
+- 冻结 `t3` 是 `sum_j p1(j)*p2(j)`，只有 `t4` 的非对角项实际求
+  `K(Uj,Uk)`；也就是说源码把四个对角值固定为 1，而不是读取实际
+  `K(Uj,Uj)`。GeoRBF 不将它“修正”为完整 Gram matrix。Gaussian shape=1 的
+  `K(Uj,Uj)=1` 路径通过了四个 unisolvent 点的双向消去性质；其他核仍严格保留
+  冻结固定对角语义。
+- Value/Planar/Tangent 的全笛卡尔组合由同一 modified value/gradient/Hessian
+  收缩得到，但每个公开入口保持冻结符号和作用点。Tangent 使用传入原始方向尺度，
+  不在核层归一化；统一 `Value/Derivative/Tangent/Difference` 泛函仍归 T15。
+- 普通核九个 value 路径、八个完整导数路径和各向异性六个 value/五个完整导数路径
+  均可作为底层；`R/AR` modified value 仍可用，任一导数组合继续稳定返回
+  `KernelError::LinearDerivativeUnavailable`，对应冻结整数 `-666`，不臆造导数。
+- `Modified_Kernel` 直接构造失败的内层链仍是 Lagrangian basis 创建失败，而
+  `setup_basis_functions` 再包装为 `failurecreatingmodifiedkernel`。GeoRBF 的公开
+  `ModifiedKernel::from_isotropic/from_anisotropic` 对应这一安全外层构造边界并返回
+  `Error::ModifiedKernelCreationFailure`；T11 的独立构造 API 仍保留
+  `LagrangianBasisCreationFailure`。冻结复制构造浅拷贝 `_aLPB` 且析构不释放它，
+  会泄漏内存；Rust 以拥有所有权的安全 `Clone` 替代，不复制泄漏或悬垂风险。
+
+冻结 T14 probe 对 Cubic 普通/各向异性各记录 separated 的 16 项 value/gradient/
+Hessian、9 项 Tangent 组合和 zero-distance 的 16 项，共 82 个 binary64 输出，Rust
+全部逐位一致；Gaussian 固定对角消去、linear value/`-666` 和无效 Lagrangian 构造链
+也由同一确定性 probe 记录。交换对称、消去性质和两层中央有限差分同时通过，未装配
+完整系统、未生成 T32 正式 fixture，也未宣称全局 parity。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

@@ -25,6 +25,7 @@ pub use error::Error;
 pub use geometry::{ConstraintError, Point};
 pub use kernel::{
     AnisotropicKernel, AnisotropyError, IsotropicKernel, KernelError, KernelEvaluation,
+    ModifiedKernel,
 };
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{
