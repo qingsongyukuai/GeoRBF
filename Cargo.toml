@@ -18,6 +18,7 @@ include = [
     "/tests/ordering_grouping.rs",
     "/tests/parameters_compat.rs",
     "/tests/protocols.rs",
+    "/tests/spatial.rs",
 ]
 
 [lib]

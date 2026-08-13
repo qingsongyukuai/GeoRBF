@@ -11,6 +11,7 @@ mod error;
 mod geometry;
 mod ordering;
 mod parameters;
+mod spatial;
 
 pub use constraints::{
     CollocationRemoval, Constraints, Inequality, Interface, InterfaceGrouping, Planar, Polarity,
@@ -23,4 +24,11 @@ pub use parameters::{
     Axis, DerivativePoint, FirstDerivative, InputParameters, InternalParameters, ModelType,
     Parameters, RbfKernel, SecondDerivative, SolverType, DEGREES_TO_RADIANS, POSITION_EPSILON,
     RADIANS_TO_DEGREES,
+};
+pub use spatial::{
+    average_nearest_neighbour_distance, bounds, closest_to_distance_index, constraints_to_points,
+    distance_between_points, extremal_point_indices, farthest_from_other_set_index,
+    farthest_neighbour_index, farthest_pair_indices, largest_distance_between_points,
+    maximal_axial_variability_order, nearest_neighbour_index, nearest_neighbour_indices,
+    spatial_metrics, ConstraintAverageNearestNeighbourDistances, SpatialError, SpatialParameters,
 };

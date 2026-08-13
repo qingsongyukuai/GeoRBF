@@ -115,6 +115,38 @@ T08 核对了
 T08 不建立空间距离/最近邻、increment pair、模型 layout 或矩阵；这些仍分别属于
 T09、T15/T25/T26、T16 和 T17。
 
+### T09 空间辅助算法
+
+T09 完整核对了
+`surfe_lib/modelling_input.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的约束转点、距离、最近/最远邻、平均最近邻、`spatial_metrics`、bounds、最远点对、
+目标距离点、极值采样、最大距离、轴向变化顺序和四类约束平均距离：
+
+- `distance_btw_pts` 是包含 `c` 坐标的四维欧氏距离；bounds 和极值轴仍只使用 x/y/z。
+  约束转点顺序精确为 inequality、interface、planar、tangent，并保留各点的 `c`。
+- 单最近邻跳过所有距离精确等于零的候选，以严格 `<` 保留首个并列索引；多最近邻先
+  过滤零距离，再复用 T08 的冻结 indexed sort 顺序。冻结函数在请求数仍包含已过滤点时
+  可越界；Rust 只返回实际存在的最多 `n` 个索引。空候选或没有非零邻居分别返回
+  `EmptyPointSet`/`NoNonzeroNeighbour`，不传播 `-1` 哨兵。
+- 最远邻、跨集合最远索引、目标距离最近索引和最远点对都保留严格比较产生的首个并列
+  索引。两个精确重复点的最远点对按冻结双循环仍是 `[0,0]`；少于两点、空集合或非有限
+  目标距离使用类型化 `SpatialError`，不复制 `pts[0]` 越界或无效索引。
+- `avg_nn_distance` 按“不同索引”而不是“非零距离”选最近点，因此重复点的最近距离可为
+  零；空集和单点都精确返回零。四类 `Constraints::compute_*_avg_nn_distance` 保持这一
+  数值定义。冻结 `compute_avg_nn_distances` 把四值写入可变缓存；Rust 返回拥有所有权的
+  `ConstraintAverageNearestNeighbourDistances` 快照，消除隐藏共享突变而不改变计算结果。
+- `spatial_metrics` 先按 T08 规则排序和相邻去重，再以四维距离求平均最近邻并除以二，
+  同时输出 x/y/z bounds。冻结空输入仍返回 `true`、零 resolution 以及
+  `DBL_MAX/-DBL_MAX` bounds；这些哨兵不构成可用空间参数，Rust 对空输入返回
+  `EmptyPointSet`。单点仍成功，resolution 为零且每轴上下界相等。
+- extremal 索引和轴向变化顺序继续使用冻结 `sort_vector_w_index` 的并列顺序；各轴 range
+  从大到小，range 完全相等时顺序为 Z、Y、X。空 extremal 输入在 C++ 中会访问越界，
+  Rust 安全拒绝；最大两点距离则与冻结源码一样为空集/单点返回零。
+
+同一文件的四个 `Get_*_STL_Vector_Indices_With_Large_Residuals` 消费本任务的距离和平均
+距离，但属于 Greedy 的候选选择、残差阈值与追加策略；依固定计划仍归 T31，本任务没有
+提前移植。`continuous_property.cpp` 中注释掉的 extremal 调用也未被误报为可达能力。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
