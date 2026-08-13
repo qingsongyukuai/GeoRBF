@@ -147,6 +147,36 @@ T09 完整核对了
 距离，但属于 Greedy 的候选选择、残差阈值与追加策略；依固定计划仍归 T31，本任务没有
 提前移植。`continuous_property.cpp` 中注释掉的 extremal 调用也未被误报为可达能力。
 
+## T11 Lagrangian/unisolvent 选择和退化处理
+
+T11 完整核对了
+`surfe_lib/basis.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `Lagrangian_Polynomial_Basis::{_get_unisolvent_subset,_initialize_basis,poly,poly_dx,
+poly_dy,poly_dz}` 和
+`surfe_lib/grbf_exceptions.h@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `failurecreatinglagrangianpolynomialbasis`：
+
+- 选择使用第一个拥有严格最大点数的 interface group；x/y/z 分别复用冻结 indexed sort，
+  再从最大 range 轴取两端、从次大 range 轴取排除两端后的两端。GeoRBF 暴露所选 group
+  与四个原始组内索引作为离散证据。
+- 冻结三个最大轴判断是独立 `if`，不是 `else if`。最大 range 精确并列时会累计多于四点
+  并抛出 Lagrangian 构造错误；即使四个输入点在数学上本可 unisolvent，Rust 仍保留该
+  有效可观察的拒绝分支。
+- 若初选四点全落在 x、y 或 z 常量平面，冻结路径先按原输入顺序尝试替换最后一点；仍
+  找不到不同坐标时，对所选副本的第一个点在对应轴加精确 `Epilson = 1e-3`。Rust 保留
+  这一合成点、原始索引和后续系数结果，不修改调用方的约束。
+- 一阶四函数的 `[constant,x,y,z]` 系数、求值运算顺序和常量导数按源码显式行列式公式
+  移植；level 与 `c` 不进入 polynomial，且任何非零、有限行列式都会尝试，不按大小或
+  条件数预拒绝。`1e-12` 尺度的近共面用例与冻结 probe 仍逐位一致并成功。
+- 冻结路径不检查一般斜共面、共线或重复选择的零行列式；probe 实测构造返回后 basis
+  含非有限值。此类输入不能形成可用 Lagrangian basis，GeoRBF 不传播 NaN/Inf，而统一
+  返回 `Error::LagrangianBasisCreationFailure`。空组、最大组少于四点和并列最大轴则与
+  冻结源码本来就抛出的同一错误类别精确一致。
+
+这一安全拒绝只关闭冻结的非有限无效状态；所选点有效且行列式非零时，选择、系数、
+Kronecker 恒等式、导数和任意点求值均保持冻结数值语义。Modified Kernel 的消费仍归
+T14，本任务没有提前实现核消去组合。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

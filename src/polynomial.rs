@@ -6,6 +6,11 @@
 
 use crate::Point;
 
+#[path = "polynomial/lagrangian.rs"]
+mod lagrangian;
+
+pub use lagrangian::LagrangianPolynomialBasis;
+
 /// Polynomial orders implemented by frozen Surfe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolynomialOrder {

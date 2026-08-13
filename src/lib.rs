@@ -27,7 +27,7 @@ pub use parameters::{
     Parameters, RbfKernel, SecondDerivative, SolverType, DEGREES_TO_RADIANS, POSITION_EPSILON,
     RADIANS_TO_DEGREES,
 };
-pub use polynomial::{PolynomialBasis, PolynomialOrder};
+pub use polynomial::{LagrangianPolynomialBasis, PolynomialBasis, PolynomialOrder};
 pub use spatial::{
     average_nearest_neighbour_distance, bounds, closest_to_distance_index, constraints_to_points,
     distance_between_points, extremal_point_indices, farthest_from_other_set_index,
