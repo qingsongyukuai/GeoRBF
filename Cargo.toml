@@ -40,6 +40,7 @@ include = [
     "/tests/public_api.rs",
     "/tests/api_compat.rs",
     "/tests/error_compat.rs",
+    "/tests/greedy.rs",
     "/tests/spatial.rs",
 ]
 

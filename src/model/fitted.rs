@@ -17,7 +17,7 @@ use crate::{
     fit_single_surface_inequality, fit_single_surface_linear, fit_single_surface_restricted,
     fit_stratigraphic, fit_stratigraphic_restricted, fit_vector_field, spatial_metrics, BuildError,
     ConstraintError, Constraints, ContinuousPropertyError, ContinuousPropertyModel, DenseMatrix,
-    Error, LajaunieLinearError, LajaunieLinearModel, LajaunieRestrictedError,
+    Error, GreedyTrace, LajaunieLinearError, LajaunieLinearModel, LajaunieRestrictedError,
     LajaunieRestrictedModel, ModelType, Parameters, Point, SingleSurfaceInequalityError,
     SingleSurfaceInequalityModel, SingleSurfaceLinearError, SingleSurfaceLinearModel,
     SingleSurfaceRestrictedError, SingleSurfaceRestrictedModel, SpatialError, SpatialParameters,
@@ -241,6 +241,15 @@ impl FittedModel {
             Self::ContinuousProperty(model) => model.constraints(),
             Self::VectorField(model) => model.constraints(),
         }
+    }
+
+    /// Return the deterministic Greedy evidence for this public fit.
+    ///
+    /// Frozen `Surfe_API::ComputeInterpolant` never calls the source-only
+    /// Greedy loop, so the trace always has zero rounds even when the frozen
+    /// setter stored `use_greedy = true`.
+    pub fn greedy_trace(&self) -> GreedyTrace {
+        GreedyTrace::public_fit(self.parameters())
     }
 
     pub fn interface_reference_points(&self) -> Vec<[f64; 3]> {

@@ -23,6 +23,7 @@ mod constraints;
 mod error;
 mod functional;
 mod geometry;
+mod greedy;
 mod kernel;
 mod layout;
 mod model;
@@ -46,6 +47,10 @@ pub use functional::{
     DofLabel, FunctionalKernel, FunctionalPrimitive, FunctionalTerm, LinearFunctional,
 };
 pub use geometry::{ConstraintError, Point};
+pub use greedy::{
+    GreedyHookBody, GreedyModelAudit, GreedyRoundEvidence, GreedyStopReason, GreedyTrace,
+    GREEDY_MODEL_AUDIT,
+};
 pub use kernel::{
     AnisotropicKernel, AnisotropyError, IsotropicKernel, KernelError, KernelEvaluation,
     ModifiedKernel,

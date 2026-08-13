@@ -715,6 +715,47 @@ C++ 中分别是 `MissingInterpolant` 与 `InterpolantNeedsUpdate`，不可变 `
 非法状态移出可表达调用顺序；23 个冻结类别仍完整保留在 `Error::ALL` 中。T30 不审查或实现
 Greedy 的实际可达调用链，该范围仍由 T31 独立处理。
 
+## T31 Greedy 实际调用链与可达行为
+
+T31 完整复核
+`surfe_lib/surfe_api.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、
+`surfe_lib/modeling_methods.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、
+`surfe_lib/modelling_input.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`，以及五模型的
+`get_minimial_and_excluded_input`、`measure_residuals`、`append_greedy_input` 覆写。冻结公开
+调用链的结论是离散而明确的：`SetGreedyAlgorithm` 忽略传入 bool、写入
+`use_greedy=true` 和两个 uncertainty；随后 `ComputeInterpolant` 仍只执行清洗、input processing、
+method parameters、basis 和 solver，从不读取 `use_greedy`，也从不调用
+`run_greedy_algorithm`。pybind11 只暴露同一个 setter 和公开 fit。因此五模型公开拟合的实际
+Greedy trace 都是零轮，停止原因为“没有公开调用边”；启用前后的完整矩阵逐 bit 相同，标量和
+梯度也保持相同。GeoRBF 保留参数写入，并通过 `FittedModel::greedy_trace` 明确返回零轮证据；不把
+“忽略”误报为执行了收敛优化。
+
+冻结源码仍包含一个可由直接 C++ 类使用者手动调用的 source-only loop，但仓库声明/定义/调用集
+中 `run_greedy_algorithm()` 只有声明和定义，没有调用者。该 loop 的内部工厂只显式处理 Single、
+Lajaunie、Stratigraphic，其他枚举一律构造 Continuous Property，所以 Vector Field 会错误路由为
+Continuous Property。各模型 hook body 分类如下；`GREEDY_MODEL_AUDIT` 以
+`ModelType::ALL` 顺序机器固定该表：
+
+| Model | minimal | residual | append | source-only factory target |
+| --- | --- | --- | --- | --- |
+| Single Surface | 有函数体 | 有函数体 | 有函数体 | Single Surface |
+| Lajaunie | 有函数体 | 有函数体 | 有函数体 | Lajaunie |
+| Stratigraphic | TODO 恒定 `true` | TODO 恒定 `true` | TODO 恒定 `true` | Stratigraphic |
+| Continuous Property | 恒定 `true`，不填充输入 | 有函数体 | 有函数体 | Continuous Property |
+| Vector Field | TODO 恒定 `true` | TODO 恒定 `true` | TODO 恒定 `true` | Continuous Property |
+
+这些 body 不形成冻结公开能力，GeoRBF 不提供手动 Greedy executor，也不移植不可达的选择、残差和
+追加算法。否则会把 Stratigraphic/Vector 的 TODO 当作实现、把 Continuous 的空 minimal input
+当作有效初始集，并为冻结源码没有的 Vector factory 分支臆造语义。公开 fit 也不能因请求 Greedy
+而返回错误，因为冻结有效公开输入的实际结果是正常完整拟合；`GreedyStopReason::NotCalledBySurfeApi`
+承担不可达说明，类型层不存在可误调用的 executor。
+
+四个 residual selector 同样只有上述 source-only loop 的上游。Inequality selector 在接受首项后
+错误地 `pop_back` 最后一候选，Tangent selector 在空/低残差路径漏返回，并在嵌套循环中修改正在
+遍历的 vector；冻结全核心编译稳定报告 non-void 漏返回 warning。这些缺陷均先由源码与编译证据
+记录，再因没有公开调用边保持不可达；Rust 不复制 UB，也不“修好”后宣称获得新能力。
+`_output_greedy_debug_objects` 的 loop 调用被注释，且纯调试/可视化输出继续排除。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

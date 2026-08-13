@@ -407,8 +407,9 @@ impl Builder {
 
     /// Retain frozen Surfe's flag-writing setter.
     ///
-    /// T29 does not add a new Greedy algorithm. The frozen flag has no active
-    /// fitting consumer in the already migrated public paths.
+    /// The frozen public fit has no call edge to its source-only Greedy loop.
+    /// [`FittedModel::greedy_trace`](crate::FittedModel::greedy_trace) records
+    /// that compatible zero-round behavior.
     pub fn set_greedy_algorithm(
         &mut self,
         enabled: bool,
