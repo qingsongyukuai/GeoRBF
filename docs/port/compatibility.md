@@ -620,6 +620,34 @@ T27 没有开始 Vector Field 的 Planar Hessian、势函数或梯度模型；�
   T28 不加入 curl、divergence 或额外 Vector Field 能力；安全 Builder 与统一 FittedModel 仍归
   固定后继 T29。
 
+## T29 安全 Rust Builder 与 FittedModel
+
+- `Builder` 是拥有 `Parameters` 和四类约束的可变配置对象；`fit(&self)` 把清洗后的参数、约束、
+  kernel、矩阵和求解证据复制进新的不可变 `FittedModel`。拟合后继续修改或再次拟合 Builder
+  不会使既有模型 stale，也没有 `have_interpolant_`、裸指针或“配置已变但仍可评估”的中间状态。
+  评估 API 只存在于 fitted 类型，因此冻结 `check_interpolant` 的非法调用顺序在 Rust 类型层即
+  不可表达；`FittedModel: Send + Sync`，多线程只读评估不共享可变 kernel。
+- 五模型公共分派为 Single Surface 的 linear/ordinary inequality/restricted、Lajaunie 的
+  linear/restricted、Stratigraphic 的 ordinary/restricted、Continuous Property linear 和 Vector
+  Field linear。restricted 与两个 Stratigraphic 变体的统一公共求值保持冻结
+  `Surfe_API::ComputeInterpolant` 的实际行为：评估已拟合 Modified-Kernel source field；冻结公共
+  调用链没有进入单独存在的 `convert_modified_kernel_to_rbf_kernel`。Vector Field 的 scalar 入口
+  是势函数；Continuous Property 和 Vector Field 的 `GetNumberOfInterfaces`/reference points
+  继续返回 `0`，因为冻结 `process_input_data` 没有建立 interface reference 集。
+- 类型化单点 API 接受有限 `Point`，slice 批量允许惯用 Rust 的空批并保持输入顺序；动态兼容入口
+  严格要求非空 `n x 3`，与冻结批量维数检查一致。四类动态约束表要求非空 `n x 4` 或 `n x 6`；
+  Rust 先完整验证临时值再原子替换，因此错误行不会复制冻结 setter 先清空旧数据的破坏性状态。
+  getter 返回拥有的矩阵快照，不暴露内部矩阵或权重的可变引用。
+- 冻结 `Surfe_API::SetTangentConstraints` 的有效一行 probe 确认其调用
+  `AddPlanarConstraintwNormal`，结果为 `planars=1,tangents=0`。安全 Rust 的同名语义入口按
+  头文件文档把六列向量写入 Tangent，而不复制这一错误目标；
+  该差异不改变任何正确使用 `AddTangentConstraint` 的数值结果。`SetRegressionSmoothing` 和
+  `SetGreedyAlgorithm` 忽略 bool 并置 `true` 的离散兼容语义仍保留；Greedy flag 在 T29 已迁移
+  模型中没有活动消费者，完整调用链审查仍属于 T31。
+- 五个冻结 public API smoke 的 scalar/gradient 单点与批量已固定并由统一 Rust API 比较；所有
+  单点/批量对逐项一致。T29 只封装 T22–T28 已完成能力，不增加 FFI、curl/divergence、Greedy
+  补全或新的数值路径；名称、全部默认与错误分类组合矩阵仍归固定后继 T30。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

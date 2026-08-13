@@ -1,6 +1,7 @@
 //! Model-specific deterministic layout builders.
 
 pub(crate) mod continuous_property;
+pub(crate) mod fitted;
 pub(crate) mod lajaunie;
 pub(crate) mod reconstruct;
 pub(crate) mod single_surface;

@@ -1,20 +1,19 @@
 #![forbid(unsafe_code)]
 //! GeoRBF is a pure-Rust port of the non-visual core of Surfe.
 //!
-//! The crate currently exposes Surfe-compatible parameters, stable error
-//! categories, safe geological constraint values, and deterministic constraint
-//! cleaning/grouping, spatial helpers, fixed-order polynomial bases, and
-//! isotropic radial kernels, frozen global anisotropy, modified kernels, and
-//! model-independent linear functionals plus deterministic five-model
-//! row/column layouts, dense system assembly, and partial-pivot LU solving.
-//! The ordinary and restricted-range LOQO-style predictor-corrector
-//! quadratic-programming paths are also available with iteration and
-//! feasibility evidence, together with the frozen QP-to-ordinary-RBF
-//! reconstruction path and its second LU solve.
-//! Mathematical and modelling modules are added in the dependency order fixed
-//! by the port plan.
+//! [`Builder`] is the safe public fitting entry point. It owns parameters and
+//! geological constraints, validates dynamic compatibility tables, and returns
+//! an immutable [`FittedModel`] snapshot. Fitted models dispatch all five Surfe
+//! model kinds and support scalar and gradient evaluation for one point or an
+//! ordered batch. Because evaluation has no shared mutable kernel state, a
+//! fitted model can be read concurrently through ordinary Rust `Send + Sync`
+//! ownership.
+//!
+//! Lower-level model, assembly, solver, kernel, polynomial, and spatial APIs
+//! remain available for parity inspection and advanced use.
 
 mod assembly;
+mod builder;
 mod constraints;
 mod error;
 mod functional;
@@ -32,6 +31,7 @@ pub use assembly::{
     assemble_system, AssembledSystem, AssemblyConstraints, AssemblyError, BoundedConstraintSystem,
     ConstraintSystem, DenseMatrix, DenseVector,
 };
+pub use builder::{BuildError, Builder};
 pub use constraints::{
     CollocationRemoval, Constraints, Inequality, Interface, InterfaceGrouping, Planar, Polarity,
     Tangent,
@@ -52,6 +52,7 @@ pub use layout::{
 pub use model::continuous_property::{
     fit_continuous_property, ContinuousPropertyError, ContinuousPropertyModel,
 };
+pub use model::fitted::{EvaluationError, FitBranch, FittedModel};
 pub use model::lajaunie::{
     fit_lajaunie_linear, fit_lajaunie_restricted, fit_lajaunie_restricted_with_options,
     LajaunieIsoValueEvidence, LajaunieLinearError, LajaunieLinearModel,
