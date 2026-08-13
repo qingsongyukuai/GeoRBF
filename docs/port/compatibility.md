@@ -60,6 +60,32 @@ T06 还逐项映射了
 `std::string` 却未自行包含 `<string>`；oracle 探针按冻结构建的包含顺序补齐标准头，未修改
 reference，也未把这一编译卫生缺陷复制到 Rust。
 
+### T07 约束几何与安全输入边界
+
+T07 完整核对了
+`surfe_lib/modelling_input.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `Point`、`Interface`、`Inequality`、`Planar`、`Tangent` 构造与方向方法，并补充核对
+`surfe_lib/surfe_api.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的 azimuth 入口：
+
+- 坐标、`c`、level、scalar/vector field 均由拥有所有权且初始化的 Rust 值保存；不复制
+  冻结默认构造函数的未初始化字段。Planar normal bounds 和 Tangent angle bounds 在
+  C++ 中设置前未初始化，Rust 用 `Option` 明确表示“尚未计算”。
+- normal 到方向的换算保持 `dip=acos(nz)`、`dip_direction=atan2(ny,nx)`、负方位角加
+  360°、`strike=360°-dip_direction`；只有 `nz < 0` 是 overturned。strike/dip 到 normal、
+  dip/strike vector 和四角 normal envelope 逐运算保留冻结公式与度单位。
+- azimuth 是 dip direction；`azimuth >= 90°` 时 `strike=azimuth-90°`，否则
+  `strike=azimuth+270°`。公开文档限定 polarity 只能为 0 upright 或 1 overturned，Rust
+  用离散枚举拒绝其他整数。
+- 有效的非单位 normal/tangent 分量按原值保存，不做隐式归一化；只有角度构造产生的
+  normal 和 `getDipVector` 依冻结源码归一化。这样不会以“修复”改变传入方向对后续矩阵
+  的尺度影响。
+- 冻结 C++ 探针证实零 normal、零 tangent 和非有限坐标会被接受，`nz > 1` 会令 dip
+  成为 NaN。它们不属于有效输入；Rust 分别返回 `ZeroNormal`、`ZeroTangent`、
+  `NonFiniteInput` 或 `NormalZOutOfRange`，不把 NaN/未定义状态带入后续数学路径。
+
+T07 不实现 `Point` 排序/同点判定、空间算法、残差 Greedy 行为、reconstruction setter、
+矩阵、求解或 fitted model；这些仍由 T08/T09/T21/T29/T31 的既有任务关闭。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

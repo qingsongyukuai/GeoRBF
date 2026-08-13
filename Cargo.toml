@@ -13,6 +13,7 @@ include = [
     "/LICENSE",
     "/src/**",
     "/tests/common/**",
+    "/tests/constraints_geometry.rs",
     "/tests/fixtures/schema/**",
     "/tests/parameters_compat.rs",
     "/tests/protocols.rs",
