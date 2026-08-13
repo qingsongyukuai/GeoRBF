@@ -4,12 +4,14 @@
 //! The crate currently exposes Surfe-compatible parameters, stable error
 //! categories, safe geological constraint values, and deterministic constraint
 //! cleaning/grouping, spatial helpers, fixed-order polynomial bases, and
-//! isotropic radial kernels and frozen global anisotropy.
+//! isotropic radial kernels, frozen global anisotropy, modified kernels, and
+//! model-independent linear functionals.
 //! Mathematical and modelling modules are added in the dependency order fixed
 //! by the port plan.
 
 mod constraints;
 mod error;
+mod functional;
 mod geometry;
 mod kernel;
 mod ordering;
@@ -22,6 +24,9 @@ pub use constraints::{
     Tangent,
 };
 pub use error::Error;
+pub use functional::{
+    DofLabel, FunctionalKernel, FunctionalPrimitive, FunctionalTerm, LinearFunctional,
+};
 pub use geometry::{ConstraintError, Point};
 pub use kernel::{
     AnisotropicKernel, AnisotropyError, IsotropicKernel, KernelError, KernelEvaluation,
