@@ -55,7 +55,9 @@ pub use model::reconstruct::{
     ReconstructionResult, ReconstructionSourceSolution, ReconstructionStage,
 };
 pub use model::single_surface::{
-    fit_single_surface_linear, SingleSurfaceLinearError, SingleSurfaceLinearModel,
+    fit_single_surface_inequality, fit_single_surface_inequality_with_options,
+    fit_single_surface_linear, SingleSurfaceInequalityError, SingleSurfaceInequalityEvidence,
+    SingleSurfaceInequalityModel, SingleSurfaceLinearError, SingleSurfaceLinearModel,
 };
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{

@@ -31,6 +31,7 @@ include = [
     "/tests/qp_loqo.rs",
     "/tests/reconstruct.rs",
     "/tests/single_surface_linear.rs",
+    "/tests/single_surface_inequality.rs",
     "/tests/spatial.rs",
 ]
 

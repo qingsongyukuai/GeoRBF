@@ -429,6 +429,36 @@ T21 维持 dense 重装配的 `O(n^2)` 存储/计算结构和 partial-pivot LU �
 没有引入外部依赖或近似算法；这里只报告 release 构建/测试证据，不提前宣称 T33 性能结论，
 也不实现 T22 的具体模型 API。
 
+## T23 Single Surface inequality / ordinary QP
+
+- 冻结公开流水线在清洗和 exact interface grouping 后，只要存在 inequality 且未启用
+  restricted range，就关闭 polynomial、设置 `modified_basis=true`，以已有普通或全局各向异性
+  RBF 和多点 interface groups 构造 Modified Kernel。GeoRBF 的 T23 模型入口复用 T08、T13、
+  T14、T16、T17 和 T19，不新增或改变 Modified Kernel 算法；restricted-range/LOQO、QP 后
+  线性重建和最终普通核场仍严格留给 T24。
+- 自由度保持 `inequality -> interface -> planar(x,y,z) -> tangent`。equality 是 matrix 的
+  inequality 前缀之后全部行；inequality row 对正 level 保持原符号，对零或负 level 逐元素
+  取负，RHS 始终为零。因此可观察约束分别为 `s(x)>=0` 与 `s(x)<=0`，零 level 明确走
+  non-positive 分支；没有用解后裁剪替代 QP。
+- 拟合结果保存清洗计数、interface grouping、完整 interpolation/equality/inequality matrix 与
+  RHS、T19 全部迭代/KKT/目标/残差证据。每个 inequality 另保存原 level、row sign、冻结
+  类别顺序计算的 scalar、assembled `C*x-d`、solver primal slack 和 dual multiplier。
+  `active_within_solver_tolerance` 只是基于 T19 最终 inequality threshold 的诊断，不参与
+  求解、筛选或重建；这与冻结源码没有 active-set filter 的事实一致。
+- scalar 按 inequality、interface、planar、tangent 四个独立和相加；gradient 先在同一和中
+  依序累加 inequality/interface，再加 planar 与 tangent。批量入口逐点复用单点定义并保持
+  顺序。普通、全局各向异性、regression smoothing 和 tangent equality 的完整 matrix/RHS
+  与冻结 probe 逐 binary64 bit 一致；QP 权重按 T04 只作诊断，目标、可行性、scalar 和
+  gradient 使用各自分层阈值判断。
+- 一个 negative inequality 与正 level interface 位于同一点的矛盾模型，在冻结 C++ 的无上限
+  `quadratic_solver` 中两次外部 3 秒边界均未终止。GeoRBF 不复制该不终止行为：仍实际进入
+  predictor-corrector 并保留 KKT/candidate evidence，随后以 T19 的稳定
+  `PredictorCorrectorSolverFailure` 外层类别安全失败。显式 `QpOptions` 只控制安全上限，
+  不放宽冻结成功条件或改变有效可收敛数据的结果。
+
+T23 没有调用 T21 重建 seam，也没有将 QP weights 伪装成普通 RBF 线性解；这些完整
+restricted/modified/reconstruct 路径只能由后继 T24 关闭。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
