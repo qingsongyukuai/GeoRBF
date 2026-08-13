@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pure-rust:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install stable Rust quality components
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Lint all targets and features
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test all targets and features
+        run: cargo test --all-targets --all-features
+      - name: Test documentation
+        run: cargo test --doc --all-features
+      - name: Test the pure-Rust guard
+        run: python -m unittest -v tests/test_pure_rust_guard.py
+      - name: Audit dependencies and package contents
+        run: python tools/audit_pure_rust.py
+      - name: Record the all-feature dependency tree
+        run: cargo tree --all-features
+      - name: Check package contents
+        run: cargo package --list --locked

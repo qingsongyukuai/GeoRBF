@@ -1,10 +1,10 @@
 //! Dependency-free foundations for Surfe golden-fixture parity tests.
 //!
-//! GeoRBF does not have a Cargo project yet.  This module therefore uses only
-//! the Rust standard library and can be exercised directly with
-//! `rustc --test tests/common/parity/mod.rs`.  It parses canonical fixture JSON,
+//! This module uses only the Rust standard library. Cargo exercises it through
+//! `tests/protocols.rs`; it can also be run directly with
+//! `rustc --test tests/common/parity/mod.rs`. It parses canonical fixture JSON,
 //! validates the v1 envelope, and supplies the frozen numeric comparison
-//! profiles.  It never discovers or launches the external C++ oracle.
+//! profiles. It never discovers or launches the external C++ oracle.
 
 pub const FIXTURE_SCHEMA: &str = "georbf-surfe-golden";
 pub const FIXTURE_SCHEMA_VERSION: u32 = 1;

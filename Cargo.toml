@@ -1,0 +1,26 @@
+[package]
+name = "georbf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Pure-Rust geological radial basis function modelling"
+license = "MIT"
+repository = "https://github.com/qingsongyukuai/GeoRBF"
+publish = false
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/src/**",
+    "/tests/common/**",
+    "/tests/fixtures/schema/**",
+    "/tests/protocols.rs",
+]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

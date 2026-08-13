@@ -1,2 +1,5 @@
 .cache/surfe-reference/
 .cache/surfe-oracle/
+/target/
+__pycache__/
+*.py[cod]
