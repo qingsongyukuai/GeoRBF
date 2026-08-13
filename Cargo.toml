@@ -17,6 +17,7 @@ include = [
     "/tests/fixtures/schema/**",
     "/tests/ordering_grouping.rs",
     "/tests/parameters_compat.rs",
+    "/tests/polynomial.rs",
     "/tests/protocols.rs",
     "/tests/spatial.rs",
 ]
