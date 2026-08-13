@@ -14,6 +14,7 @@ include = [
     "/src/**",
     "/tests/common/**",
     "/tests/fixtures/schema/**",
+    "/tests/parameters_compat.rs",
     "/tests/protocols.rs",
 ]
 

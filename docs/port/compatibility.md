@@ -35,6 +35,31 @@ T04 之前没有正式 fixture/tolerance；因此 T00 只冻结策略，不声�
 不得用容差比较离散字段，不得额外接受大小写变体、别名或自动修复的配置。字符串和
 默认值的最终表由 T06/T30 固定。
 
+### T06 参数、名称与异常映射
+
+T06 对 `surfe_lib/modelling_parameters.h@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+和 `surfe_lib/surfe_api.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 做了以下离散固定：
+
+- `Parameter_Types` 的七组枚举保持声明顺序；`Parameters`、`InternalParameters` 和
+  `InputParameters` 保持逐字段默认值。Rust 使用安全的值类型和拥有所有权的字符串，
+  不复制 C++ ABI 或内存布局。
+- `SetRBFKernel(const char*)` 只接受源码中的九个逐字节精确名称：`r3`、`WendlandC2`、
+  `r`、`Gaussian`、`Multiquadratics`、`Multiquadratics3`、`Thin Plate Spline`、
+  `Inverse Multiquadratics`、`MaternC4`。不修剪空白、不忽略大小写、不增加别名。
+- 公开 `Surfe_API(int)` 的模型代码固定为 1 Single Surface、2 Lajaunie、3 Vector
+  Field、4 Stratigraphic Horizons、5 Continuous Property；这与 `ModelType` 中后三项的
+  声明顺序不同。GeoRBF 的模型文本形式只使用冻结 C++ 枚举标识符并精确往返；冻结
+  Surfe 本身没有接受模型字符串的公开入口，因此这不是对 Surfe 输入集合的扩张。
+- `SetRegressionSmoothing` 和 `SetGreedyAlgorithm` 忽略传入布尔值并无条件把对应字段写为
+  `true` 的源码行为由参数级兼容测试固定；这不表示 Greedy 调用链已可达，后者仍归 T31。
+
+T06 还逐项映射了
+`surfe_lib/grbf_exceptions.h@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的 23 个具体
+异常类。Rust 代码以 `Error` 枚举类别匹配；C++ 类名、原始 `what()` 文本和
+`SurfeExceptions` 的嵌套文本仅作为可追踪诊断证据，不作为程序化类别。冻结头文件使用
+`std::string` 却未自行包含 `<string>`；oracle 探针按冻结构建的包含顺序补齐标准头，未修改
+reference，也未把这一编译卫生缺陷复制到 Rust。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
