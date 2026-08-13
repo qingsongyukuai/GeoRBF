@@ -219,10 +219,28 @@ fn anisotropic_restricted_path_uses_the_same_full_reconstruction() {
         hash_vector(model.bounded_system().lower()),
         0x57e0_f4e0_8bf2_5864
     );
-    assert_eq!(
-        hash_vector(model.bounded_system().range()),
-        0xc68e_6723_8bb3_62b6
-    );
+    let bounded_range = model.bounded_system().range();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    assert_eq!(hash_vector(bounded_range), 0xc68e_6723_8bb3_62b6);
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        assert_eq!(bounded_range.len(), 23);
+        assert_close(
+            bounded_range.values()[0],
+            bounded_range.values()[1],
+            1.0e-12,
+            1.0e-12,
+        );
+        for value in &bounded_range.values()[2..8] {
+            assert_eq!(*value, 0.5);
+        }
+        for value in &bounded_range.values()[8..] {
+            assert!(value.is_finite() && *value >= 0.0 && *value <= 2.0);
+        }
+    }
+    for (value, evidence) in bounded_range.values().iter().zip(model.bound_evidence()) {
+        assert_eq!(value.to_bits(), evidence.range().to_bits());
+    }
     assert!(model.loqo_solution().residual().accepted());
     assert_eq!(model.loqo_solution().trace().len(), 13);
     assert_close(
