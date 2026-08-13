@@ -67,6 +67,12 @@ pub use model::single_surface::{
     SingleSurfaceLinearModel, SingleSurfaceRestrictedBoundEvidence, SingleSurfaceRestrictedError,
     SingleSurfaceRestrictedModel,
 };
+pub use model::stratigraphic::{
+    fit_stratigraphic, fit_stratigraphic_restricted, fit_stratigraphic_restricted_with_options,
+    fit_stratigraphic_with_options, StratigraphicError, StratigraphicIsoValueEvidence,
+    StratigraphicLayerRelationEvidence, StratigraphicModel, StratigraphicRestrictedBoundEvidence,
+    StratigraphicRestrictedError, StratigraphicRestrictedModel,
+};
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{
     Axis, DerivativePoint, FirstDerivative, InputParameters, InternalParameters, ModelType,

@@ -34,6 +34,7 @@ include = [
     "/tests/single_surface_inequality.rs",
     "/tests/single_surface_restricted.rs",
     "/tests/lajaunie.rs",
+    "/tests/stratigraphic.rs",
     "/tests/spatial.rs",
 ]
 

@@ -521,8 +521,38 @@ reference/increment/iso-value 模型入口。
   非一阶 restricted 输入在 reassembly 阶段安全失败。显式 LOQO options 只提供安全迭代上限，
   不放宽停止或 T20 后验可行性门槛。
 
-T25 没有开始 Stratigraphic Horizons 的层序、岩性 inequality 或最小层间约束；这些仍严格归
-固定后继 T26。
+## T26 Stratigraphic Horizons 层序与岩性约束
+
+- Stratigraphic 在四类别清洗和 exact-level 降序 grouping 后，严格分三段生成 difference：
+  相邻 horizon reference `level[j] - level[j+1]`，逐个 lithostratigraphic inequality 的最近
+  strict-above `reference - inequality` 与 strict-below `inequality - reference`，最后是每个
+  multi-point horizon 的 `reference - subsequent`。最顶/最底层之外的 inequality 只生成一个
+  邻层 pair，层间点生成两个；inequality level 与任一 horizon level exact 相同则按冻结
+  `check_input_data` 拒绝。GeoRBF 保留每个 pair 的端点、种类、source index 和顺序证据。
+- ordinary 分支把相邻 horizon 和 lithology rows 置于 inequality partition；前者 lower 为
+  `min_stratigraphic_thickness`，后者为零。same-level、planar 三分量和 tangent 置于 equality
+  partition。完整 source Modified matrix、两个 row partition 和 RHS 沿用 T17，T19 求解后保存
+  terminal feasibility、每个层序关系的 field increment 与 `row * weights` 交叉证据，并按每层
+  reference 更新 source iso value。
+- restricted 分支把所有 source rows 作为 `b <= A*x <= b+r`：相邻 horizon 为
+  `[min_thickness, largest_distance]`，lithology pair 为 `[0,min_thickness]`，same-level 为
+  `[-interface_uncertainty,+interface_uncertainty]`，planar/tangent 沿用冻结角度 bounds。每个
+  lower/range/upper 与原 layout dof 一一暴露；求解仍使用 T20 LOQO 和既有后验安全门槛。
+- 与 T21/T24/T25 相同，冻结公开 `ComputeInterpolant` 不调用
+  `convert_modified_kernel_to_rbf_kernel`。T26 将完整函数体作为显式安全结果保留：所有 pair
+  dof 继续存在，pair 两端 level、planar normal、tangent inner product 取 source Modified
+  field，切换 ordinary kernel，强制三项 truncated polynomial 后重新装配并执行 T18 LU，再次
+  更新每层 iso value。结果明确区分 source Modified 与 reconstructed ordinary 的 matrix、field
+  和 iso values。
+- 冻结 oracle 的三层 ordinary 零最小厚度用例通过；source/partition/final matrix 与 RHS 的
+  离散部分 exact，source/final scalar、gradient、iso values 和非唯一求解所得 reconstruction
+  RHS 按 T04 分层容差比较。相同三层 restricted 用例在冻结 LOQO 第 15 轮返回有限且 box
+  feasible 的 candidate，但 T20 dual residual 后验不合格；ordinary 正最小厚度代表用例也在
+  冻结停止后违反 T19 后验可行性。GeoRBF 保留 attempted/trace/candidate/residual 后类型化失败，
+  没有放宽共同安全阈值。单 horizon restricted 用例完整通过 LOQO、显式重建、第二次 LU 与
+  source/final field；最小厚度和 lithology bounds 仍由 exact RHS/bounds 测试固定。
+
+T26 没有开始 Continuous Property 的可达 RHS/field 行为；这些仍严格归固定后继 T27。
 
 ## 数值行为
 
