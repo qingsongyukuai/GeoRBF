@@ -11,11 +11,10 @@
 上游还明确指出 Canada wordmark/相关图形不获授权复用，第三方软件权利归各自权利人。
 GeoRBF 不迁移 wordmark、相关图形、上游截图或第三方 submodule 内容。
 
-GeoRBF 根 `LICENSE` 当前是项目自身的 MIT 文本和 2026 项目版权声明。T00 不把上游
-源码或实质性源码副本加入仓库，因此不改写根许可证。只要后续提交包含翻译、改编或
-其他可能构成上游源码实质性部分的内容，就必须同时保留上游 2017 Government of
-Canada MIT notice；最终 NOTICE/许可证布局和发布包复核由 T34 完成。不得以“纯 Rust
-重写”为理由删除适用的上游 notice。
+GeoRBF 根 `LICENSE` 是项目自身的 MIT 文本和 2026 项目版权声明。纯 Rust 翻译与
+改编保留上游 2017 Government of Canada MIT notice：T34 在根 `NOTICE` 收录固定提交、
+排除项、上游版权声明和完整 MIT 文本，并由 Cargo package allowlist 强制随源码发布。
+不得以“纯 Rust 重写”为理由删除适用的上游 notice。
 
 本结论是仓库内迁移规则，不替代针对发布场景的专业法律意见。
 
@@ -77,6 +76,17 @@ reference/oracle 唯一允许的位置为外部 `SURFE_REFERENCE_DIR`、`../surf
 忽略的 `.cache/surfe-reference`/`.cache/surfe-oracle`。它们仅允许被显式 oracle、
 fixture 生成和 benchmark 命令调用，不能被 `build.rs`、Cargo feature、测试自动发现
 逻辑或发布脚本设为成功前置条件。
+
+## 最终许可证与发布布局
+
+- `LICENSE`：GeoRBF 自身的 2026 MIT 许可证；`Cargo.toml` 的 SPDX 表达为 `MIT`。
+- `NOTICE`：冻结 Surfe 2017 Government of Canada notice 与完整 MIT 条款；同时明确
+  Canada wordmark、相关图形、第三方 submodule 和可视化代码未进入 GeoRBF。
+- `README.md`：面向用户的安全 Rust lifecycle、范围、证据链接与许可证入口。
+- `docs/port/source-traceability.md`：每个生产 Rust 模块到精确 Surfe `path@commit` 的
+  唯一映射；Eigen 源只作为冻结数值路径证据，没有 vendored、链接或打包。
+
+上述四类文件均由 `tests/test_release_audit.py` 和 `cargo package --list` 机器检查。
 
 ## 发布包与审计判定
 

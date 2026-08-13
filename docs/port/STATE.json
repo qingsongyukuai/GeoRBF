@@ -5,7 +5,7 @@
   "source_commit": "290dbe0ab344f4258a4935f05cad0f153f0f69a4",
   "target_repository": "current GeoRBF repository",
   "status": "ready",
-  "active_task": null,
+  "active_task": "T34",
   "next_task": "T34",
   "completed_tasks": [
     "INIT",
