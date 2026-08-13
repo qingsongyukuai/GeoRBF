@@ -19,6 +19,7 @@ include = [
     "/tests/ordering_grouping.rs",
     "/tests/parameters_compat.rs",
     "/tests/lagrangian.rs",
+    "/tests/layouts.rs",
     "/tests/modified_kernel.rs",
     "/tests/anisotropic_kernels.rs",
     "/tests/isotropic_kernels.rs",
