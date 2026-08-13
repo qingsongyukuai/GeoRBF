@@ -554,6 +554,48 @@ reference/increment/iso-value 模型入口。
 
 T26 没有开始 Continuous Property 的可达 RHS/field 行为；这些仍严格归固定后继 T27。
 
+## T27 Continuous Property 实际可达行为
+
+- 冻结公开工厂的稳定可达子集只有 interface-value 插值：四类别先分别执行排序/同点
+  清洗，`process_input_data` 要求至少一个 interface，随后 `get_method_parameters` 把
+  `n_interface` 设为清洗后 interface 数量，并无条件把 inequality/planar/tangent、polynomial
+  与 Modified Kernel 计数/标志设为零。矩阵和 RHS 因而只有按清洗后顺序排列的
+  `K(interface_i,interface_j)` 与原始 interface level；没有 exact-level grouping、reference
+  point 或 increment 语义。GeoRBF 复用 T16/T17 layout/assembly 和 T18 partial-pivot LU，
+  保存完整 matrix、RHS、weights、pivot 与 residual 证据。
+- 冻结 `Continuous_Property::get_equality_values` 按 interface 数量分配 `VectorXd`，却继续
+  遍历实际 planar/tangent 容器并写入其分量。公开 `Surfe_API` 可添加这两类约束，因此这是
+  可达的越界缺陷，不是模型能力。未定义行为之前先由开启 Eigen bounds assertion 的冻结
+  public-API probe 固定：各加入一个 planar 或 tangent 后，两个 `ComputeInterpolant` 用例均在
+  `DenseCoeffsBase::operator()` 的 `index < size()` assertion 处以状态 134 终止。Rust 不执行
+  越界写，返回带两个 source count 的 `ContinuousPropertyError::EqualityVectorOutOfBounds`；
+  interface-only 有效输入的矩阵、求解和场不受该安全差异影响。
+- inequality 容器会参与其自身清洗但 `n_inequality=0`，不会进入 matrix、RHS、weights 或
+  field。`polynomial_order`、regression smoothing、restricted range 和 `use_greedy` 同样不被
+  Continuous Property 的公开拟合调用链消费。冻结 public-API probe 对基线与同时设置两条
+  inequality、二阶 polynomial、smoothing、restricted range 和 Greedy 的用例得到逐 bit 相同
+  scalar/gradient；直接模型证据的 matrix/RHS/weights 也完全相同。GeoRBF 接受并保存这些
+  inactive 配置/inequality 快照，但 internal layout 明确保持 linear、non-modified、zero-poly，
+  没有为对称性补写 QP、LOQO、smoothing 或 polynomial 能力。
+- `create_polynomial_basis` 与两个 polynomial block helper 因活动路径恒为 `poly_term=false`、
+  `n_poly_terms=0` 而不可达；`convert_modified_kernel_to_rbf_kernel` 只是标注 `To IMPLEMENT` 的
+  恒定 `true` 内联体。GeoRBF 不暴露这些为已实现操作。`get_minimial_and_excluded_input` 的
+  intended body 被注释且当前恒定 `true`，`measure_residuals/append_greedy_input` 只有无公开根
+  调用的 `run_greedy_algorithm` 上游；这些 Greedy 钩子仍严格留给 T31，不在 T27 宣称完成。
+- 普通 isotropic 九核的 value matrix 都沿用 T12；Linear value 可拟合，gradient 仍返回冻结
+  `-666` 对应的 `LinearDerivativeUnavailable`。全局各向异性在无 planar 的有效 interface-only
+  输入上先于 solver 失败为 insufficient planars；提供 planar 使 anisotropy 可能构造成功后仍
+  落入上述 RHS 越界，因此不存在可安全宣称的冻结 anisotropic Continuous Property fit。
+- 标量按冻结 `0 + interface_sum + 0 + 0 + 0` 次序求值，梯度按 x/y/z 和 interface 顺序使用
+  对第一核参数的导数。GeoRBF 使用不可变 kernel 逐次求值，消除冻结 vector evaluation 对共享
+  `kernel` 的写数据竞争，同时保持有效串行 binary64 数学与批量输入顺序；最终公共并发 API
+  仍由 T29 统一验收。Cubic 五点冻结证据的 matrix/RHS/weights hash 分别为
+  `62531c8ae9a7fb27`/`cbfe51c8e0af6568`/`793c4439db53b5ac`，LU residual 为
+  `0x1.ep-50`；两个见证点的 scalar/gradient 通过 T04 分层阈值，公开 API 与直接模型结果逐
+  bit 相同。
+
+T27 没有开始 Vector Field 的 Planar Hessian、势函数或梯度模型；这些仍严格归固定后继 T28。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

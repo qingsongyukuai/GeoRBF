@@ -49,6 +49,9 @@ pub use layout::{
     constraint_layout, ConstraintLayout, DifferenceKind, IndexRange, LayoutDof, LayoutPartitions,
     LayoutPointRef, LayoutRole, LayoutSection, LayoutSectionKind, SourceConstraintCounts,
 };
+pub use model::continuous_property::{
+    fit_continuous_property, ContinuousPropertyError, ContinuousPropertyModel,
+};
 pub use model::lajaunie::{
     fit_lajaunie_linear, fit_lajaunie_restricted, fit_lajaunie_restricted_with_options,
     LajaunieIsoValueEvidence, LajaunieLinearError, LajaunieLinearModel,
