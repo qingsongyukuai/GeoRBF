@@ -338,6 +338,35 @@ T17 冻结 probe 对五模型普通路径、Single/Stratigraphic 普通 QP、三
   条件数门槛；失败仍保留 candidate weights 和 residual evidence。良态、Hilbert、奇异一致
   与确定性对角占优系统均通过。T18 不实现 T19/T20 的 QP/LOQO。
 
+## T19 普通 predictor-corrector QP 与后验可行性
+
+- `Quadratic_Predictor_Corrector` 将 interpolation matrix 逐项乘二作为 Hessian，然后调用
+  `Math_methods::quadratic_solver`；冻结模型路径注释掉 `validate_matrix_systems()` 调用。
+  因此 Rust 单独保留 interpolation matrix 的有限性和 LLT 正定 evidence，但不把该结果
+  当作求解门槛。冻结 indefinite 与 `1e-14` 病态样例都实际进入 KKT/LU 路径，Rust 保持
+  相同分支和最终 binary64 weights。
+- 初始化严格保留零 `x/y/z/s`、`sqrt(H.maxCoeff())` 的 `z/s`、首次完整 affine step，随后
+  对 complementary variables 加 `1000 + 2*max_violation`；每轮 KKT、residual、predictor、
+  affine step、`mu_aff`、立方 `sigma`、corrector 和最终 step 均保持冻结循环及乘加次序。
+  `_find_step_length` 的符号分支、严格 `>1e-14` 和 unit cap 也逐控制流保留。LOQO 专用
+  `_find_step/_find_positivity_step` 已核对边界，但实现仍严格留给既有 T20。
+- 冻结停止顺序先检查 `iter > 5 && mu > prev_mu`，再检查 `mu < 1e-8`。Rust 保留两条分支，
+  并提供每轮 `mu`、目标、stationarity、equality/inequality residual、实际最小 slack、两种
+  step、`mu_aff` 和 `sigma`，以及每次 T18 KKT pivot/residual evidence。默认额外的 10000 轮
+  上限只防止冻结无上限循环；达到上限是明确失败，不放宽停止规则制造成功。
+- 冻结函数在 `nc=0` 时会除以零并索引空 `max_violation_list`；Rust 对缺少 inequality 的
+  ordinary-QP 请求安全返回 `MissingInequalities`。其他空/维数/非有限错误也安全分类，
+  外层稳定映射 `Error::PredictorCorrectorSolverFailure`，不复制 Eigen assertion 或无限循环。
+- 冻结不可行用例 `x=0` 且 `x>=1` 在 `mu` 从 `1005418.6277759355` 变为
+  `-1006.4220365718757` 后错误地返回成功、weights `[0]`、slack `-1`；该可观察行为先由
+  oracle 固定。另一个 indefinite 用例在第六轮 `mu` 从 `17.105335153876929` 回升至
+  `17.386342564804785` 后也返回不满足约束的成功 candidate。Rust 精确保留停止分支、trace
+  和 candidate，再依据 T04 residual/feasibility 规则返回 `InfeasibleSolution`，不把源缺陷
+  宣称为有效成功。
+- 对有限且可行的非唯一系统不因退化预拒绝：冻结 zero-Hessian 样例产生 `[1,1000]`、零
+  objective 和零终止 `mu`，Rust 逐 bit 保留并以后验 residual/feasibility 接受。普通 QP
+  没有改用通用优化 crate，也没有实现 restricted-range/LOQO；后者仍仅归 T20。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

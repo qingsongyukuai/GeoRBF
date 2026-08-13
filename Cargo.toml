@@ -27,6 +27,7 @@ include = [
     "/tests/lu_solver.rs",
     "/tests/polynomial.rs",
     "/tests/protocols.rs",
+    "/tests/qp_predictor_corrector.rs",
     "/tests/spatial.rs",
 ]
 

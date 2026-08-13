@@ -23,6 +23,13 @@ pub struct DenseMatrix {
 }
 
 impl DenseMatrix {
+    /// Construct an owned matrix from row-major values when storage matches.
+    pub fn from_row_major(rows: usize, cols: usize, data: Vec<f64>) -> Option<Self> {
+        rows.checked_mul(cols)
+            .is_some_and(|length| length == data.len())
+            .then_some(Self { rows, cols, data })
+    }
+
     pub fn zeros(rows: usize, cols: usize) -> Self {
         Self {
             rows,
@@ -133,7 +140,7 @@ impl DenseVector {
         self.values.get(index).copied()
     }
 
-    pub(crate) fn from_values(values: Vec<f64>) -> Self {
+    pub fn from_values(values: Vec<f64>) -> Self {
         Self { values }
     }
 }
@@ -146,7 +153,7 @@ pub struct ConstraintSystem {
 }
 
 impl ConstraintSystem {
-    pub(crate) const fn new(matrix: DenseMatrix, values: DenseVector) -> Self {
+    pub const fn new(matrix: DenseMatrix, values: DenseVector) -> Self {
         Self { matrix, values }
     }
 
