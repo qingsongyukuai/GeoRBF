@@ -5,6 +5,11 @@
 //! - `surfe_lib/modelling_input.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
 //! - `surfe_lib/surfe_api.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
 
+mod grouping;
+
+pub use crate::ordering::CollocationRemoval;
+pub use grouping::InterfaceGrouping;
+
 use crate::{
     geometry::{is_zero_vector, require_finite},
     ConstraintError, Point, DEGREES_TO_RADIANS, RADIANS_TO_DEGREES,
@@ -504,9 +509,7 @@ impl Tangent {
     }
 }
 
-/// The four constraint categories, kept separate and insertion ordered.
-///
-/// Sorting, collocation, and grouping intentionally remain in later port tasks.
+/// The four constraint categories, kept separate as in frozen Surfe.
 #[derive(Clone, Debug, Default)]
 pub struct Constraints {
     pub inequalities: Vec<Inequality>,

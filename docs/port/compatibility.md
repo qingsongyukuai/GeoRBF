@@ -86,6 +86,35 @@ T07 完整核对了
 T07 不实现 `Point` 排序/同点判定、空间算法、残差 Greedy 行为、reconstruction setter、
 矩阵、求解或 fitted model；这些仍由 T08/T09/T21/T29/T31 的既有任务关闭。
 
+### T08 排序、同点、去重与 level/reference 分组
+
+T08 核对了
+`surfe_lib/modelling_input.h@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、
+`surfe_lib/modeling_methods.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 和
+`math_lib/math_methods.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 的实际离散语义：
+
+- `Point::operator<` 只按 x、y、z 做逐坐标精确字典序，不读取 `c` 或约束 payload；
+  `-0.0` 与 `+0.0` 比较相等。冻结源码不存在计划提示的 `Point::operator==`，实际同点
+  判定是自由函数 `collocated`：三个轴的绝对差必须各自严格小于 `Epilson=1e-3`，恰在
+  边界即不是同点。
+- 四类约束各自排序后各自执行相邻 `std::unique(collocated)`；绝不跨类别删除，也不把
+  非传递的同点关系改写成全局聚类。Rust 使用相同的“与最近保留项比较”语义，保留
+  排序后每段的第一项及其 level/normal/tangent payload。
+- C++ `std::sort` 没有规定比较等价项之间的顺序。冻结 g++ oracle 对 T08 重复矩阵保留
+  了输入中首个精确等价项；Rust 的稳定排序适配将这一结果变成跨平台确定规则，同时不
+  改变任何不同 `(x,y,z)` 点的源码顺序。冲突 payload 的精确同坐标重复不再依赖标准库
+  私有排序实现。
+- interface 和 inequality level 都只按 `==` 精确去重并从大到小排列，不使用容差；相邻
+  binary64 level 仍属于不同组。每个 interface level 的 reference 是清洗后位置顺序中的
+  首点。singleton level 仍保留 level/reference，但依冻结 `_get_interface_points` 从多点
+  组列表移除；同层自由度前置计数为每个保留多点组的 `len-1` 之和。
+- `Math_methods::sort_vector_w_index` 不是普通稳定排序。Rust 保留其 7 项 insertion
+  threshold、partition 调度、50 项显式栈、重复值和 signed-zero 的 value/index 联动顺序；
+  长度不匹配与冻结函数一样返回失败且不改输入。
+
+T08 不建立空间距离/最近邻、increment pair、模型 layout 或矩阵；这些仍分别属于
+T09、T15/T25/T26、T16 和 T17。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
