@@ -206,6 +206,44 @@ dxz,dyx,dyy,dyz,dzx,dzy,dzz}`：
 oblique interior；其全部有效结果与 Rust 测试逐位一致。各向异性、Modified Kernel 和
 统一 Value/Planar/Tangent 泛函仍分别归 T13、T14、T15，没有在 T12 提前实现。
 
+## T13 全局各向异性和 binary32 中间语义
+
+T13 完整核对了
+`surfe_lib/basis.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `RBFKernel::{get_global_anisotropy,scaled_radius,_Global_Plunge,_Transform}`，以及
+`ACubic/AGaussian/AMQ/ATPS/AIMQ/AR::{basis,dx_p1,dx_p2,dy_p1,dy_p2,dz_p1,
+dz_p2,dxx,dxy,dxz,dyx,dyy,dyz,dzx,dzy,dzz}`；同时核对了
+`surfe_lib/modeling_methods.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`
+的 `GRBF_Modelling_Methods::create_rbf_kernel` 各向异性工厂：
+
+- normal 外积的六个和先按 C++ `double` 输入顺序累加，再赋给 `Matrix3f`；GeoRBF 的纯
+  Rust 3×3 self-adjoint 路径保留冻结 Eigen 的 binary32 缩放、三对角化、隐式 QR、升序
+  特征值/向量配对和每步舍入，不以 binary64 特征分解替代。
+- `_Global_Plunge` 是最小特征值对应的第一列特征向量。冻结源码写入后没有任何读取点；
+  GeoRBF 只把它作为 parity/debug 证据暴露，不赋予新的模型含义。
+- 只有 `eVals(0)` 与 `eVals(1)` 在严格 `< 0.0001f` 时提升到 `0.0001f`；第三项不截断。
+  支持矩阵保持 `V * diag(1,sqrt(e1/e0),sqrt(e2/e0)) * V^T` 的 binary32 运算顺序。
+  数学上它是对称正半定，但冻结浮点乘法可让镜像项相差一个 f32 ULP；离散布局精确，
+  对称/正交性质按 T04 `anisotropy_f32` 层检查。
+- `scaled_radius` 只变换 x/y/z 差，不读取 `Point::c`；这与 T12 普通核半径包含 `c` 的
+  行为有意不同。后续一阶导数使用 `T^T(T delta)`，混合 Hessian 使用 binary32
+  `T` 列内积扩展到 binary64 后的冻结表达式。
+- 冻结工厂只有 Cubic、Gaussian、MQ、TPS、IMQ 和 R 六个各向异性类；启用 anisotropy
+  后请求 MQ3、WendlandC2 或 MaternC4 会进入 `unknown_rbf`，GeoRBF 明确返回
+  `AnisotropyError::UnsupportedKernel`，不臆造三个类。`AR::basis` 可用，而 15 个直接或
+  间接导数符号仍进入整数 `-666`；Rust 与 T12 一样返回
+  `KernelError::LinearDerivativeUnavailable`。
+- 少于两个 planar 与冻结 `failurecomputingglobalanisotropy` 对应。冻结源码不检查
+  eigensolver 状态且无条件返回 `true`；对有限 normal 导致 binary32 covariance/特征路径
+  非有限或不收敛的无效状态，GeoRBF 安全返回 `NonFiniteComputation` 或
+  `EigenSolverFailure`，不传播 NaN/Inf 支持矩阵。有效有限输入的数学结果不变。
+
+冻结 T13 probe 的 oblique case 对 eigenvalues、transform、plunge 逐 binary32 bit 固定；
+六个核的值路径和五个完整导数核的值、两点一阶导数、3×3 mixed Hessian 共 81 个
+binary64 输出与 Rust 逐位一致。单位协方差极限、退化/`0.0001f` 截断两侧、normal 统一
+缩放、支持矩阵对称性质及两层有限差分同时通过。Modified Kernel 和统一线性泛函仍分别
+归 T14/T15，T13 没有提前实现。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

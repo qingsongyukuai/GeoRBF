@@ -40,6 +40,20 @@ pub struct KernelEvaluation {
 }
 
 impl KernelEvaluation {
+    pub(super) const fn from_components(
+        basis: f64,
+        first_at_first: [f64; 3],
+        first_at_second: [f64; 3],
+        mixed_hessian: [[f64; 3]; 3],
+    ) -> Self {
+        Self {
+            basis,
+            first_at_first,
+            first_at_second,
+            mixed_hessian,
+        }
+    }
+
     pub const fn basis(self) -> f64 {
         self.basis
     }
@@ -325,12 +339,12 @@ impl IsotropicKernel {
                     self.mixed_second_derivative(first, second, axis, second_axis)?;
             }
         }
-        Ok(KernelEvaluation {
-            basis: self.basis(first, second),
+        Ok(KernelEvaluation::from_components(
+            self.basis(first, second),
             first_at_first,
             first_at_second,
             mixed_hessian,
-        })
+        ))
     }
 
     fn thin_plate_spline_diagonal(self, axis: usize, radius: f64, deltas: [f64; 3]) -> f64 {
