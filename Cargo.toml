@@ -30,6 +30,7 @@ include = [
     "/tests/qp_predictor_corrector.rs",
     "/tests/qp_loqo.rs",
     "/tests/reconstruct.rs",
+    "/tests/single_surface_linear.rs",
     "/tests/spatial.rs",
 ]
 

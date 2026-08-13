@@ -152,6 +152,22 @@ impl IsotropicKernel {
             return Ok(0.0);
         }
         let delta = deltas[axis_index(axis)];
+        if self.kind == RbfKernel::ThinPlateSpline {
+            if radius == 0.0 {
+                return Ok(0.0);
+            }
+            return Ok(match with_respect_to {
+                DerivativePoint::First => {
+                    delta * radius * radius + 4.0 * delta * radius * radius * radius.ln()
+                }
+                // Keep the two source subtractions instead of negating the
+                // point-one expression: they observably produce +0 for a
+                // zero component when the logarithmic term is -0.
+                DerivativePoint::Second => {
+                    -delta * radius * radius - 4.0 * delta * radius * radius * radius.ln()
+                }
+            });
+        }
         let derivative_at_first = match self.kind {
             RbfKernel::Cubic => 3.0 * radius * delta,
             RbfKernel::Gaussian => {
@@ -164,13 +180,7 @@ impl IsotropicKernel {
             RbfKernel::MultiquadricCubic => {
                 3.0 * delta * (self.parameter + radius * radius).powf(0.5)
             }
-            RbfKernel::ThinPlateSpline => {
-                if radius != 0.0 {
-                    delta * radius * radius + 4.0 * delta * radius * radius * radius.ln()
-                } else {
-                    0.0
-                }
-            }
+            RbfKernel::ThinPlateSpline => unreachable!("TPS derivatives return above"),
             RbfKernel::InverseMultiquadric => -delta / (self.parameter + radius * radius).powf(1.5),
             RbfKernel::WendlandC2 => {
                 20.0 * delta * (radius - self.parameter).powf(3.0) / self.parameter.powf(5.0)

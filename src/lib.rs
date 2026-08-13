@@ -54,6 +54,9 @@ pub use model::reconstruct::{
     ReconstructionDofMapping, ReconstructionError, ReconstructionPredictionWitness,
     ReconstructionResult, ReconstructionSourceSolution, ReconstructionStage,
 };
+pub use model::single_surface::{
+    fit_single_surface_linear, SingleSurfaceLinearError, SingleSurfaceLinearModel,
+};
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{
     Axis, DerivativePoint, FirstDerivative, InputParameters, InternalParameters, ModelType,
