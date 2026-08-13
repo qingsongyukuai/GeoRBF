@@ -63,6 +63,22 @@ pub enum RbfKernel {
 }
 
 impl RbfKernel {
+    /// Every frozen public kernel choice in C++ declaration order.
+    ///
+    /// This table lets compatibility tests prove that no public name branch is
+    /// silently omitted when the enum grows or is refactored.
+    pub const ALL: [Self; 9] = [
+        Self::Cubic,
+        Self::Gaussian,
+        Self::Multiquadric,
+        Self::MultiquadricCubic,
+        Self::InverseMultiquadric,
+        Self::ThinPlateSpline,
+        Self::Linear,
+        Self::WendlandC2,
+        Self::MaternC4,
+    ];
+
     /// The exact spelling accepted by `Surfe_API::SetRBFKernel(const char*)`.
     pub const fn surfe_name(self) -> &'static str {
         match self {
@@ -124,6 +140,15 @@ pub enum ModelType {
 }
 
 impl ModelType {
+    /// Every frozen model kind in C++ `ModelType` declaration order.
+    pub const ALL: [Self; 5] = [
+        Self::SingleSurface,
+        Self::LajaunieApproach,
+        Self::StratigraphicHorizons,
+        Self::ContinuousProperty,
+        Self::VectorField,
+    ];
+
     /// The frozen C++ enum identifier, used as GeoRBF's exact text form.
     pub const fn surfe_enum_name(self) -> &'static str {
         match self {

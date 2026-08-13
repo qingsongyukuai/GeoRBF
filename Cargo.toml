@@ -38,6 +38,8 @@ include = [
     "/tests/continuous_property.rs",
     "/tests/vector_field.rs",
     "/tests/public_api.rs",
+    "/tests/api_compat.rs",
+    "/tests/error_compat.rs",
     "/tests/spatial.rs",
 ]
 

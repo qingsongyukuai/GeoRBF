@@ -9,6 +9,11 @@
 //! fitted model can be read concurrently through ordinary Rust `Send + Sync`
 //! ownership.
 //!
+//! Public failures expose their frozen Surfe exception class through
+//! [`BuildError::surfe_category`] and [`EvaluationError::surfe_category`]. A
+//! `None` category identifies a deliberate safe-Rust rejection that had no
+//! stable C++ exception, so callers never need to classify diagnostic text.
+//!
 //! Lower-level model, assembly, solver, kernel, polynomial, and spatial APIs
 //! remain available for parity inspection and advanced use.
 

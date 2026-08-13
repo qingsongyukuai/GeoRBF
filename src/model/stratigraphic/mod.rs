@@ -8,7 +8,7 @@
 use std::fmt;
 
 use crate::{
-    assemble_system, reconstruct_from_qp_weights, solve_loqo_qp_with_options,
+    assemble_system, constraint_layout, reconstruct_from_qp_weights, solve_loqo_qp_with_options,
     solve_predictor_corrector_qp_with_options, AnisotropicKernel, AnisotropyError, AssembledSystem,
     AssemblyConstraints, AssemblyError, BoundedConstraintSystem, CollocationRemoval,
     ConstraintLayout, ConstraintSystem, Constraints, DenseMatrix, DenseVector, Error,
@@ -755,6 +755,8 @@ fn prepare(constraints: &Constraints, parameters: &Parameters) -> Result<Prepare
     let grouping = constraints
         .interface_grouping()
         .ok_or(PrepareError::Surfe(Error::NoInterfaceData))?;
+    constraint_layout(ModelType::StratigraphicHorizons, &constraints, parameters)
+        .map_err(PrepareError::Surfe)?;
     let ordinary_kernel = OrdinaryKernel::from_parameters(parameters, &constraints)
         .map_err(PrepareError::Anisotropy)?;
     let lists = interface_point_lists(&constraints, &grouping);

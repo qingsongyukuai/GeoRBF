@@ -648,6 +648,73 @@ T27 没有开始 Vector Field 的 Planar Hessian、势函数或梯度模型；�
   单点/批量对逐项一致。T29 只封装 T22–T28 已完成能力，不增加 FFI、curl/divergence、Greedy
   补全或新的数值路径；名称、全部默认与错误分类组合矩阵仍归固定后继 T30。
 
+## T30 公开名称、默认与错误分类
+
+T30 重新沿公开调用链核对
+`surfe_lib/modelling_parameters.h@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、
+`surfe_lib/grbf_exceptions.h@290dbe0ab344f4258a4935f05cad0f153f0f69a4`、
+`surfe_lib/surfe_api.{h,cpp}@290dbe0ab344f4258a4935f05cad0f153f0f69a4` 和
+`surfe_lib/modeling_methods.cpp@290dbe0ab344f4258a4935f05cad0f153f0f69a4`。以下表是完整公开
+离散集合；`RbfKernel::ALL` 与 `ModelType::ALL` 让测试在枚举扩张或重排时失败，而不是静默漏测。
+
+| Rust model | 冻结枚举文本 | `Surfe_API(int)` |
+| --- | --- | ---: |
+| `SingleSurface` | `Single_surface` | 1 |
+| `LajaunieApproach` | `Lajaunie_approach` | 2 |
+| `VectorField` | `Vector_field` | 3 |
+| `StratigraphicHorizons` | `Stratigraphic_horizons` | 4 |
+| `ContinuousProperty` | `Continuous_property` | 5 |
+
+| Rust kernel | 唯一接受的冻结名称 | 全局各向异性 factory |
+| --- | --- | --- |
+| `Cubic` | `r3` | 接受 |
+| `Gaussian` | `Gaussian` | 接受 |
+| `Multiquadric` | `Multiquadratics` | 接受 |
+| `MultiquadricCubic` | `Multiquadratics3` | 拒绝 |
+| `InverseMultiquadric` | `Inverse Multiquadratics` | 接受 |
+| `ThinPlateSpline` | `Thin Plate Spline` | 接受 |
+| `Linear` | `r` | 接受 |
+| `WendlandC2` | `WendlandC2` | 拒绝 |
+| `MaternC4` | `MaternC4` | 拒绝 |
+
+拒绝项不会回退到 isotropic，也不增加缩写、大小写折叠或空白修剪。各向异性 factory 的
+拒绝在冻结公开入口外层表现为 `failuresettingupbasisfunctions`，Rust 对应
+`Error::BasisFunctionSetupFailure`。
+
+`Parameters` 的公开默认快照对五个 Builder 模型完全相同，只有 `model_type` 被构造参数替换：
+
+| 字段 | 默认值 |
+| --- | --- |
+| `min_stratigraphic_thickness` | `0.0` |
+| 四个 `use_*` 约束标志 | 全部 `false` |
+| `basis_type`, `shape_parameter`, `polynomial_order` | `Cubic`, `100.0`, `1` |
+| `advanced_parameters`, `model_global_anisotropy` | `false`, `false` |
+| `use_greedy`, `use_restricted_range` | `false`, `false` |
+| `smoothing_amount`, `use_regression_smoothing` | `0.0`, `false` |
+| `interface_uncertainty`, `angular_uncertainty` | `0.0`, `0.0` |
+
+代表约束上的五种默认拟合、九个合法名称及 polynomial order 0/1/2 都经过公开 Builder →
+`FittedModel` 端到端测试。五模型 scalar/gradient 与九核 scalar 使用固定 g++、单线程、C locale
+oracle 的 binary64 golden 和 T04 容差比较；oracle 连续双跑逐字节一致。冻结
+`Surfe_API(int)` 构造函数自身没有初始化全部状态布尔值，因此数值 oracle 使用完整初始化的
+`Parameters` 后只替换 model；Rust 不复制这一未定义读取。
+
+`BuildError::surfe_category` 与 `EvaluationError::surfe_category` 返回可匹配的
+`Option<Error>`，不要求调用者解析消息。公开链路固定了 unknown model/RBF、no interface、no
+increment、invalid input、incorrect dimensions、basis setup、LU、predictor-corrector 和 LOQO
+类别；其中冻结 Lajaunie restricted 虽运行 LOQO，却把 `solve()==false` 错误写成
+`pcquadratricsolverfailure`，Rust 保持这个外部类别。`ConstraintError`、非有限参数、修复 C++
+越界所需的提前拒绝等安全 Rust 扩展返回 `None`，明确表示没有稳定的冻结异常类别。
+Stratigraphic 也依冻结 `ComputeInterpolant` 顺序先完成 input/layout validation，再构造 Modified
+Kernel，因而非法 inequality 层序稳定归为 `InvalidInputData`，不会被后续 basis 错误遮蔽。
+
+冻结单 planar 全局各向异性路径还暴露了异常基础设施缺陷：`throw_with_nested` 在无活动异常时
+构造空 nested exception，随后 `SurfeExceptions` 展开它会 `terminate`（oracle 退出 134）。
+Rust 不复制进程终止，而是安全返回 `BasisFunctionSetupFailure`。同理，未拟合与拟合后修改在
+C++ 中分别是 `MissingInterpolant` 与 `InterpolantNeedsUpdate`，不可变 `FittedModel` 把这两个
+非法状态移出可表达调用顺序；23 个冻结类别仍完整保留在 `Error::ALL` 中。T30 不审查或实现
+Greedy 的实际可达调用链，该范围仍由 T31 独立处理。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

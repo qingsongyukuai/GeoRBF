@@ -522,7 +522,7 @@ fn invalid_inputs_iteration_caps_and_positive_separation_fail_with_stage_evidenc
     exact.inequalities = vec![Inequality::new(9.0, 9.0, 9.0, 20.0).unwrap()];
     assert_eq!(
         fit_stratigraphic(&exact, &parameters(false)).unwrap_err(),
-        StratigraphicError::SourceAssembly(georbf::AssemblyError::Surfe(Error::InvalidInputData))
+        StratigraphicError::Surfe(Error::InvalidInputData)
     );
 
     let error = fit_stratigraphic_with_options(

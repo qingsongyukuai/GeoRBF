@@ -99,6 +99,197 @@ impl From<Error> for BuildError {
     }
 }
 
+impl BuildError {
+    /// Return the frozen Surfe exception category visible at the public API.
+    ///
+    /// `None` marks a Rust safety rejection for source behavior that had no
+    /// stable C++ exception (for example non-finite input accepted into invalid
+    /// state, or the Continuous Property equality-vector out-of-bounds bug).
+    /// Callers should match this value rather than parsing `to_string()`.
+    pub const fn surfe_category(&self) -> Option<Error> {
+        match self {
+            Self::Constraint(_) | Self::NonFiniteParameter(_) => None,
+            Self::Surfe(error) => Some(*error),
+            Self::IncorrectArrayDimensions { .. } => Some(Error::IncorrectArrayDimensions),
+            Self::SingleSurfaceLinear(error) => single_surface_linear_category(error),
+            Self::SingleSurfaceInequality(error) => single_surface_inequality_category(error),
+            Self::SingleSurfaceRestricted(error) => single_surface_restricted_category(error),
+            Self::LajaunieLinear(error) => lajaunie_linear_category(error),
+            Self::LajaunieRestricted(error) => lajaunie_restricted_category(error),
+            Self::Stratigraphic(error) => stratigraphic_category(error),
+            Self::StratigraphicRestricted(error) => stratigraphic_restricted_category(error),
+            Self::ContinuousProperty(error) => continuous_property_category(error),
+            Self::VectorField(error) => vector_field_category(error),
+        }
+    }
+}
+
+pub(crate) const fn assembly_category(error: &crate::AssemblyError) -> Option<Error> {
+    match error {
+        crate::AssemblyError::Surfe(error) => Some(*error),
+        crate::AssemblyError::Kernel(_)
+        | crate::AssemblyError::Constraint(_)
+        | crate::AssemblyError::KernelLayoutMismatch => None,
+    }
+}
+
+pub(crate) const fn reconstruction_assembly_category(
+    error: &crate::ReconstructionAssemblyError,
+) -> Option<Error> {
+    match error {
+        crate::ReconstructionAssemblyError::Assembly(error) => assembly_category(error),
+        crate::ReconstructionAssemblyError::UnsupportedModel
+        | crate::ReconstructionAssemblyError::NotQuadratic
+        | crate::ReconstructionAssemblyError::SourceKernelNotModified
+        | crate::ReconstructionAssemblyError::OrdinaryKernelIsModified
+        | crate::ReconstructionAssemblyError::SourceLayoutMismatch
+        | crate::ReconstructionAssemblyError::SourceWeightLengthMismatch
+        | crate::ReconstructionAssemblyError::NonFinitePrediction => None,
+    }
+}
+
+const fn reconstruction_category(error: &crate::ReconstructionError) -> Option<Error> {
+    match error {
+        crate::ReconstructionError::SourceAssembly(error) => assembly_category(error),
+        crate::ReconstructionError::PredictorCorrector(error) => Some(error.surfe_error()),
+        crate::ReconstructionError::Loqo(error) => Some(error.surfe_error()),
+        crate::ReconstructionError::Reassembly(error) => reconstruction_assembly_category(error),
+        crate::ReconstructionError::Lu(error) => Some(error.surfe_error()),
+    }
+}
+
+pub(crate) const fn single_surface_linear_category(
+    error: &SingleSurfaceLinearError,
+) -> Option<Error> {
+    match error {
+        SingleSurfaceLinearError::WrongModel => Some(Error::UnknownModel),
+        SingleSurfaceLinearError::InequalityBranchNotAvailable
+        | SingleSurfaceLinearError::RestrictedRangeBranchNotAvailable
+        | SingleSurfaceLinearError::Evaluation(_) => None,
+        SingleSurfaceLinearError::Surfe(error) => Some(*error),
+        SingleSurfaceLinearError::Anisotropy(_) => Some(Error::BasisFunctionSetupFailure),
+        SingleSurfaceLinearError::Assembly(error) => assembly_category(error),
+        SingleSurfaceLinearError::Lu(error) => Some(error.surfe_error()),
+    }
+}
+
+pub(crate) const fn single_surface_inequality_category(
+    error: &SingleSurfaceInequalityError,
+) -> Option<Error> {
+    match error {
+        SingleSurfaceInequalityError::WrongModel => Some(Error::UnknownModel),
+        SingleSurfaceInequalityError::NoInequalities
+        | SingleSurfaceInequalityError::RestrictedRangeBranchNotAvailable
+        | SingleSurfaceInequalityError::Evaluation(_) => None,
+        SingleSurfaceInequalityError::Surfe(error) => Some(*error),
+        SingleSurfaceInequalityError::Anisotropy(_) | SingleSurfaceInequalityError::Basis(_) => {
+            Some(Error::BasisFunctionSetupFailure)
+        }
+        SingleSurfaceInequalityError::Assembly(error) => assembly_category(error),
+        SingleSurfaceInequalityError::Qp(error) => Some(error.surfe_error()),
+    }
+}
+
+pub(crate) const fn single_surface_restricted_category(
+    error: &SingleSurfaceRestrictedError,
+) -> Option<Error> {
+    match error {
+        SingleSurfaceRestrictedError::WrongModel => Some(Error::UnknownModel),
+        SingleSurfaceRestrictedError::RestrictedRangeRequired => None,
+        SingleSurfaceRestrictedError::Surfe(error) => Some(*error),
+        SingleSurfaceRestrictedError::Anisotropy(_) | SingleSurfaceRestrictedError::Basis(_) => {
+            Some(Error::BasisFunctionSetupFailure)
+        }
+        SingleSurfaceRestrictedError::SourceAssembly(error) => assembly_category(error),
+        SingleSurfaceRestrictedError::Loqo(error) => Some(error.surfe_error()),
+        SingleSurfaceRestrictedError::Reconstruction(error) => reconstruction_category(error),
+        SingleSurfaceRestrictedError::Evaluation(error) => reconstruction_assembly_category(error),
+    }
+}
+
+pub(crate) const fn lajaunie_linear_category(error: &LajaunieLinearError) -> Option<Error> {
+    match error {
+        LajaunieLinearError::WrongModel => Some(Error::UnknownModel),
+        LajaunieLinearError::RestrictedRangeBranchNotAvailable
+        | LajaunieLinearError::Evaluation(_) => None,
+        LajaunieLinearError::Surfe(error) => Some(*error),
+        LajaunieLinearError::Anisotropy(_) => Some(Error::BasisFunctionSetupFailure),
+        LajaunieLinearError::Assembly(error) => assembly_category(error),
+        LajaunieLinearError::Lu(error) => Some(error.surfe_error()),
+    }
+}
+
+pub(crate) const fn lajaunie_restricted_category(error: &LajaunieRestrictedError) -> Option<Error> {
+    match error {
+        LajaunieRestrictedError::WrongModel => Some(Error::UnknownModel),
+        LajaunieRestrictedError::RestrictedRangeRequired => None,
+        LajaunieRestrictedError::Surfe(error) => Some(*error),
+        LajaunieRestrictedError::Anisotropy(_) | LajaunieRestrictedError::Basis(_) => {
+            Some(Error::BasisFunctionSetupFailure)
+        }
+        LajaunieRestrictedError::SourceAssembly(error) => assembly_category(error),
+        // Lajaunie's frozen restricted branch constructs LOQO but maps
+        // `solve() == false` to `pcquadratricsolverfailure`.
+        LajaunieRestrictedError::Loqo(_) => Some(Error::PredictorCorrectorSolverFailure),
+        LajaunieRestrictedError::Reconstruction(error) => reconstruction_category(error),
+        LajaunieRestrictedError::Evaluation(error) => reconstruction_assembly_category(error),
+    }
+}
+
+pub(crate) const fn stratigraphic_category(error: &StratigraphicError) -> Option<Error> {
+    match error {
+        StratigraphicError::WrongModel => Some(Error::UnknownModel),
+        StratigraphicError::RestrictedRangeBranchNotAvailable
+        | StratigraphicError::Evaluation(_) => None,
+        StratigraphicError::Surfe(error) => Some(*error),
+        StratigraphicError::Anisotropy(_) | StratigraphicError::Basis(_) => {
+            Some(Error::BasisFunctionSetupFailure)
+        }
+        StratigraphicError::SourceAssembly(error) => assembly_category(error),
+        StratigraphicError::Qp(error) => Some(error.surfe_error()),
+        StratigraphicError::Reconstruction(error) => reconstruction_category(error),
+    }
+}
+
+pub(crate) const fn stratigraphic_restricted_category(
+    error: &StratigraphicRestrictedError,
+) -> Option<Error> {
+    match error {
+        StratigraphicRestrictedError::WrongModel => Some(Error::UnknownModel),
+        StratigraphicRestrictedError::RestrictedRangeRequired => None,
+        StratigraphicRestrictedError::Surfe(error) => Some(*error),
+        StratigraphicRestrictedError::Anisotropy(_) | StratigraphicRestrictedError::Basis(_) => {
+            Some(Error::BasisFunctionSetupFailure)
+        }
+        StratigraphicRestrictedError::SourceAssembly(error) => assembly_category(error),
+        StratigraphicRestrictedError::Loqo(error) => Some(error.surfe_error()),
+        StratigraphicRestrictedError::Reconstruction(error) => reconstruction_category(error),
+        StratigraphicRestrictedError::Evaluation(error) => reconstruction_assembly_category(error),
+    }
+}
+
+pub(crate) const fn continuous_property_category(error: &ContinuousPropertyError) -> Option<Error> {
+    match error {
+        ContinuousPropertyError::WrongModel => Some(Error::UnknownModel),
+        ContinuousPropertyError::EqualityVectorOutOfBounds { .. }
+        | ContinuousPropertyError::Evaluation(_) => None,
+        ContinuousPropertyError::Surfe(error) => Some(*error),
+        ContinuousPropertyError::Anisotropy(_) => Some(Error::BasisFunctionSetupFailure),
+        ContinuousPropertyError::Assembly(error) => assembly_category(error),
+        ContinuousPropertyError::Lu(error) => Some(error.surfe_error()),
+    }
+}
+
+pub(crate) const fn vector_field_category(error: &VectorFieldError) -> Option<Error> {
+    match error {
+        VectorFieldError::WrongModel => Some(Error::UnknownModel),
+        VectorFieldError::Anisotropy(_) => Some(Error::BasisFunctionSetupFailure),
+        VectorFieldError::Assembly(error) => assembly_category(error),
+        VectorFieldError::Lu(error) => Some(error.surfe_error()),
+        VectorFieldError::Evaluation(_) => None,
+    }
+}
+
 /// Mutable, owned input configuration that produces immutable fitted models.
 ///
 /// Constraint values and parameters are owned by the builder. [`Self::fit`]

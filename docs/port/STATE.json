@@ -6,7 +6,7 @@
   "target_repository": "current GeoRBF repository",
   "status": "ready",
   "active_task": null,
-  "next_task": "T30",
+  "next_task": "T31",
   "completed_tasks": [
     "INIT",
     "T00",
@@ -38,9 +38,10 @@
     "T26",
     "T27",
     "T28",
-    "T29"
+    "T29",
+    "T30"
   ],
-  "last_completed_task": "T29",
+  "last_completed_task": "T30",
   "task_order": [
     "T00",
     "T01",

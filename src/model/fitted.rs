@@ -7,19 +7,22 @@ use std::fmt;
 
 use crate::{
     builder::{
-        inequality_constraint_matrix, interface_constraint_matrix, planar_constraint_matrix,
-        tangent_constraint_matrix,
+        continuous_property_category, inequality_constraint_matrix, interface_constraint_matrix,
+        lajaunie_linear_category, lajaunie_restricted_category, planar_constraint_matrix,
+        single_surface_inequality_category, single_surface_linear_category,
+        single_surface_restricted_category, stratigraphic_category,
+        stratigraphic_restricted_category, tangent_constraint_matrix, vector_field_category,
     },
     constraints_to_points, fit_continuous_property, fit_lajaunie_linear, fit_lajaunie_restricted,
     fit_single_surface_inequality, fit_single_surface_linear, fit_single_surface_restricted,
     fit_stratigraphic, fit_stratigraphic_restricted, fit_vector_field, spatial_metrics, BuildError,
     ConstraintError, Constraints, ContinuousPropertyError, ContinuousPropertyModel, DenseMatrix,
-    LajaunieLinearError, LajaunieLinearModel, LajaunieRestrictedError, LajaunieRestrictedModel,
-    ModelType, Parameters, Point, SingleSurfaceInequalityError, SingleSurfaceInequalityModel,
-    SingleSurfaceLinearError, SingleSurfaceLinearModel, SingleSurfaceRestrictedError,
-    SingleSurfaceRestrictedModel, SpatialError, SpatialParameters, StratigraphicError,
-    StratigraphicModel, StratigraphicRestrictedError, StratigraphicRestrictedModel,
-    VectorFieldError, VectorFieldModel,
+    Error, LajaunieLinearError, LajaunieLinearModel, LajaunieRestrictedError,
+    LajaunieRestrictedModel, ModelType, Parameters, Point, SingleSurfaceInequalityError,
+    SingleSurfaceInequalityModel, SingleSurfaceLinearError, SingleSurfaceLinearModel,
+    SingleSurfaceRestrictedError, SingleSurfaceRestrictedModel, SpatialError, SpatialParameters,
+    StratigraphicError, StratigraphicModel, StratigraphicRestrictedError,
+    StratigraphicRestrictedModel, VectorFieldError, VectorFieldModel,
 };
 
 /// Solver branch selected by the public fitted-model dispatcher.
@@ -90,6 +93,30 @@ impl std::error::Error for EvaluationError {
             Self::ContinuousProperty(error) => Some(error),
             Self::VectorField(error) => Some(error),
             Self::IncorrectArrayDimensions { .. } => None,
+        }
+    }
+}
+
+impl EvaluationError {
+    /// Return the frozen public exception category for this evaluation error.
+    ///
+    /// A fitted Rust model cannot express Surfe's `missinginterpolant` or
+    /// `interpolantneedsupdate` states. Those categories remain available in
+    /// [`Error`], while this method reports only failures reachable after a
+    /// successful immutable fit.
+    pub const fn surfe_category(&self) -> Option<Error> {
+        match self {
+            Self::Constraint(_) => None,
+            Self::IncorrectArrayDimensions { .. } => Some(Error::IncorrectArrayDimensions),
+            Self::SingleSurfaceLinear(error) => single_surface_linear_category(error),
+            Self::SingleSurfaceInequality(error) => single_surface_inequality_category(error),
+            Self::SingleSurfaceRestricted(error) => single_surface_restricted_category(error),
+            Self::LajaunieLinear(error) => lajaunie_linear_category(error),
+            Self::LajaunieRestricted(error) => lajaunie_restricted_category(error),
+            Self::Stratigraphic(error) => stratigraphic_category(error),
+            Self::StratigraphicRestricted(error) => stratigraphic_restricted_category(error),
+            Self::ContinuousProperty(error) => continuous_property_category(error),
+            Self::VectorField(error) => vector_field_category(error),
         }
     }
 }
