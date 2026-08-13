@@ -215,31 +215,52 @@ fn anisotropic_restricted_path_uses_the_same_full_reconstruction() {
         hash_matrix(model.modified_interpolation_matrix()),
         0x17e3_6493_b87b_ec03
     );
-    assert_eq!(
-        hash_vector(model.bounded_system().lower()),
-        0x57e0_f4e0_8bf2_5864
-    );
+    let bounded_lower = model.bounded_system().lower();
     let bounded_range = model.bounded_system().range();
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    assert_eq!(hash_vector(bounded_range), 0xc68e_6723_8bb3_62b6);
+    {
+        assert_eq!(hash_vector(bounded_lower), 0x57e0_f4e0_8bf2_5864);
+        assert_eq!(hash_vector(bounded_range), 0xc68e_6723_8bb3_62b6);
+    }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
+        assert_eq!(bounded_lower.len(), 23);
         assert_eq!(bounded_range.len(), 23);
+        assert_eq!(bounded_lower.values()[0], 0.0);
+        assert_close(
+            -bounded_lower.values()[1],
+            bounded_range.values()[0],
+            1.0e-12,
+            1.0e-12,
+        );
         assert_close(
             bounded_range.values()[0],
             bounded_range.values()[1],
             1.0e-12,
             1.0e-12,
         );
-        for value in &bounded_range.values()[2..8] {
-            assert_eq!(*value, 0.5);
+        for (lower, range) in bounded_lower.values()[2..8]
+            .iter()
+            .zip(&bounded_range.values()[2..8])
+        {
+            assert_eq!((*lower, *range), (-0.25, 0.5));
         }
-        for value in &bounded_range.values()[8..] {
-            assert!(value.is_finite() && *value >= 0.0 && *value <= 2.0);
+        for (lower, range) in bounded_lower.values()[8..]
+            .iter()
+            .zip(&bounded_range.values()[8..])
+        {
+            assert!(lower.is_finite() && (-1.0..=1.0).contains(lower));
+            assert!(range.is_finite() && (0.0..=2.0).contains(range));
         }
     }
-    for (value, evidence) in bounded_range.values().iter().zip(model.bound_evidence()) {
-        assert_eq!(value.to_bits(), evidence.range().to_bits());
+    for ((lower, range), evidence) in bounded_lower
+        .values()
+        .iter()
+        .zip(bounded_range.values())
+        .zip(model.bound_evidence())
+    {
+        assert_eq!(lower.to_bits(), evidence.lower().to_bits());
+        assert_eq!(range.to_bits(), evidence.range().to_bits());
     }
     assert!(model.loqo_solution().residual().accepted());
     assert_eq!(model.loqo_solution().trace().len(), 13);
