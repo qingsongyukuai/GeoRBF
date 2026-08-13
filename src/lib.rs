@@ -9,7 +9,8 @@
 //! row/column layouts, dense system assembly, and partial-pivot LU solving.
 //! The ordinary and restricted-range LOQO-style predictor-corrector
 //! quadratic-programming paths are also available with iteration and
-//! feasibility evidence.
+//! feasibility evidence, together with the frozen QP-to-ordinary-RBF
+//! reconstruction path and its second LU solve.
 //! Mathematical and modelling modules are added in the dependency order fixed
 //! by the port plan.
 
@@ -47,6 +48,11 @@ pub use kernel::{
 pub use layout::{
     constraint_layout, ConstraintLayout, DifferenceKind, IndexRange, LayoutDof, LayoutPartitions,
     LayoutPointRef, LayoutRole, LayoutSection, LayoutSectionKind, SourceConstraintCounts,
+};
+pub use model::reconstruct::{
+    reconstruct_from_qp_weights, solve_and_reconstruct, ReconstructionAssemblyError,
+    ReconstructionDofMapping, ReconstructionError, ReconstructionPredictionWitness,
+    ReconstructionResult, ReconstructionSourceSolution, ReconstructionStage,
 };
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{

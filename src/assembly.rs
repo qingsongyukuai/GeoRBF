@@ -326,34 +326,8 @@ pub fn assemble_system(
 ) -> Result<AssembledSystem, AssemblyError> {
     let layout = constraint_layout(parameters.model_type, constraints, parameters)
         .map_err(AssemblyError::Surfe)?;
-    validate_kernel_kind(&layout, kernel)?;
-
-    let constraint_count = layout.constraint_dof_count();
-    let functionals = layout
-        .dofs()
-        .iter()
-        .take(constraint_count)
-        .map(|dof| functional_for_dof(dof, constraints))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut interpolation_matrix = DenseMatrix::zeros(layout.matrix_size(), layout.matrix_size());
-    for (row, row_functional) in functionals.iter().enumerate() {
-        for (column, column_functional) in functionals.iter().enumerate() {
-            interpolation_matrix.set(
-                row,
-                column,
-                kernel.apply(row_functional, column_functional)?,
-            );
-        }
-    }
-    insert_polynomial_blocks(
-        &layout,
-        constraints,
-        parameters,
-        &functionals,
-        &mut interpolation_matrix,
-    )?;
-    let smoothing_value =
-        apply_regression_smoothing(&layout, parameters, kernel, &mut interpolation_matrix)?;
+    let (interpolation_matrix, smoothing_value) =
+        assemble_matrix_for_layout(&layout, constraints, parameters, kernel)?;
 
     let assembled_constraints = match parameters.model_type {
         ModelType::SingleSurface => model::single_surface::assembly::build(
@@ -387,6 +361,42 @@ pub fn assemble_system(
     })
 }
 
+pub(crate) fn assemble_matrix_for_layout(
+    layout: &ConstraintLayout,
+    constraints: &Constraints,
+    parameters: &Parameters,
+    kernel: FunctionalKernel<'_>,
+) -> Result<(DenseMatrix, Option<f64>), AssemblyError> {
+    validate_kernel_kind(layout, kernel)?;
+    let constraint_count = layout.constraint_dof_count();
+    let functionals = layout
+        .dofs()
+        .iter()
+        .take(constraint_count)
+        .map(|dof| functional_for_dof(dof, constraints))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut interpolation_matrix = DenseMatrix::zeros(layout.matrix_size(), layout.matrix_size());
+    for (row, row_functional) in functionals.iter().enumerate() {
+        for (column, column_functional) in functionals.iter().enumerate() {
+            interpolation_matrix.set(
+                row,
+                column,
+                kernel.apply(row_functional, column_functional)?,
+            );
+        }
+    }
+    insert_polynomial_blocks(
+        layout,
+        constraints,
+        parameters,
+        &functionals,
+        &mut interpolation_matrix,
+    )?;
+    let smoothing_value =
+        apply_regression_smoothing(layout, parameters, kernel, &mut interpolation_matrix)?;
+    Ok((interpolation_matrix, smoothing_value))
+}
+
 fn validate_kernel_kind(
     layout: &ConstraintLayout,
     kernel: FunctionalKernel<'_>,
@@ -399,7 +409,7 @@ fn validate_kernel_kind(
     }
 }
 
-fn functional_for_dof(
+pub(crate) fn functional_for_dof(
     dof: &LayoutDof,
     constraints: &Constraints,
 ) -> Result<LinearFunctional, AssemblyError> {
@@ -496,7 +506,7 @@ fn insert_polynomial_blocks(
     Ok(())
 }
 
-fn polynomial_basis(model: ModelType, order: i32) -> PolynomialBasis {
+pub(crate) fn polynomial_basis(model: ModelType, order: i32) -> PolynomialBasis {
     let order = match order {
         0 => PolynomialOrder::Zero,
         1 => PolynomialOrder::First,

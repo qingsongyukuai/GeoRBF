@@ -401,6 +401,34 @@ indefinite、negative-range 和 non-finite 九类；Rust 的成功 weights/objec
 关键 `mu`/目标/失败分支与该 oracle 一致，并增加解析 upper-active 镜像检查。T20 只交付
 QP 求解与 `A/b/r` 语义，不执行 T21 的活跃约束选择、普通 RBF 重装配或二次 LU。
 
+## T21 QP 到普通 RBF 线性系统的重建
+
+- 冻结 `single_surface.cpp`、`lajaunie.cpp` 和 `stratigraphic_surfaces.cpp` 的
+  `convert_modified_kernel_to_rbf_kernel` 都没有公开根调用边，但函数体完整。GeoRBF 将其
+  保留为显式重建操作，并提供“先执行 T19/T20 QP”和“消费已经求得的 QP weights”两种
+  入口；后者也是隔离 QP 收敛差异、逐步核对重建本体的 oracle seam。
+- 源码没有根据 multiplier、slack 或容差筛选 active set：所有 QP 约束自由度都进入普通
+  RBF 系统。Single Surface 先把全部 inequality 按原顺序转成 interface，再接原 interface；
+  Lajaunie 和 Stratigraphic 保留全部 increment-pair、planar 和 tangent 自由度，并把新的
+  layout 全部作为 equality 处理。测试同时覆盖无 active、单 active 和多 active bounds，
+  防止以后误加 active-only 过滤。
+- 重建目标严格由 Modified-Kernel 源场计算：interface/inequality 取标量，planar 取完整
+  梯度，tangent 取梯度与方向的内积。随后使用普通核重装矩阵/RHS 并再次执行 T18 LU；
+  结果公开源/目标索引映射、重建约束、最终矩阵/RHS、LU 后验量以及见证点的重建前后
+  标量/梯度。`SourceAssembly`、`Qp`、`Reassembly` 和 `Lu` 四阶段错误保持可区分。
+- Lajaunie 冻结实现强制 `n_poly_terms=3`，却仍用调用参数的 polynomial order 构造 basis；
+  因而非一阶输入在第二次装配时维数不符。Rust 在 `Reassembly` 阶段安全保留该失败。其与
+  Stratigraphic 的普通重建均使用不含常数项的三项截断一次基，故见证点梯度保持一致而
+  标量可相差常数；测试分别对重建前、重建后字段核对 oracle，不伪造逐点标量恒等。
+- Stratigraphic 冻结对象重建后把全部 pair 计为 equality，却不刷新
+  `intern_params.n_inequality`。Rust layout 使用实际的全 equality 分区，同时在兼容证据中
+  保留这个 stale 计数。Single/Lajaunie/Stratigraphic 的最终 row-major 矩阵、RHS、LU
+  residual 与重建前后字段均由冻结 C++ probe 固定，并使用 T04 分层容差核对。
+
+T21 维持 dense 重装配的 `O(n^2)` 存储/计算结构和 partial-pivot LU 的 `O(n^3)` 求解结构，
+没有引入外部依赖或近似算法；这里只报告 release 构建/测试证据，不提前宣称 T33 性能结论，
+也不实现 T22 的具体模型 API。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

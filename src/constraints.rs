@@ -377,6 +377,18 @@ impl Planar {
         self.normal_bounds = Some(bounds);
         Ok(())
     }
+
+    /// Replace only the stored normal after evaluating a Modified-Kernel
+    /// interpolant. Frozen `Planar::setNormal` deliberately leaves the
+    /// pre-existing strike, dip, polarity, and uncertainty bounds untouched.
+    pub(crate) fn set_reconstructed_normal(
+        &mut self,
+        normal: [f64; 3],
+    ) -> Result<(), ConstraintError> {
+        require_finite(&normal)?;
+        self.normal = normal;
+        Ok(())
+    }
 }
 
 fn normal_from_strike_dip_polarity(
@@ -505,6 +517,17 @@ impl Tangent {
         } else {
             [0.0, value]
         });
+        Ok(())
+    }
+
+    /// Store the evaluated tangent/gradient inner product used by the frozen
+    /// QP-to-linear reconstruction path.
+    pub(crate) fn set_reconstructed_inner_product(
+        &mut self,
+        value: f64,
+    ) -> Result<(), ConstraintError> {
+        require_finite(&[value])?;
+        self.inner_product_constraint = value;
         Ok(())
     }
 }

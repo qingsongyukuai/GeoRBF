@@ -29,6 +29,7 @@ include = [
     "/tests/protocols.rs",
     "/tests/qp_predictor_corrector.rs",
     "/tests/qp_loqo.rs",
+    "/tests/reconstruct.rs",
     "/tests/spatial.rs",
 ]
 
