@@ -367,6 +367,40 @@ T17 冻结 probe 对五模型普通路径、Single/Stratigraphic 普通 QP、三
   objective 和零终止 `mu`，Rust 逐 bit 保留并以后验 residual/feasibility 接受。普通 QP
   没有改用通用优化 crate，也没有实现 restricted-range/LOQO；后者仍仅归 T20。
 
+## T20 restricted-range / LOQO 风格 QP
+
+- `Quadratic_Predictor_Corrector_LOQO` 将 interpolation matrix 乘二为 `H`，直接求解
+  `min 1/2*x'Hx`，约束保持冻结布局 `b <= A*x <= b+r`。因此对外报告的目标仍为
+  `x' interpolation x`；`r` 是从下界到闭上界的非负宽度语义，不被改写成另一种约束、
+  罚项或解后裁剪。T06 的 `SetRestrictedRange` 三参数原样写入 parameters，T17 的三模型
+  bounded assembly 则提供这里直接消费的 `A/b/r`。
+- 初始化保留冻结 `[-(H+I), A'; A, I]` KKT、右端 `[0;b]`，以及
+  `g/z/t/s=max(abs(x),100)`、`v/w=max(abs(y),100)`、
+  `p=max(abs(r-w),100)`、`q=v`。每轮继续使用 `D/E` 对角消元、predictor/corrector 两次
+  T18 partial-pivot LU、四组 primal/dual positivity divisor 和固定 `0.95` fraction-to-boundary。
+  中心参数使用 `((max(alpha_p,alpha_d)-1)/(max(alpha_p,alpha_d)+10))^2`；`P/Q` 两种
+  对角比值的方向和所有更新次序均按冻结源码保留。
+- 成功只沿 `significant_figures > 6` 分支；`dual_obj > primal_obj` 和 significant figures
+  回退是冻结失败。源码循环无上限，Rust 默认增加 10000 轮安全上限且达到上限明确失败，
+  不放宽成功规则。每轮公开目标、gap-derived significant figures、滞后一轮的 primal/dual
+  infeasibility、predictor/corrector divisor、fraction 与 `mu`；每次 KKT 公开 stage、pivot
+  transpositions 和 residual，终点另公开约束残差、最小上下界 slack、互补性和接受阈值。
+- 冻结 `validate_matrix_systems()` 只记录 `H` 有限且 LLT 正定，但模型 `solve()` 不调用它；
+  Rust 同样把此结果作为 evidence，而不是 condition-number/positive-definite gate。`1e-14`
+  病态和 zero-Hessian 用例都会实际求解；zero-Hessian 的有限负极小 candidate 与负零目标
+  逐 bit 保留。非有限初始 KKT 的 candidate 也保留到第一次 predictor 检查，再安全映射为
+  `NonFiniteInput`，而不复制后续 Eigen 非有限运算。
+- 冻结 tight zero-width、negative-range 和测试中的 indefinite 输入分别沿原始
+  `dual_obj > primal_obj` 失败；Rust 保存相同 trace/候选/残差并映射稳定
+  `Error::LoqoSolverFailure`。非法空/非方阵/维数在 Rust 边界安全拒绝。成功候选还必须通过
+  有限性、stationarity/约束残差、闭区间上下界和互补性后验检查；这些检查不会用条件数
+  提前改变冻结迭代分支。
+
+T20 冻结 probe 覆盖 inactive、lower-active、两变量双边、tight、病态、zero-Hessian、
+indefinite、negative-range 和 non-finite 九类；Rust 的成功 weights/objectives、停止迭代、
+关键 `mu`/目标/失败分支与该 oracle 一致，并增加解析 upper-active 镜像检查。T20 只交付
+QP 求解与 `A/b/r` 语义，不执行 T21 的活跃约束选择、普通 RBF 重装配或二次 LU。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

@@ -297,7 +297,7 @@ fn solve_dense_partial_pivot_lu_with_validation(
             LuSolveErrorKind::NonFiniteMatrix,
             validation,
             factorization,
-            None,
+            Some(DenseVector::from_values(weights)),
             None,
         ));
     }
@@ -306,7 +306,7 @@ fn solve_dense_partial_pivot_lu_with_validation(
             LuSolveErrorKind::NonFiniteRightHandSide,
             validation,
             factorization,
-            None,
+            Some(DenseVector::from_values(weights)),
             None,
         ));
     }
@@ -316,7 +316,13 @@ fn solve_dense_partial_pivot_lu_with_validation(
         } else {
             LuSolveErrorKind::NonFiniteSolution
         };
-        return Err(attempted_error(kind, validation, factorization, None, None));
+        return Err(attempted_error(
+            kind,
+            validation,
+            factorization,
+            Some(DenseVector::from_values(weights)),
+            None,
+        ));
     }
 
     let residual = residual_evidence(matrix, right_hand_side, &weights);

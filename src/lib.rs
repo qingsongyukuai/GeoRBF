@@ -7,8 +7,9 @@
 //! isotropic radial kernels, frozen global anisotropy, modified kernels, and
 //! model-independent linear functionals plus deterministic five-model
 //! row/column layouts, dense system assembly, and partial-pivot LU solving.
-//! The ordinary predictor-corrector quadratic-programming path is also
-//! available with iteration and feasibility evidence.
+//! The ordinary and restricted-range LOQO-style predictor-corrector
+//! quadratic-programming paths are also available with iteration and
+//! feasibility evidence.
 //! Mathematical and modelling modules are added in the dependency order fixed
 //! by the port plan.
 
@@ -55,12 +56,16 @@ pub use parameters::{
 };
 pub use polynomial::{LagrangianPolynomialBasis, PolynomialBasis, PolynomialOrder};
 pub use solver::{
-    predictor_corrector_step_length, solve_dense_partial_pivot_lu, solve_partial_pivot_lu,
-    solve_predictor_corrector_qp, solve_predictor_corrector_qp_with_options, validate_lu_system,
-    validate_predictor_corrector_qp, LuFactorizationEvidence, LuResidualEvidence, LuSolution,
-    LuSolveError, LuSolveErrorKind, LuValidation, QpIterationEvidence, QpKktFailure,
-    QpKktSolveEvidence, QpKktStage, QpOptions, QpResidualEvidence, QpSolution, QpSolveError,
-    QpSolveErrorKind, QpStepLengthError, QpStopReason, QpValidation,
+    loqo_step_divisor, predictor_corrector_step_length, solve_dense_partial_pivot_lu,
+    solve_loqo_qp, solve_loqo_qp_with_options, solve_partial_pivot_lu,
+    solve_predictor_corrector_qp, solve_predictor_corrector_qp_with_options, validate_loqo_qp,
+    validate_lu_system, validate_predictor_corrector_qp, LoqoIterationEvidence, LoqoKktFailure,
+    LoqoKktSolveEvidence, LoqoKktStage, LoqoOptions, LoqoResidualEvidence, LoqoSolution,
+    LoqoSolveError, LoqoSolveErrorKind, LoqoStepError, LoqoStopReason, LoqoValidation,
+    LuFactorizationEvidence, LuResidualEvidence, LuSolution, LuSolveError, LuSolveErrorKind,
+    LuValidation, QpIterationEvidence, QpKktFailure, QpKktSolveEvidence, QpKktStage, QpOptions,
+    QpResidualEvidence, QpSolution, QpSolveError, QpSolveErrorKind, QpStepLengthError,
+    QpStopReason, QpValidation,
 };
 pub use spatial::{
     average_nearest_neighbour_distance, bounds, closest_to_distance_index, constraints_to_points,
