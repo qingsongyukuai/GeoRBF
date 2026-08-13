@@ -32,6 +32,7 @@ include = [
     "/tests/reconstruct.rs",
     "/tests/single_surface_linear.rs",
     "/tests/single_surface_inequality.rs",
+    "/tests/single_surface_restricted.rs",
     "/tests/spatial.rs",
 ]
 

@@ -459,6 +459,35 @@ T21 维持 dense 重装配的 `O(n^2)` 存储/计算结构和 partial-pivot LU �
 T23 没有调用 T21 重建 seam，也没有将 QP weights 伪装成普通 RBF 线性解；这些完整
 restricted/modified/reconstruct 路径只能由后继 T24 关闭。
 
+## T24 Single Surface restricted range / Modified Kernel / reconstruction
+
+- 冻结公开 `ComputeInterpolant` 的 restricted 分支在 `process_input_data` 中为 interface、
+  planar、tangent 写入 uncertainty bounds，随后关闭 polynomial、构造 Modified Kernel，
+  将全部自由度按 `b <= A*x <= b+r` 交给 LOQO。GeoRBF 保持
+  `inequality -> interface -> planar(x,y,z) -> tangent` 顺序；正 inequality 使用
+  `[0,distance]`，非正 inequality 使用 `[-distance,0]`，interface 使用
+  `[-interface_uncertainty,+interface_uncertainty]`，planar/tangent 保持冻结角度换算所得界。
+  `BoundEvidence` 将每行 dof、lower、range 与 upper 一一对应，不把 range 当成输出裁剪。
+- `setup_basis_functions` 仍先创建普通/全局各向异性 RBF，再从 exact-level 多点 interface
+  groups 创建 Modified Kernel。源 row-major matrix、lower/range、LOQO 目标、13/11 轮停止
+  trace 和 source scalar/gradient 均由普通 7 自由度及多层位各向异性 23 自由度冻结 probe
+  核对；LOQO 继续使用 T20 的有限性、残差、闭区间可行性和互补性后验门槛，不按条件数
+  预拒绝，也不放宽源停止规则。
+- 冻结 `Surfe_API::ComputeInterpolant` 在 LOQO 成功后不会调用
+  `Single_Surface::convert_modified_kernel_to_rbf_kernel`；T02/T21 已固定该函数没有公开根调用边。
+  T24 的安全内部入口明确区分“可达的 restricted fit”和“显式执行完整转换体”：转换保留全部
+  bounded dof，不按 multiplier/slack 筛选所谓 active set；inequality 依源顺序转 interface，原
+  interface level、planar normal 和 tangent inner product 由 Modified-Kernel 场更新，然后以
+  普通核、完整 polynomial 重新装配并执行第二次 partial-pivot LU。
+- 完整拟合结果同时保存清洗/grouping、Modified matrix、bounds、LOQO 全 trace、源/目标 dof
+  映射、重建约束、普通 RBF matrix/RHS、LU residual 和最终 scalar/gradient。失败阶段稳定区分
+  `SourceAssembly`、`Qp`、`Reassembly` 与 `Lu`；拟合后的 source Modified field 和 final ordinary
+  field 均可只读评估。普通与各向异性端到端 probe 的源/重建 matrix hash 精确一致，LOQO
+  objective、source/final field 和 LU residual 通过 T04 分层阈值。
+
+T24 没有把显式 reconstruction 误报成冻结公开 API 自动行为，也没有开始 T25 Lajaunie 的
+reference/increment/iso-value 模型入口。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、

@@ -1,4 +1,5 @@
-//! Ordinary linear and inequality/QP Single Surface fitting and evaluation.
+//! Ordinary linear, inequality/QP, and restricted-range Single Surface fitting
+//! and evaluation.
 //!
 //! Sources at `290dbe0ab344f4258a4935f05cad0f153f0f69a4`:
 //! - `surfe_lib/single_surface.{h,cpp}` (`process_input_data`,
@@ -9,18 +10,22 @@
 //!   `remove_collocated_constraints`, `setup_basis_functions`, and
 //!   `check_interpolant`);
 //! - `surfe_lib/matrix_solver.{h,cpp}`
-//!   (`Quadratic_Predictor_Corrector` call chain);
+//!   (`Quadratic_Predictor_Corrector` and
+//!   `Quadratic_Predictor_Corrector_LOQO` call chains);
 //! - `surfe_lib/surfe_api.cpp` (`Surfe_API::ComputeInterpolant`).
 
 use std::fmt;
 
 use crate::{
-    assemble_system, solve_dense_partial_pivot_lu, solve_predictor_corrector_qp_with_options,
-    AnisotropicKernel, AnisotropyError, AssembledSystem, AssemblyConstraints, AssemblyError, Axis,
-    CollocationRemoval, ConstraintSystem, Constraints, DenseMatrix, DenseVector, Error,
-    FunctionalKernel, Interface, InterfaceGrouping, IsotropicKernel, KernelError, LinearFunctional,
+    assemble_system, reconstruct_from_qp_weights, solve_dense_partial_pivot_lu,
+    solve_loqo_qp_with_options, solve_predictor_corrector_qp_with_options, AnisotropicKernel,
+    AnisotropyError, AssembledSystem, AssemblyConstraints, AssemblyError, Axis,
+    BoundedConstraintSystem, CollocationRemoval, ConstraintSystem, Constraints, DenseMatrix,
+    DenseVector, Error, FunctionalKernel, Interface, InterfaceGrouping, IsotropicKernel,
+    KernelError, LayoutDof, LinearFunctional, LoqoOptions, LoqoSolution, LoqoSolveError,
     LuSolution, LuSolveError, ModelType, ModifiedKernel, Parameters, Point, QpOptions, QpSolution,
-    QpSolveError,
+    QpSolveError, ReconstructionAssemblyError, ReconstructionError, ReconstructionResult,
+    ReconstructionStage,
 };
 
 pub(crate) mod assembly;
@@ -814,4 +819,372 @@ fn evaluate_qp_gradient(
     Ok(std::array::from_fn(|component| {
         point_sums[component] + planar_sums[component] + tangent_sums[component] + 0.0
     }))
+}
+
+/// Failure from the complete restricted-range Single Surface path.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum SingleSurfaceRestrictedError {
+    WrongModel,
+    RestrictedRangeRequired,
+    Surfe(Error),
+    Anisotropy(AnisotropyError),
+    Basis(Error),
+    SourceAssembly(AssemblyError),
+    Loqo(LoqoSolveError),
+    Reconstruction(ReconstructionError),
+    Evaluation(ReconstructionAssemblyError),
+}
+
+impl SingleSurfaceRestrictedError {
+    /// Return the stable fit stage when the failure occurred after parameter
+    /// and Modified-Kernel construction.
+    pub const fn stage(&self) -> Option<ReconstructionStage> {
+        match self {
+            Self::SourceAssembly(_) => Some(ReconstructionStage::SourceAssembly),
+            Self::Loqo(_) => Some(ReconstructionStage::Qp),
+            Self::Reconstruction(error) => Some(error.stage()),
+            Self::WrongModel
+            | Self::RestrictedRangeRequired
+            | Self::Surfe(_)
+            | Self::Anisotropy(_)
+            | Self::Basis(_)
+            | Self::Evaluation(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for SingleSurfaceRestrictedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongModel => formatter.write_str("parameters do not select Single Surface"),
+            Self::RestrictedRangeRequired => {
+                formatter.write_str("Single Surface restricted range must be enabled")
+            }
+            Self::Surfe(error) | Self::Basis(error) => error.fmt(formatter),
+            Self::Anisotropy(error) => error.fmt(formatter),
+            Self::SourceAssembly(error) => write!(formatter, "source assembly failed: {error}"),
+            Self::Loqo(error) => write!(formatter, "restricted-range QP failed: {error}"),
+            Self::Reconstruction(error) => error.fmt(formatter),
+            Self::Evaluation(error) => write!(formatter, "field evaluation failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SingleSurfaceRestrictedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Surfe(error) | Self::Basis(error) => Some(error),
+            Self::Anisotropy(error) => Some(error),
+            Self::SourceAssembly(error) => Some(error),
+            Self::Loqo(error) => Some(error),
+            Self::Reconstruction(error) => Some(error),
+            Self::Evaluation(error) => Some(error),
+            Self::WrongModel | Self::RestrictedRangeRequired => None,
+        }
+    }
+}
+
+/// Exact lower/range/upper evidence for one frozen bounded-layout row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SingleSurfaceRestrictedBoundEvidence {
+    source_index: usize,
+    dof: LayoutDof,
+    lower: f64,
+    range: f64,
+}
+
+impl SingleSurfaceRestrictedBoundEvidence {
+    pub const fn source_index(&self) -> usize {
+        self.source_index
+    }
+
+    pub const fn dof(&self) -> &LayoutDof {
+        &self.dof
+    }
+
+    pub const fn lower(&self) -> f64 {
+        self.lower
+    }
+
+    pub const fn range(&self) -> f64 {
+        self.range
+    }
+
+    pub fn upper(&self) -> f64 {
+        self.lower + self.range
+    }
+}
+
+/// Immutable complete result of bounded Modified-Kernel fitting, LOQO, and
+/// the explicit frozen conversion to an ordinary-RBF linear system.
+#[derive(Debug)]
+pub struct SingleSurfaceRestrictedModel {
+    parameters: Parameters,
+    constraints: Constraints,
+    collocation_removal: CollocationRemoval,
+    interface_grouping: InterfaceGrouping,
+    ordinary_kernel: OrdinaryKernel,
+    modified_kernel: ModifiedKernel,
+    source_assembled: AssembledSystem,
+    loqo_solution: LoqoSolution,
+    bound_evidence: Vec<SingleSurfaceRestrictedBoundEvidence>,
+    reconstruction: ReconstructionResult,
+}
+
+impl SingleSurfaceRestrictedModel {
+    pub const fn parameters(&self) -> &Parameters {
+        &self.parameters
+    }
+
+    /// Source constraints after the four independent frozen sort/dedup passes.
+    pub const fn constraints(&self) -> &Constraints {
+        &self.constraints
+    }
+
+    pub const fn collocation_removal(&self) -> CollocationRemoval {
+        self.collocation_removal
+    }
+
+    pub const fn interface_grouping(&self) -> &InterfaceGrouping {
+        &self.interface_grouping
+    }
+
+    pub const fn source_assembled_system(&self) -> &AssembledSystem {
+        &self.source_assembled
+    }
+
+    pub const fn layout(&self) -> &crate::ConstraintLayout {
+        self.source_assembled.layout()
+    }
+
+    pub const fn modified_interpolation_matrix(&self) -> &DenseMatrix {
+        self.source_assembled.interpolation_matrix()
+    }
+
+    pub fn bounded_system(&self) -> &BoundedConstraintSystem {
+        match self.source_assembled.constraints() {
+            AssemblyConstraints::Bounded { system } => system,
+            _ => unreachable!("T24 stores only the bounded quadratic branch"),
+        }
+    }
+
+    pub const fn loqo_solution(&self) -> &LoqoSolution {
+        &self.loqo_solution
+    }
+
+    pub fn bound_evidence(&self) -> &[SingleSurfaceRestrictedBoundEvidence] {
+        &self.bound_evidence
+    }
+
+    pub const fn reconstruction(&self) -> &ReconstructionResult {
+        &self.reconstruction
+    }
+
+    /// Evaluate the final ordinary-RBF field produced by the second LU solve.
+    pub fn evaluate_scalar(&self, point: &Point) -> Result<f64, SingleSurfaceRestrictedError> {
+        self.evaluate_reconstructed_field(point)
+            .map(|field| field.scalar)
+    }
+
+    /// Evaluate the final ordinary-RBF gradient produced by the second LU solve.
+    pub fn evaluate_gradient(
+        &self,
+        point: &Point,
+    ) -> Result<[f64; 3], SingleSurfaceRestrictedError> {
+        self.evaluate_reconstructed_field(point)
+            .map(|field| field.gradient)
+    }
+
+    pub fn evaluate_scalars(
+        &self,
+        points: &[Point],
+    ) -> Result<Vec<f64>, SingleSurfaceRestrictedError> {
+        points
+            .iter()
+            .map(|point| self.evaluate_scalar(point))
+            .collect()
+    }
+
+    pub fn evaluate_gradients(
+        &self,
+        points: &[Point],
+    ) -> Result<Vec<[f64; 3]>, SingleSurfaceRestrictedError> {
+        points
+            .iter()
+            .map(|point| self.evaluate_gradient(point))
+            .collect()
+    }
+
+    /// Evaluate the bounded source Modified-Kernel field before reconstruction.
+    pub fn evaluate_modified_scalar(
+        &self,
+        point: &Point,
+    ) -> Result<f64, SingleSurfaceRestrictedError> {
+        self.evaluate_modified_field(point)
+            .map(|field| field.scalar)
+    }
+
+    /// Evaluate the bounded source Modified-Kernel gradient before reconstruction.
+    pub fn evaluate_modified_gradient(
+        &self,
+        point: &Point,
+    ) -> Result<[f64; 3], SingleSurfaceRestrictedError> {
+        self.evaluate_modified_field(point)
+            .map(|field| field.gradient)
+    }
+
+    fn evaluate_modified_field(
+        &self,
+        point: &Point,
+    ) -> Result<crate::model::reconstruct::FieldValue, SingleSurfaceRestrictedError> {
+        evaluate_layout_field(
+            self.source_assembled.layout(),
+            &self.constraints,
+            &self.parameters,
+            self.loqo_solution.weights(),
+            FunctionalKernel::Modified(&self.modified_kernel),
+            point,
+        )
+    }
+
+    fn evaluate_reconstructed_field(
+        &self,
+        point: &Point,
+    ) -> Result<crate::model::reconstruct::FieldValue, SingleSurfaceRestrictedError> {
+        let mut parameters = self.parameters.clone();
+        parameters.use_restricted_range = false;
+        evaluate_layout_field(
+            self.reconstruction.layout(),
+            self.reconstruction.reconstructed_constraints(),
+            &parameters,
+            self.reconstruction.lu_solution().weights(),
+            self.ordinary_kernel.functional(),
+            point,
+        )
+    }
+}
+
+/// Fit the complete Single Surface restricted-range path with the source LOQO
+/// defaults, then explicitly execute the frozen reconstruction body.
+pub fn fit_single_surface_restricted(
+    constraints: &Constraints,
+    parameters: &Parameters,
+) -> Result<SingleSurfaceRestrictedModel, SingleSurfaceRestrictedError> {
+    fit_single_surface_restricted_with_options(constraints, parameters, LoqoOptions::default())
+}
+
+/// Fit the complete restricted path with an explicit safety-only LOQO cap.
+pub fn fit_single_surface_restricted_with_options(
+    constraints: &Constraints,
+    parameters: &Parameters,
+    options: LoqoOptions,
+) -> Result<SingleSurfaceRestrictedModel, SingleSurfaceRestrictedError> {
+    if parameters.model_type != ModelType::SingleSurface {
+        return Err(SingleSurfaceRestrictedError::WrongModel);
+    }
+    if !parameters.use_restricted_range {
+        return Err(SingleSurfaceRestrictedError::RestrictedRangeRequired);
+    }
+
+    let mut constraints = constraints.clone();
+    let collocation_removal = constraints.remove_collocated();
+    let interface_grouping = constraints
+        .interface_grouping()
+        .ok_or(SingleSurfaceRestrictedError::Surfe(Error::NoInterfaceData))?;
+    let ordinary_kernel = OrdinaryKernel::from_parameters(parameters, &constraints)
+        .map_err(SingleSurfaceRestrictedError::Anisotropy)?;
+    let interface_point_lists = interface_point_lists(&constraints, &interface_grouping);
+    let modified_kernel = ordinary_kernel
+        .modified(&interface_point_lists)
+        .map_err(SingleSurfaceRestrictedError::Basis)?;
+    let source_assembled = assemble_system(
+        &constraints,
+        parameters,
+        FunctionalKernel::Modified(&modified_kernel),
+    )
+    .map_err(SingleSurfaceRestrictedError::SourceAssembly)?;
+    let bounded = match source_assembled.constraints() {
+        AssemblyConstraints::Bounded { system } => system,
+        _ => unreachable!("restricted Single Surface must assemble the bounded branch"),
+    };
+    let loqo_solution = solve_loqo_qp_with_options(
+        source_assembled.interpolation_matrix(),
+        bounded.matrix(),
+        bounded.lower(),
+        bounded.range(),
+        options,
+    )
+    .map_err(SingleSurfaceRestrictedError::Loqo)?;
+    let bound_evidence = source_assembled
+        .layout()
+        .dofs()
+        .iter()
+        .take(source_assembled.layout().constraint_dof_count())
+        .cloned()
+        .enumerate()
+        .map(|(source_index, dof)| SingleSurfaceRestrictedBoundEvidence {
+            source_index,
+            dof,
+            lower: bounded
+                .lower()
+                .get(source_index)
+                .expect("bounded assembly lower vector matches source layout"),
+            range: bounded
+                .range()
+                .get(source_index)
+                .expect("bounded assembly range vector matches source layout"),
+        })
+        .collect();
+    let reconstruction = reconstruct_from_qp_weights(
+        &constraints,
+        parameters,
+        &source_assembled,
+        loqo_solution.weights(),
+        FunctionalKernel::Modified(&modified_kernel),
+        ordinary_kernel.functional(),
+        &[],
+    )
+    .map_err(SingleSurfaceRestrictedError::Reconstruction)?;
+
+    Ok(SingleSurfaceRestrictedModel {
+        parameters: parameters.clone(),
+        constraints,
+        collocation_removal,
+        interface_grouping,
+        ordinary_kernel,
+        modified_kernel,
+        source_assembled,
+        loqo_solution,
+        bound_evidence,
+        reconstruction,
+    })
+}
+
+fn evaluate_layout_field(
+    layout: &crate::ConstraintLayout,
+    constraints: &Constraints,
+    parameters: &Parameters,
+    weights: &DenseVector,
+    kernel: FunctionalKernel<'_>,
+    point: &Point,
+) -> Result<crate::model::reconstruct::FieldValue, SingleSurfaceRestrictedError> {
+    let functionals = layout
+        .dofs()
+        .iter()
+        .take(layout.constraint_dof_count())
+        .map(|dof| crate::assembly::functional_for_dof(dof, constraints))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ReconstructionAssemblyError::from)
+        .map_err(SingleSurfaceRestrictedError::Evaluation)?;
+    crate::model::reconstruct::evaluate_field(
+        layout,
+        constraints,
+        parameters,
+        &functionals,
+        weights,
+        kernel,
+        point,
+    )
+    .map_err(SingleSurfaceRestrictedError::Evaluation)
 }

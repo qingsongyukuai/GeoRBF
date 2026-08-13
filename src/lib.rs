@@ -56,8 +56,11 @@ pub use model::reconstruct::{
 };
 pub use model::single_surface::{
     fit_single_surface_inequality, fit_single_surface_inequality_with_options,
-    fit_single_surface_linear, SingleSurfaceInequalityError, SingleSurfaceInequalityEvidence,
-    SingleSurfaceInequalityModel, SingleSurfaceLinearError, SingleSurfaceLinearModel,
+    fit_single_surface_linear, fit_single_surface_restricted,
+    fit_single_surface_restricted_with_options, SingleSurfaceInequalityError,
+    SingleSurfaceInequalityEvidence, SingleSurfaceInequalityModel, SingleSurfaceLinearError,
+    SingleSurfaceLinearModel, SingleSurfaceRestrictedBoundEvidence, SingleSurfaceRestrictedError,
+    SingleSurfaceRestrictedModel,
 };
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{

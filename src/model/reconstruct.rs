@@ -858,12 +858,12 @@ fn point_for_ref(
 }
 
 #[derive(Clone, Copy)]
-struct FieldValue {
-    scalar: f64,
-    gradient: [f64; 3],
+pub(crate) struct FieldValue {
+    pub(crate) scalar: f64,
+    pub(crate) gradient: [f64; 3],
 }
 
-fn evaluate_field(
+pub(crate) fn evaluate_field(
     layout: &ConstraintLayout,
     _constraints: &Constraints,
     parameters: &Parameters,
