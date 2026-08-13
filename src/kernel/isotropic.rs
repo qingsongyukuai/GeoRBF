@@ -146,7 +146,6 @@ impl IsotropicKernel {
         if self.kind == RbfKernel::Linear {
             return Err(KernelError::LinearDerivativeUnavailable);
         }
-
         let (radius, deltas) = radius_and_deltas(first, second);
         if self.kind == RbfKernel::WendlandC2 && radius > self.parameter {
             return Ok(0.0);
@@ -212,6 +211,13 @@ impl IsotropicKernel {
     ) -> Result<f64, KernelError> {
         if self.kind == RbfKernel::Linear {
             return Err(KernelError::LinearDerivativeUnavailable);
+        }
+        if axis_index(first_axis) > axis_index(second_axis) {
+            // Frozen `dyx`, `dzx`, and `dzy` call `dxy`, `dxz`, and `dyz`
+            // rather than recomputing the symmetric expression with reversed
+            // multiplication order. That order is observable at one ULP in
+            // complete Vector Field Hessian matrices.
+            return self.mixed_second_derivative(first, second, second_axis, first_axis);
         }
 
         let (radius, deltas) = radius_and_deltas(first, second);

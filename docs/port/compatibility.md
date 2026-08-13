@@ -594,7 +594,31 @@ T26 没有开始 Continuous Property 的可达 RHS/field 行为；这些仍严�
   `0x1.ep-50`；两个见证点的 scalar/gradient 通过 T04 分层阈值，公开 API 与直接模型结果逐
   bit 相同。
 
-T27 没有开始 Vector Field 的 Planar Hessian、势函数或梯度模型；这些仍严格归固定后继 T28。
+T27 没有开始 Vector Field 的 Planar Hessian、势函数或梯度模型；这些由 T28 完成。
+
+## T28 Vector Field Planar Hessian、势函数与梯度
+
+- 冻结 `Vector_Field` 的稳定可达输入只有清洗后的 Planar：每点严格按 x/y/z 三个导数
+  degree of freedom 排列，矩阵块为 `RBFKernel::basis_planar_planar` 混合 Hessian，RHS 为对应
+  normal 三分量。`get_method_parameters` 强制 linear、ordinary、`n_poly_terms=0`；interface、
+  inequality、tangent 及 polynomial、smoothing、restricted-range、Greedy 配置虽可进入输入
+  快照或清洗流程，却不产生 matrix、RHS 或 field 项。
+- ordinary isotropic 八个具备一、二阶导数的核与全局各向异性核沿用 T12/T14；Linear 的
+  Hessian 调用保持冻结 `-666` 的类型化 kernel error。非空系统按 T18 partial-pivot LU 实际
+  尝试求解，保存 matrix、RHS、weights、pivot 与 residual 证据。冻结 C++ golden 固定了多方向
+  Planar 的完整矩阵 hash、RHS、势函数与梯度；Hessian 同时通过对称性与有限差分三角验证。
+- 势函数严格按 Planar 顺序和 x/y/z 分量累加 `weight * basis_pt_planar_*`；梯度以相同分量顺序
+  累加 Hessian 行。单点和批量 API 都在不可变模型上求值，训练点梯度复现输入 normal，并与
+  冻结 public API 的代表查询一致。病态或非唯一系统的权重只作为诊断，不要求跨 Eigen/Rust
+  逐位相同；完整 matrix/RHS、后验残差和预测场按 T04 规则比较。
+- 冻结空 Planar 路径会成功建立 0x0 系统并返回零势函数/零梯度，因此 Rust 显式保存“无需 LU”
+  的成功状态；冻结代码中虽声明 `NoPlanarData`，活动调用链并未抛出它。单 Planar cubic 会实际
+  进入 LU 后失败，归类为 `LinearSolverFailure`；各向异性单点则在 basis setup 阶段归类为
+  insufficient planars。GeoRBF 没有以预检改写这些先后关系。
+- Gaussian golden 暴露了非对角 Hessian 别名因反向乘法顺序产生的一 ULP 差异；Rust 将
+  `dyx/dzx/dzy` 规范到冻结 `dxy/dxz/dyz` 路径，既保持解析对称性，也恢复完整矩阵逐 bit parity。
+  T28 不加入 curl、divergence 或额外 Vector Field 能力；安全 Builder 与统一 FittedModel 仍归
+  固定后继 T29。
 
 ## 数值行为
 

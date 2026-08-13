@@ -36,6 +36,7 @@ include = [
     "/tests/lajaunie.rs",
     "/tests/stratigraphic.rs",
     "/tests/continuous_property.rs",
+    "/tests/vector_field.rs",
     "/tests/spatial.rs",
 ]
 

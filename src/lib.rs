@@ -76,6 +76,7 @@ pub use model::stratigraphic::{
     StratigraphicLayerRelationEvidence, StratigraphicModel, StratigraphicRestrictedBoundEvidence,
     StratigraphicRestrictedError, StratigraphicRestrictedModel,
 };
+pub use model::vector_field::{fit_vector_field, VectorFieldError, VectorFieldModel};
 pub use ordering::{collocated, compare_points, sort_values_with_indices};
 pub use parameters::{
     Axis, DerivativePoint, FirstDerivative, InputParameters, InternalParameters, ModelType,
