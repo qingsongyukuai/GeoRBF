@@ -6,7 +6,7 @@
 //! cleaning/grouping, spatial helpers, fixed-order polynomial bases, and
 //! isotropic radial kernels, frozen global anisotropy, modified kernels, and
 //! model-independent linear functionals plus deterministic five-model
-//! row/column layouts and dense system assembly.
+//! row/column layouts, dense system assembly, and partial-pivot LU solving.
 //! Mathematical and modelling modules are added in the dependency order fixed
 //! by the port plan.
 
@@ -21,6 +21,7 @@ mod model;
 mod ordering;
 mod parameters;
 mod polynomial;
+mod solver;
 mod spatial;
 
 pub use assembly::{
@@ -51,6 +52,11 @@ pub use parameters::{
     RADIANS_TO_DEGREES,
 };
 pub use polynomial::{LagrangianPolynomialBasis, PolynomialBasis, PolynomialOrder};
+pub use solver::{
+    solve_dense_partial_pivot_lu, solve_partial_pivot_lu, validate_lu_system,
+    LuFactorizationEvidence, LuResidualEvidence, LuSolution, LuSolveError, LuSolveErrorKind,
+    LuValidation,
+};
 pub use spatial::{
     average_nearest_neighbour_distance, bounds, closest_to_distance_index, constraints_to_points,
     distance_between_points, extremal_point_indices, farthest_from_other_set_index,

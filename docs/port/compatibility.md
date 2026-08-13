@@ -311,6 +311,33 @@ T17 冻结 probe 对五模型普通路径、Single/Stratigraphic 普通 QP、三
 全部精确匹配，并另行检查标签、分区、P/PT/0、符号、数值对称性和 smoothing 边界。
 本任务不求解系统，不宣称 T18–T20 solver 或 T32 全局 parity 已完成。
 
+## T18 partial-pivot LU 与后验判定
+
+- `Linear_LU_decomposition::validate_matrix_systems` 只检查 interpolation matrix 是否全部
+  有限；冻结模型路径不调用这个函数。`solve` 先检查 RHS 行数，再无条件调用
+  `partialPivLu().solve`，且只因最终 weights 非有限而返回 `false`。debug-only 的 condition
+  number 输出不参与接受/拒绝，`check_solution` 只打印 relative L2 residual 并恒定返回
+  `true`。
+- Rust 对动态小矩阵保留冻结 Eigen 的 unblocked partial-pivot 控制流：每列选择首个最大
+  绝对值主元、交换整行、以 `a -= l*u` 次序更新尾块，并按 column-major dynamic vector
+  路径依次更新 UnitLower/Upper RHS。输出保留 row transpositions、Eigen permutation indices、
+  packed LU、pivot 值和首个 exact-zero pivot 作为可审查证据。
+- 不以 condition number 或 pivot 大小预拒绝。3×3 Hilbert 系统实际进入求解并与冻结
+  weights/pivots/packed LU 逐 bit 一致。冻结 Eigen 的 Upper solve 在当前 RHS 分量精确为零时
+  跳过除法，因此 `[[1,2],[2,4]]/[3,6]` 虽有 exact-zero pivot，仍产生有限 `[3,0]`、零
+  residual 并成功；Rust 忠实保留这一可观察的非唯一有限解语义。相同矩阵配不一致 RHS
+  会在尝试后产生非有限 weights，并映射为 `SingularSystem` 与外层
+  `Error::LinearSolverFailure`。
+- 非有限 matrix/RHS 仍执行冻结式 factorization/solve 以保存 `attempted=true` 与 pivot
+  evidence，随后分别稳定分类为 `NonFiniteMatrix`/`NonFiniteRightHandSide`；非法 storage、
+  空系统、非方阵和 RHS 维数不符在 Rust 边界安全拒绝且不复制 Eigen release assertion/UB。
+  `surfe_matrix_system_valid` 与完整 safe preflight 被分开暴露，避免把强化输入检查误写成
+  冻结验证语义。
+- 有限 weights 后计算 L2、relative L2、L-infinity residual 与 scale-aware backward error；
+  接受门槛为 `64 * EPSILON * n`。这是求解后的 residual/constraint-feasibility 判定，不是
+  条件数门槛；失败仍保留 candidate weights 和 residual evidence。良态、Hilbert、奇异一致
+  与确定性对角占优系统均通过。T18 不实现 T19/T20 的 QP/LOQO。
+
 ## 数值行为
 
 核、两点导数、混合 Hessian、anisotropy、Modified Kernel、矩阵/RHS、标量场、
